@@ -78,6 +78,67 @@ def extract_patch_tokens(model, x):
     Hp, Wp = H // patch_size, W // patch_size
     return pt, Hp, Wp, patch_size
 
+def patch_to_grid(pt, Hp, Wp): #patch 토큰을 grid로 펼침
+    # pt: [P,D] -> [1,D,Hp,Wp]
+    D = pt.shape[-1]
+    return pt.view(Hp, Wp, D).permute(2, 0, 1).unsqueeze(0)
+
+def cosine_change_map_from_grids(gr, gq, eps=1e-6): #patch gird를 사용해 코사인 유사도 gird를 만듬
+    # gr,gq: [1,D,h,w] -> [1,1,h,w]
+    gr = F.normalize(gr, dim=1, eps=eps)
+    gq = F.normalize(gq, dim=1, eps=eps)
+    cos = (gr * gq).sum(dim=1, keepdim=True)
+    return 1.0 - cos  # cosine distance
+
+def multiscale_token_pool_change_map(
+    q_tokens, r_tokens, Hp, Wp,
+    pool_ks=(1, 2, 4),
+    pool_type="avg",
+    agg="median",
+):
+    """
+    q_tokens, r_tokens: [P, D]
+    returns: fused change map [Hp, Wp] (torch tensor on same device)
+    """
+    gq = patch_to_grid(q_tokens, Hp, Wp)  # [1,D,Hp,Wp]
+    gr = patch_to_grid(r_tokens, Hp, Wp)
+
+    maps = []
+    for k in pool_ks:
+        if k == 1:
+            qk, rk = gq, gr
+        else:
+            if pool_type == "avg":
+                qk = F.avg_pool2d(gq, kernel_size=k, stride=k)
+                rk = F.avg_pool2d(gr, kernel_size=k, stride=k)
+            elif pool_type == "max":
+                qk = F.max_pool2d(gq, kernel_size=k, stride=k)
+                rk = F.max_pool2d(gr, kernel_size=k, stride=k)
+            else:
+                raise ValueError("pool_type must be 'avg' or 'max'")
+
+        cm = cosine_change_map_from_grids(rk, qk)  # [1,1,h,w]
+
+        # back to original token grid size
+        cm = F.interpolate(
+            cm, size=(Hp, Wp),
+            mode="bilinear", align_corners=False
+        )
+        maps.append(cm)
+
+    stack = torch.cat(maps, dim=1)  # [1,S,Hp,Wp]
+
+    if agg == "median":
+        fused = stack.median(dim=1).values          # [1,Hp,Wp]
+    elif agg == "top2mean":
+        vals, _ = torch.sort(stack, dim=1, descending=True)
+        fused = vals[:, :2].mean(dim=1)             # [1,Hp,Wp]
+    elif agg == "mean":
+        fused = stack.mean(dim=1)                   # [1,Hp,Wp]
+    else:
+        raise ValueError("agg must be 'median'/'top2mean'/'mean'")
+
+    return fused[0]  # [Hp, Wp]
 
 # -------------------------
 # 4) change map 계산 (cosine distance 권장)
@@ -101,31 +162,6 @@ def patch_distance_map(q_tokens, r_tokens, Hp, Wp, metric="cosine"):
     return dist_map
 
 
-# -------------------------
-# 5) robust aggregation (mean/median/trimmed mean)
-# -------------------------
-def aggregate_maps(maps, mode="mean", trim_ratio=0.1): #여러 ref의 dist map을 합치는 함수
-    """
-    maps: list of [Hp,Wp] torch tensors
-    returns: [Hp,Wp]
-    """
-    stack = torch.stack(maps, dim=0)  # [N,Hp,Wp]
-    if mode == "mean":
-        return stack.mean(dim=0)
-    if mode == "median":
-        return stack.median(dim=0).values
-    if mode == "trimmed_mean":
-        # 상하 trim_ratio 만큼 잘라내고 평균
-        N = stack.shape[0]
-        k = int(N * trim_ratio)
-        if N < 3 or k == 0:
-            return stack.mean(dim=0)
-        sorted_stack, _ = torch.sort(stack, dim=0)  # [N,Hp,Wp]
-        trimmed = sorted_stack[k:N-k, ...]
-        return trimmed.mean(dim=0)
-    raise ValueError("mode must be mean/median/trimmed_mean")
-
-
 
 # -------------------------
 # 6) change map에 대한 후처리
@@ -139,7 +175,7 @@ def postprocess_change_map(change_map_hw,  top_p=None):
     change_map_hw: [H,W] float numpy
     """
     m = change_map_hw.copy() # 528 528
-    m = constant_threshold_keep_value(m,0.30) # constamt threshhold
+    m = constant_threshold_keep_value(m,0.10) # constamt threshhold
 
     if top_p is not None:
         # 상위 p%만 남기기 (0~100)
@@ -150,7 +186,6 @@ def postprocess_change_map(change_map_hw,  top_p=None):
     print(m.shape)
 
     return m
-
 
 # -------------------------
 # heatmap overlay 시각화
@@ -262,77 +297,65 @@ def expand_bbox_xyxy(bbox, scale=2.0, W=518, H=518): # changemap으로 찾은 ro
 # ------------------------- 메인 함수
 def compute_change_map(
     query_path,
-    ref_paths,
+    ref_path,                
     model_name="dinov2_vitb14",
-    metric="cosine",
-    agg="mean",
     img_size=518,
-    blur_ksize=0,
-    morph_ksize=0,
     top_p=None,
+    ms_pool_ks=(1,2,4),
+    ms_pool_type="avg",
+    ms_agg="median",
 ):
+
     model, device = load_dinov2(model_name=model_name)
     tfm = build_transform(img_size=img_size)
 
-    # loag q img
+    # load q/r
     q_pil = read_image_rgb(query_path)
-    q = tfm(q_pil).unsqueeze(0).to(device) #resize and make tensor
+    q = tfm(q_pil).unsqueeze(0).to(device)
 
-    # encoding
+    r_pil = read_image_rgb(ref_path)
+    r = tfm(r_pil).unsqueeze(0).to(device)
+
     with torch.no_grad():
-        q_tokens, Hp, Wp , patch_size = extract_patch_tokens(model, q)
+        q_tokens, Hp, Wp, patch_size = extract_patch_tokens(model, q)
+        r_tokens, Hp2, Wp2, _        = extract_patch_tokens(model, r)
+        assert (Hp, Wp) == (Hp2, Wp2)
 
-        # ref loop
-        maps = []
-        last_r_pil = None
-        for rp in ref_paths:
-            r_pil = read_image_rgb(rp)
-            last_r_pil = r_pil
+        fused = multiscale_token_pool_change_map(
+            q_tokens, r_tokens, Hp, Wp,
+            pool_ks=ms_pool_ks,
+            pool_type=ms_pool_type,
+            agg=ms_agg
+        )  # [Hp,Wp] torch
 
-            r = tfm(r_pil).unsqueeze(0).to(device)
-            r_tokens, Hp2, Wp2, _  = extract_patch_tokens(model, r)
-            assert (Hp, Wp) == (Hp2, Wp2)
-
-            dm = patch_distance_map(q_tokens, r_tokens, Hp, Wp, metric=metric)
-            maps.append(dm)
-
-        fused = aggregate_maps(maps, mode=agg)  # 여러개 ref의 distance map을 합침
-
-
-        # patch 값 그대로 P×P 영역에 복제 (patch 안의 distance가 상수값)
-        up = fused.repeat_interleave(patch_size, dim=0).repeat_interleave(patch_size, dim=1)  
-
-        H, W = img_size, img_size
-        H0, W0 = up.shape
-        pad_h = max(0, H - H0)
-        pad_w = max(0, W - W0)
-
-        if pad_h > 0 or pad_w > 0:
-            up = F.pad(up[None, None], (0, pad_w, 0, pad_h), mode="replicate")[0, 0]
-
-        fused_up = up[:H, :W].detach().cpu().numpy()  # [518,518]
-
+        # === 업샘플 방식도 개선 (repeat_interleave 말고 interpolate 추천)
+        fused_up = F.interpolate(
+            fused.unsqueeze(0).unsqueeze(0),  # [1,1,Hp,Wp]
+            size=(img_size, img_size),
+            mode="nearest"                    # patch 블록 유지
+        )[0,0].detach().cpu().numpy()
 
     # 5) postprocess
+    raw_map = fused_up.copy()
     fused_up = postprocess_change_map(
         fused_up,
         top_p=top_p
     )
 
-    # fused map(518x518) -> 원본 크기(H0,W0)로 확대 (섞지 않게 nearest) & overlay
-    q_rgb0 = np.array(q_pil)
-    r_rgb0 = np.array(last_r_pil)
+    print("[RAW(pre)] min/mean/max =", raw_map.min(), raw_map.mean(), raw_map.max())
+    print("[RAW(pre)] p95/p99      =", np.percentile(raw_map,95), np.percentile(raw_map,99))
+    print("[POST]     nonzero      =", np.count_nonzero(fused_up))
 
     q_rgb0 = np.array(q_pil)
-    r_rgb0 = np.array(last_r_pil)
+    r_rgb0 = np.array(r_pil)
 
-    # fused_up(518) -> 시각화
     q_rgb_518 = np.array(transforms.CenterCrop(img_size)(
                 transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC)(q_pil)
             ))
     r_rgb_518 = np.array(transforms.CenterCrop(img_size)(
-                transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC)(last_r_pil)
+                transforms.Resize(img_size, interpolation=transforms.InterpolationMode.BICUBIC)(r_pil)
             ))
+
 
     overlay_q = make_overlay(q_rgb_518, fused_up, alpha=0.20)
     overlay_r = make_overlay(r_rgb_518, fused_up, alpha=0.20)
@@ -341,7 +364,7 @@ def compute_change_map(
     return fused_up, overlay_q, overlay_r, score, q_rgb_518 , r_rgb_518
 
 # Clip 
-@torch.no_grad()
+@torch.no_grad() #text to embed
 def clip_text_embeds(clip_model, tokenizer, prompts, device):
     """
     prompts: list[str]
@@ -352,134 +375,157 @@ def clip_text_embeds(clip_model, tokenizer, prompts, device):
     txt = F.normalize(txt, dim=-1)
     return txt
 
-@torch.no_grad()
-def clip_patch_tokens(clip_model, pil_img, preprocess, device):
-    """
-    OpenCLIP ViT visual에서 patch tokens를 안정적으로 추출.
-    Returns:
-      patch: [P, D]   (CLS 제거)
-      Hp, Wp, patch_size, (H, W)
-    """
-    x = preprocess(pil_img).unsqueeze(0).to(device)  # [1,3,H,W] usually 224
-    H, W = x.shape[-2], x.shape[-1]
-
-    visual = clip_model.visual
-
-    # --- ViT 계열만 지원 (ViT-B-16, ViT-L-14 등)
-    if not (hasattr(visual, "conv1") and hasattr(visual, "transformer")):
-        raise RuntimeError("This extractor expects a ViT-based visual backbone (with conv1/transformer).")
-
-    # 1) patch embedding: conv1
-    # conv1: [out_dim, 3, patch, patch], stride=patch
-    x = visual.conv1(x)  # [1, width, grid_h, grid_w]
-    grid_h, grid_w = x.shape[-2], x.shape[-1]
-
-    x = x.reshape(x.shape[0], x.shape[1], grid_h * grid_w)  # [1, width, P]
-    x = x.permute(0, 2, 1)  # [1, P, width]
-
-    # 2) prepend CLS
-    cls = visual.class_embedding.to(x.dtype)
-    cls = cls + torch.zeros(x.shape[0], 1, x.shape[-1], dtype=x.dtype, device=x.device)  # [1,1,width]
-    x = torch.cat([cls, x], dim=1)  # [1, 1+P, width]
-
-    # 3) add positional embedding
-    pos = visual.positional_embedding.to(x.dtype)
-    if pos.shape[0] != x.shape[1]:
-        # 일부 구현에서 입력 해상도가 다르면 pos_emb가 맞지 않을 수 있음.
-        # openai pretrained는 보통 224 고정이므로 여기로 오면 preprocess 사이즈를 확인해야 함.
-        raise RuntimeError(f"Positional embedding length mismatch: pos {pos.shape[0]} vs tokens {x.shape[1]}. "
-                           f"Check preprocess resolution.")
-    x = x + pos
-
-    # 4) layer norm pre (있으면)
-    if hasattr(visual, "ln_pre") and visual.ln_pre is not None:
-        x = visual.ln_pre(x)
-
-    # 5) transformer (open_clip은 보통 [seq, batch, dim] 형태를 씀)
-    x = x.permute(1, 0, 2)  # [1+P, 1, width]
-    x = visual.transformer(x)
-    x = x.permute(1, 0, 2)  # [1, 1+P, width]
-
-    # 6) final norm (있으면)
-    if hasattr(visual, "ln_post") and visual.ln_post is not None:
-        x = visual.ln_post(x)
-
-    # x: [1,1+P,D] (D=width or proj 이후 dim은 모델마다 다름)
-    tok = x[0]        # [1+P, D]
-    patch = tok[1:]   # [P, D]
-
-    if hasattr(visual, "proj") and visual.proj is not None:
-        # visual.proj: [width, embed_dim] or Linear-like
-        if isinstance(visual.proj, torch.Tensor):
-            patch = patch @ visual.proj  # [P, embed_dim]
-        else:
-            patch = visual.proj(patch)   # [P, embed_dim]
-
-    patch = F.normalize(patch, dim=-1)
-
-    if hasattr(visual.conv1, "kernel_size"):
-        patch_size = int(visual.conv1.kernel_size[0])
-    else:
-        patch_size = 16
-
-    Hp, Wp = grid_h, grid_w  # 실제 grid
-    return patch, Hp, Wp, patch_size, (H, W)
-
-
-@torch.no_grad()
-def clip_roi_diff_scores(
-    clip_model, clip_preprocess,
-    q_rgb_518, r_rgb_518,
-    rois,
-    device=None,
-    min_side=8,
-    use_expand=True,
-    expand_scale=1.6
+def build_cpe_class_text_embeds( # 파손 감지 텍스트 임베딩 생성기
+    clip_model,
+    tokenizer,
+    device,
+    object_label="rack",
+    normal_state_words=None,
+    anomalous_state_words=None,
+    templates=None,
 ):
-    """
-    ROI마다 query/ref crop을 CLIP image embedding으로 비교.
-    Returns:
-      roi_scores: list of dict {id, score_clipdiff}
-    """
-    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-    H, W = q_rgb_518.shape[:2]
+    if normal_state_words is None:
+        normal_state_words = [
+            "intact", "undamaged", "no defect", "no crack", "no scratch",
+            "complete", "not broken", "clean surface"
+        ]
 
-    out = []
+    if anomalous_state_words is None:
+        anomalous_state_words = [
+            "broken", "cracked", "fractured", "chipped", "missing part",
+            "dented", "scratched", "torn", "bent", "deformed"
+        ]
+    if templates is None:
+        templates = [
+            "a close-up photo of an {obj} that is {state}",
+            "a photo of an {obj} with {state}",
+            "a detailed inspection photo of an {obj}, {state}",
+            "a product photo of an {obj}, {state}",
+        ]
 
-    for r in rois:
-        x0, y0, x1, y1 = r["bbox"]
-        roi_w = (x1 - x0)
-        roi_h = (y1 - y0)
-        roi_area_ratio = (roi_w * roi_h) / float(W * H + 1e-8)
+    def make_prompts(state_words):
+        ps = []
+        for st in state_words:
+            for tmp in templates:
+                ps.append(tmp.format(state=st, obj=object_label))
+        return ps
 
-        if use_expand:
-            if roi_area_ratio < 0.15:   # 전체의 15% 미만일 때만 확장
-                x0, y0, x1, y1 = expand_bbox_xyxy((x0, y0, x1, y1), scale=expand_scale, W=W, H=H)
-            
-        if (x1 - x0) < min_side or (y1 - y0) < min_side:
-            out.append({"id": r["id"], "score_clipdiff": 0.0})
-            continue
+    normal_prompts = make_prompts(normal_state_words)
+    anomal_prompts  = make_prompts(anomalous_state_words)
 
-        q_crop = q_rgb_518[y0:y1, x0:x1]
-        r_crop = r_rgb_518[y0:y1, x0:x1]
+    # normal / anomal --- prompt에 대한 평균 임베딩 추출 ------------------------
+    def avg_text_emb(prompts):
+        tokens = tokenizer(prompts).to(device)
+        txt = clip_model.encode_text(tokens)          # [K,D]
+        txt = F.normalize(txt, dim=-1)                # normalize each - 각각을 단위벡터로 만들기
+        t = txt.mean(dim=0)                           # [D] - 각 벡터의 평균
+        t = F.normalize(t, dim=-1)                    # normalize mean  - 다시 단위벡터로 만들기
+        return t
 
-        q_pil = Image.fromarray(q_crop)
-        r_pil = Image.fromarray(r_crop)
+    t_normal = avg_text_emb(normal_prompts)
+    t_anom   = avg_text_emb(anomal_prompts)
 
-        q_in = clip_preprocess(q_pil).unsqueeze(0).to(device)
-        r_in = clip_preprocess(r_pil).unsqueeze(0).to(device)
+    debug = {"normal_prompts": normal_prompts, "anomal_prompts": anomal_prompts}
 
-        q_emb = F.normalize(clip_model.encode_image(q_in), dim=-1)
-        r_emb = F.normalize(clip_model.encode_image(r_in), dim=-1)
+    return t_normal, t_anom, debug
 
-        cos = (q_emb * r_emb).sum(dim=-1).item()
-        score = float(1.0 - cos)  # 0(유사) ~ 2(반대), 보통 0~1
+def apply_sliding_mask(rgb_u8, x0, y0, x1, y1):
 
-        out.append({"id": r["id"], "score_clipdiff": score})
+    H, W, _ = rgb_u8.shape
+    out = rgb_u8.copy()
+    out[:] = 0
+    out[y0:y1, x0:x1, :] = rgb_u8[y0:y1, x0:x1, :]
 
     return out
 
+def extract_crop(rgb_u8, x0, y0, x1, y1):
+    return rgb_u8[y0:y1, x0:x1, :]
 
+
+@torch.no_grad()
+def clip_neighbor_window_encodings_by_patch(
+    clip_model,
+    clip_preprocess,
+    rgb_u8,                 # uint8 input img
+    patch_size_px=16,        # model patch size
+    win_patches=(3, 3),      # patch nxn window
+    device=None
+):
+
+    device = device or ("cuda" if torch.cuda.is_available() else "cpu")
+    H, W = rgb_u8.shape[:2]
+
+    Hp = H // patch_size_px
+    Wp = W // patch_size_px
+    H_eff = Hp * patch_size_px
+    W_eff = Wp * patch_size_px
+
+    win_ph, win_pw = win_patches
+
+    st_ph, st_pw = win_ph, win_pw
+
+    ys = list(range(0, Hp - win_ph + 1, st_ph))
+    xs = list(range(0, Wp - win_pw + 1, st_pw))
+
+    base = rgb_u8[:H_eff, :W_eff]
+
+    embs = []
+    bboxes = []
+
+    for py in ys:
+        row = []
+        for px in xs:
+            y0 = py * patch_size_px
+            x0 = px * patch_size_px
+            y1 = (py + win_ph) * patch_size_px
+            x1 = (px + win_pw) * patch_size_px
+
+            masked = extract_crop(base, x0, y0, x1, y1)
+            pil = Image.fromarray(masked)
+
+            x = clip_preprocess(pil).unsqueeze(0).to(device)
+            f = clip_model.encode_image(x)
+            f = F.normalize(f, dim=-1)  # [1,D]
+
+            row.append(f.squeeze(0).detach().cpu())
+            bboxes.append((x0, y0, x1, y1))
+        embs.append(torch.stack(row, dim=0))
+
+    embs = torch.stack(embs, dim=0)  # [Nh,Nw,D]
+    return embs, bboxes, (Hp, Wp), (H_eff, W_eff)
+
+@torch.no_grad()
+def p_anom_map_softmax2(
+    embs_hw_d, t_normal, t_anom,
+    clip_model=None,     
+    temp=1.0,
+    use_logit_scale=True, 
+    return_numpy=True
+):
+    device = t_normal.device
+    E = F.normalize(embs_hw_d.to(device), dim=-1)
+
+    sim_normal = (E * t_normal.view(1,1,-1)).sum(dim=-1)
+    sim_anom   = (E * t_anom.view(1,1,-1)).sum(dim=-1)
+
+    margin = sim_anom - sim_normal
+
+    if use_logit_scale:
+        assert clip_model is not None
+        logit_scale = clip_model.logit_scale.exp().clamp(max=100).item()
+        margin = margin * logit_scale
+
+    margin = margin / max(1e-8, float(temp))
+    p_map = torch.sigmoid(margin)
+
+    if return_numpy:
+        return (sim_normal.detach().cpu().numpy(),
+                sim_anom.detach().cpu().numpy(),
+                p_map.detach().cpu().numpy())
+    else:
+        return sim_normal, sim_anom, p_map
+
+    
 
 # ---- 시각화
 def draw_rois_on_image(rgb, rois, color=(0, 255, 0), thickness=2):
@@ -508,27 +554,64 @@ def draw_rois_on_image(rgb, rois, color=(0, 255, 0), thickness=2):
     return out
 
 
-if __name__ == "__main__":
-    query = "/home/choi/capston/zeroshot_scene_ad/data/renders_multicam_diff_1/1_change_l.png"
-    refs  = ["data/renders_multicam_diff_1/1.png"]
+def window_map_to_image_heatmap( #clip anmaly map 시각화
+    p_map,            # [Nh, Nw] numpy
+    bboxes,           # list[(x0,y0,x1,y1)], row-major
+    out_hw,            # (H,W) of original image
+):
+    """
+    returns:
+      heatmap: [H,W] float32
+    """
+    H, W = out_hw
+    heat = np.zeros((H, W), dtype=np.float32)
 
-    # 1) DINO change map
+    Nh, Nw = p_map.shape
+    assert len(bboxes) == Nh * Nw
+
+    idx = 0
+    for i in range(Nh):
+        for j in range(Nw):
+            x0, y0, x1, y1 = bboxes[idx]
+            val = float(p_map[i, j])
+
+            # 안전 clip
+            x0 = max(0, min(W, x0))
+            x1 = max(0, min(W, x1))
+            y0 = max(0, min(H, y0))
+            y1 = max(0, min(H, y1))
+
+            heat[y0:y1, x0:x1] = val
+            idx += 1
+
+    return heat
+
+def normalize_heatmap_for_vis(hm, eps=1e-8):
+    hm = hm.astype(np.float32)
+    hm = hm - hm.min()
+    hm = hm / (hm.max() + eps)
+    return hm
+
+
+if __name__ == "__main__":
+    query = "/home/choi/capston/zeroshot_scene_ad/data/make/reck_light.png"
+    ref   = "/home/choi/capston/zeroshot_scene_ad/data/make/rack_ref.png"
+
+    #DINO change map
     change_map, overlay_q, overlay_r, score, q_rgb_518, r_rgb_518 = compute_change_map(
         query_path=query,
-        ref_paths=refs,
-        metric="cosine",
-        agg="mean",
-        blur_ksize=7,
-        morph_ksize=3,
-        top_p=None,
+        ref_path=ref,
+        top_p=10,
+        ms_pool_ks=(1,2,4),
+        ms_pool_type="avg",
+        ms_agg="median",
     )
-    print("DINO score =", score)
 
     # 2) ROI (DINO only)
     rois = extract_rois_from_change_map(change_map, min_area=150)
     print("num rois (DINO):", len(rois))
 
-    # 3) CLIP ROI gate scoring
+    # ----------------------CLIP
     device = ("cuda" if torch.cuda.is_available() else "cpu")
 
     clip_model, clip_preprocess, clip_tokenizer, _ = load_openclip(
@@ -537,57 +620,60 @@ if __name__ == "__main__":
         device=device
     )
 
-    # 3-B) CLIP image-encoder 기반 ROI diff scoring
-    roi_clipdiff = clip_roi_diff_scores(
-        clip_model, clip_preprocess,
-        q_rgb_518=q_rgb_518,
-        r_rgb_518=r_rgb_518,
-        rois=rois,
+    t_normal, t_anom, dbg = build_cpe_class_text_embeds( #prompt 임베딩 추출
+        clip_model=clip_model,
+        tokenizer=clip_tokenizer,
         device=device,
-        use_expand=True,   
-        expand_scale=2.0
+        object_label="object"   
     )
-    print([d["score_clipdiff"] for d in roi_clipdiff])
 
-    clipdiff_map = {d["id"]: float(d["score_clipdiff"]) for d in roi_clipdiff}
-    for r in rois:
-        r["clipdiff"] = float(clipdiff_map.get(r["id"], 0.0))
+    embs, bboxes, (Hp, Wp), (H_eff, W_eff) = clip_neighbor_window_encodings_by_patch(
+        clip_model=clip_model,
+        clip_preprocess=clip_preprocess,
+        rgb_u8=q_rgb_518,
+        patch_size_px=16,
+        win_patches=(4, 4),
+        device=device
+    )
 
+    sim_n, sim_a, p_map = p_anom_map_softmax2(
+        embs_hw_d=embs,
+        t_normal=t_normal,
+        t_anom=t_anom,
+        clip_model=clip_model,   
+        temp=0.25,
+        use_logit_scale=True,
+        return_numpy=True
+    )
 
-    eps_clip = 0.01  # 시작 0.01~0.02 추천 (데이터 보며 조정)
-    if len(rois) >= 5:
-        dino_keep_thr = float(np.percentile([float(r["score"]) for r in rois], 80))
-    else:
-        dino_keep_thr = -1e9  # ROI 적으면 dino 예외처리 의미 없으니 사실상 clip만 봄
+    heat = window_map_to_image_heatmap(
+        p_map=p_map,
+        bboxes=bboxes,
+        out_hw=q_rgb_518.shape[:2]
+    )
+    heat_vis = normalize_heatmap_for_vis(heat)
+    clip_overlay_q = make_overlay(q_rgb_518, heat_vis, alpha=0.25)
 
-    keep_ids = set()
-    for r in rois:
-        cid = r["id"]
-        dino_s = float(r["score"])
-        clip_s = float(clipdiff_map.get(cid, 0.0))
+    # (옵션) DINO change_map이랑 곱해서 "변화영역에서만" CLIP anomaly 보기
+    fused = heat * (change_map > 0)
+    fused_vis = normalize_heatmap_for_vis(fused)
+    fused_overlay_q = make_overlay(q_rgb_518, fused_vis, alpha=0.25)
 
-        # clip이 거의 0인데 dino도 강하지 않으면 제거
-        if (clip_s < eps_clip) and (dino_s < dino_keep_thr):
-            continue
-        keep_ids.add(cid)
+    # ============================================================
+    # 6) 기존 시각화 + CLIP anomaly overlay 추가
+    # ============================================================
 
-    rois_filtered = [r for r in rois if r["id"] in keep_ids]
+    roi_vis = draw_rois_on_image(q_rgb_518, rois, color=(0,255,0), thickness=2)
 
-    print("eps_clip =", eps_clip, "dino_keep_thr =", dino_keep_thr)
-    print("rois before/after:", len(rois), "->", len(rois_filtered))
-
-
-    # 5) 시각화
-    roi_vis_all = draw_rois_on_image(q_rgb_518, rois)
-    r_roi_vis_all = draw_rois_on_image(r_rgb_518, rois)
-    roi_vis_keep = draw_rois_on_image(q_rgb_518, rois_filtered)
-
-
+    plt.figure(); plt.title("Query + ROI boxes (from DINO change_map)")
+    plt.imshow(roi_vis); plt.axis("off")
+    plt.figure(); plt.title("ref"); plt.imshow(r_rgb_518); plt.colorbar(); plt.axis("off")
     plt.figure(); plt.title("Change Map (DINO)"); plt.imshow(change_map); plt.colorbar(); plt.axis("off")
     plt.figure(); plt.title("Query + DINO heatmap"); plt.imshow(overlay_q); plt.axis("off")
-    plt.figure(); plt.title("Query + ROI bboxes (all)"); plt.imshow(roi_vis_all); plt.axis("off")
-    plt.figure(); plt.title("r + ROI bboxes (all)"); plt.imshow(r_roi_vis_all); plt.axis("off")
-    
-    plt.figure(); plt.title("Query + ROI bboxes (CLIP-filtered)"); plt.imshow(roi_vis_keep); plt.axis("off")
+
+    plt.figure(); plt.title("Query + CLIP-CPE anomaly (window) heatmap"); plt.imshow(clip_overlay_q); plt.axis("off")
+    plt.figure(); plt.title("Query + (DINO change >0) * CLIP anomaly"); plt.imshow(fused_overlay_q); plt.axis("off")
+
     plt.show()
+
 
