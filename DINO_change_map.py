@@ -1,8 +1,6 @@
 """
-
 input : ref (1개 또는 N개), query 이미지
 output : change map  + overlay vis + total change/anomaly score
-
 """
 
 import os
@@ -16,7 +14,6 @@ import matplotlib.pyplot as plt
 
 from PIL import Image
 import random
-import open_clip
 
 
 # ------------------------------------ model load
@@ -259,7 +256,7 @@ def extract_rois_from_change_map(
     rois = remove_inside_rois(rois, inside_thr=0.95)
     rois.sort(key=lambda r: r["score"], reverse=True)
 
-    return rois[:10]   # K=10 고정 (VLM 후보 수)
+    return rois[:5]   # K=10 고정 (VLM 후보 수)
 
 
 def expand_bbox_xyxy(bbox, scale=2.0, W=518, H=518): # changemap으로 찾은 roi영역의 2배를 sam roi로 사용
@@ -312,7 +309,7 @@ def compute_change_map(
     top_p=None,
     ms_pool_ks=(1,2,4),
     ms_pool_type="avg",
-    ms_agg="median",
+    ms_agg="top2mean",
 ):
 
     model, device = load_dinov2(model_name=model_name)
@@ -437,8 +434,6 @@ def make_pair_image_lr(
     return out
 
 
-
-
 def crop_xyxy(rgb, bbox):
     x0, y0, x1, y1 = bbox
     return rgb[y0:y1, x0:x1].copy()
@@ -461,6 +456,7 @@ def prepare_vlm_pairs_from_rois(
     for idx, r in enumerate(rois):
         bbox = r["bbox"]
         score = float(r.get("score", 0.0))
+        label = r['id']
 
         bbox_exp, used_scale, area_ratio = conditional_expand_bbox_xyxy(
             bbox, W=img_size, H=img_size,
@@ -479,16 +475,17 @@ def prepare_vlm_pairs_from_rois(
         )
 
         candidates.append({
+            "label" : label,
             "rank": idx,
             "score": score,
             "bbox": bbox,
             "bbox_exp": bbox_exp,
-            "pair_rgb": pair_rgb,   # VLM 입력용
+            "pair_rgb": pair_rgb,   
+            "qry_crop": qry_crop,
+            "ref_crop": ref_crop
         })
 
     return candidates
-
-
 
 
 # ---- 시각화
@@ -542,10 +539,10 @@ def visualize_vlm_pairs(candidates, max_show=10, cols=5, figsize=(18, 7)):
     plt.tight_layout()
 
 if __name__ == "__main__":
-    query = "/home/choi/capston/zeroshot_scene_ad/data/make/rack_broken.png"
-    ref   = "/home/choi/capston/zeroshot_scene_ad/data/make/rack_ref.png"
-
-    # 1) DINO change map
+    query = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/001/RGB/1_01.png"
+    ref   = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/001/RGB/2_01.png"
+    
+    #dino map
     change_map, overlay_q, overlay_r, score, q_rgb_518, r_rgb_518 = compute_change_map(
         query_path=query,
         ref_path=ref,
@@ -555,7 +552,7 @@ if __name__ == "__main__":
         ms_agg="top2mean",
     )
 
-    # ROI
+    # roi
     rois = extract_rois_from_change_map(change_map, min_area=150)
     print("num rois (DINO):", len(rois))
 
@@ -572,7 +569,7 @@ if __name__ == "__main__":
 
     print("num candidates:", len(candidates))
 
-    # VLM 입력 시각화
+    # vlm input vis
     visualize_vlm_pairs(candidates, max_show=10, cols=5)
 
     # 디버깅용 기존 시각화
