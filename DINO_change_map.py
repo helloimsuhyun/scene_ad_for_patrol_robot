@@ -197,43 +197,43 @@ def remove_inside_rois(rois, inside_thr=0.95):
 
     return keep
 
-def pick_local_maxima_topk(change_map, topk=3, k=3, neigh=11, min_dist=64):
-
+def pick_local_maxima_topk(change_map, topk=3, k=3, neigh=11, min_dist=96,
+                           min_percentile=90, abs_floor=0.0):
     cm = change_map.astype(np.float32)
-    H, W = cm.shape
-    k = k * 14 # patch size
+    k = k * 14
 
-    # 1) local energy map
     E = cv2.boxFilter(cm, -1, (k, k), normalize=False)
 
-    # 2) 로컬 최대 마스크: E == dilate(E) 이면 그 neighborhood에서 최대
-    neigh = neigh | 1  # 홀수 보장
-    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (neigh, neigh)) # neigh , neigh 의 범위
-    E_dil = cv2.dilate(E, kernel) # 그중 최댓값
-    local_max = (E == E_dil) & (E > 0)  # 값 0은 제외(의미 없음)
+    neigh = neigh | 1
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (neigh, neigh))
+    E_dil = cv2.dilate(E, kernel)
+    local_max = (E == E_dil) & (E > 0)
 
-    ys, xs = np.where(local_max) #neigh, neigh단위의 최댓값들 ..
+    ys, xs = np.where(local_max)
     if len(xs) == 0:
         return []
 
     vals = E[ys, xs]
-    order = np.argsort(-vals)  # 큰 값부터
+    thr = max(float(np.percentile(vals, min_percentile)), float(abs_floor))
 
-    # 값 큰 순으로 보면서 min_dist로 NMS 적용해 topk 선택
+    keep = vals >= thr
+    xs, ys, vals = xs[keep], ys[keep], vals[keep]
+    if len(xs) == 0:
+        return []
+
+    order = np.argsort(-vals)
+
     peaks = []
     for idx in order:
         x, y, v = int(xs[idx]), int(ys[idx]), float(vals[idx])
-        ok = True
-        for (px, py, _) in peaks:
-            if (x - px) ** 2 + (y - py) ** 2 < (min_dist ** 2):
-                ok = False
-                break
-        if ok:
-            peaks.append((x, y, v))
-            if len(peaks) >= topk:
-                break
+        if any((x - px) ** 2 + (y - py) ** 2 < (min_dist ** 2) for (px, py, _) in peaks):
+            continue
+        peaks.append((x, y, v))
+        if len(peaks) >= topk:
+            break
 
     return peaks
+
 
 def pick_win_by_mass_score(change_map, x, y, win_levels= (48, 72, 96, 128, 160), alpha=0.5):
     H, W = change_map.shape
@@ -573,8 +573,8 @@ def make_overlay(rgb_img, heatmap, alpha=0.45):
     return overlay
 
 if __name__ == "__main__":
-    query = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/043/RGB/1_00.png"
-    ref   = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/043/RGB/2_00.png"
+    query = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/002/RGB/1_00.png"
+    ref   = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/002/RGB/2_00.png"
     
     #dino map
     change_map, overlay_q, overlay_r, score, q_rgb_518, r_rgb_518 = compute_change_map(

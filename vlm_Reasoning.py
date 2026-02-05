@@ -13,7 +13,7 @@ class VLMWrapper:
 
     def load(
         self,
-        model_id="Qwen/Qwen2-VL-2B-Instruct",
+        model_id="Qwen/Qwen2-VL-7B-Instruct",
         torch_dtype="auto",
         device_map="auto",
         **kwargs,
