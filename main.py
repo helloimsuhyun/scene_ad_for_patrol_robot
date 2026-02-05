@@ -65,109 +65,80 @@ def make_vlm_input(ref_path,query_path):
 
 
 def norm_yesno(text: str) -> str:
+    """
+    VLM 답을 yes/no/unknown으로 정규화 (짧은 답/문장 답 모두 방어)
+    """
     if not text:
         return "unknown"
-    t = text.lower().strip()
+    t = str(text).lower().strip()
 
-    # 강한 신호 먼저
-    if re.search(r"\byes\b", t): return "yes"
-    if re.search(r"\bno\b", t): return "no"
-    if "unknown" in t or "not sure" in t or "cannot" in t or "can't" in t: return "unknown"
+    # 흔한 변형 정리
+    t = t.replace("_", " ").replace("-", " ")
 
-    # 모델이 문장으로 답할 때: 부정 표현 잡기
-    if "no " in t or "there is no" in t or "not" in t:
+    # 1) 명시적 unknown
+    if any(k in t for k in ["unknown", "not sure", "unsure", "cannot tell", "can't tell", "unclear", "hard to tell"]):
+        return "unknown"
+
+    # 2) 강한 yes 패턴 (yes/no 질문이라면 yes 우선)
+    if re.search(r"\byes\b", t):
+        return "yes"
+    if any(k in t for k in ["changed", "different", "has changed", "there is a change", "a new object", "added", "removed", "moved"]):
+        return "yes"
+
+    # 3) 강한 no 패턴
+    if re.search(r"\bno\b", t):
+        return "no"
+    if any(k in t for k in ["no change", "same", "identical", "unchanged", "nothing changed", "no difference"]):
         return "no"
 
     return "unknown"
 
-def get_answer_text(ans: Dict[str, Any], key: str) -> str:
-    """
-    ans[key]가 str이든 dict든 안전하게 answer 텍스트만 뽑는다.
-    - str -> 그대로
-    - dict -> ["answer"] 우선, 없으면 ["text"], 없으면 "" (혹은 str(value))
-    """
-    v = ans.get(key, "")
-    if v is None:
-        return ""
-    if isinstance(v, str):
-        return v
-    if isinstance(v, dict):
-        # 너의 출력 포맷에 맞게 우선순위 설정
-        if isinstance(v.get("answer", None), str):
-            return v["answer"]
-        if isinstance(v.get("text", None), str):
-            return v["text"]
-        # 마지막 방어
-        return ""
-    # list/number 등 들어오면 안전하게 문자열화(원하면 ""로 처리해도 됨)
-    return str(v)
 
-def norm_yesno(text: str) -> str:
-    if not text:
-        return "unknown"
-    t = text.lower().strip()
-
-    if re.search(r"\byes\b", t): return "yes"
-    if re.search(r"\bno\b", t): return "no"
-    if "unknown" in t or "not sure" in t or "cannot" in t or "can't" in t:
-        return "unknown"
-    if "no " in t or "there is no" in t or "not" in t:
-        return "no"
-    return "unknown"
-
-def classify_roi_4class(ref_ans: dict, qry_ans: dict, clip_embed=None,
-                        scene_thr=0.30, objects_thr=0.30):
+def classify_roi_4class_from_compare_questions(vlm_ans: Dict[str, str]) -> str:
     """
-    ref_ans/qry_ans: {question_id: str | dict(answer=...)}
-    clip_embed: callable(str)->embedding (optional)
+    vlm_ans: {
+        "change_detected": "...",
+        "door_change": "...",
+        "new_object": "...",
+        "hazard_damage": "...",
+        "change_description": "..."
+    }
+    return: "no_change" | "object_change" | "door" | "hazard"
     """
 
-    # --- 1) 문 열림/닫힘 ---
-    door_ref = [
-        norm_yesno(get_answer_text(ref_ans, "door_1")),
-        norm_yesno(get_answer_text(ref_ans, "door_2")),
-    ]
-    door_qry = [
-        norm_yesno(get_answer_text(qry_ans, "door_1")),
-        norm_yesno(get_answer_text(qry_ans, "door_2")),
-    ]
-    door_ref_yes = sum(x == "yes" for x in door_ref)
-    door_qry_yes = sum(x == "yes" for x in door_qry)
+    # parse yes/no
+    change = norm_yesno(vlm_ans.get("change_detected", ""))
+    door   = norm_yesno(vlm_ans.get("door_change", ""))
+    newobj = norm_yesno(vlm_ans.get("new_object", ""))
+    hazard = norm_yesno(vlm_ans.get("hazard_damage", ""))
 
-    if door_ref_yes == 0 and door_qry_yes >= 1:
-        return "door"
+    # --- 0) 강한 'no change' 케이스
+    # change가 no면 일단 종료 (단, 나머지가 yes면 override)
+    if change == "no" and door != "yes" and newobj != "yes" and hazard != "yes":
+        return "no_change"
 
-    # --- 2) hazard ---
-    dmg_qry = [
-        norm_yesno(get_answer_text(qry_ans, "damage_1")),
-        norm_yesno(get_answer_text(qry_ans, "damage_2")),
-    ]
-    if any(x == "yes" for x in dmg_qry):
+    # --- 1) hazard 최우선
+    # hazard_damage가 yes면 무조건 hazard
+    if hazard == "yes":
         return "hazard"
 
-    # --- 3) object_change ---
-    obj_ref_text = (get_answer_text(ref_ans, "objects_1") + " | " +
-                    get_answer_text(ref_ans, "objects_2")).strip()
-    obj_qry_text = (get_answer_text(qry_ans, "objects_1") + " | " +
-                    get_answer_text(qry_ans, "objects_2")).strip()
+    # --- 2) door 우선
+    if door == "yes":
+        return "door"
 
-    scene_ref_text = (get_answer_text(ref_ans, "scene_1") + " | " +
-                      get_answer_text(ref_ans, "scene_2")).strip()
-    scene_qry_text = (get_answer_text(qry_ans, "scene_1") + " | " +
-                      get_answer_text(qry_ans, "scene_2")).strip()
-
-    # embedding cosine distance 기반
-    e_obj_ref = clip_embed("OBJ: " + obj_ref_text)
-    e_obj_qry = clip_embed("OBJ: " + obj_qry_text)
-    d_obj = 1.0 - float(e_obj_ref @ e_obj_qry)
-
-    e_sc_ref = clip_embed("SCENE: " + scene_ref_text)
-    e_sc_qry = clip_embed("SCENE: " + scene_qry_text)
-    d_sc = 1.0 - float(e_sc_ref @ e_sc_qry)
-
-    if (d_obj > objects_thr) or (d_sc > scene_thr):
+    # --- 3) object_change
+    # new_object가 yes이거나 change_detected가 yes면 변화로 처리
+    if newobj == "yes" or change == "yes":
         return "object_change"
 
+    # --- 4) change가 unknown일 때, description으로 보완 (안전하게)
+    desc = str(vlm_ans.get("change_description", "")).lower().strip()
+    if desc and desc not in ["unknown", "n/a", "na", "none", "no change", "same"]:
+        # 너무 헛소리 방지: 키워드가 있을 때만 변화로 인정
+        if any(k in desc for k in ["added", "removed", "moved", "missing", "new", "changed", "broken", "damage", "debris", "trash", "spill", "open", "closed"]):
+            return "object_change"
+
+    # --- default
     return "no_change"
 
 # -------------최종 vis
@@ -243,47 +214,40 @@ if __name__ == "__main__":
     clip_embeder = CLIPTextEmbedder()
 
     vlm = VLMWrapper().load(        
-        model_id="Qwen/Qwen2-VL-7B-Instruct",
-        device_map="auto",
-        torch_dtype="auto"
+        model_id="Qwen/Qwen2-VL-2B-Instruct",
+        torch_dtype="auto",
         )
     
 
     roi_classes = []
+    
 
     for roi_i, cand in enumerate(candidates, start=1):
-        ref_ans = {}
-        qry_ans = {}
-        qry_crop = cand["qry_crop"]   
-        ref_crop = cand["ref_crop"]   
+        qry_crop = cand["pair_rgb"]
+        vlm_ans = {}     
 
         print(f"\n================ ROI {roi_i} ================")
         for q in QUESTIONS:
             qtext = q["text"]
 
-            prompt_ref = (
-                "Answer in one short phrase (max 5 words). If unsure, answer 'unknown'. No explanation.\n"
-                f"Question: {qtext}\n"
-                "Answer for the REFERENCE image only."
+            PROMPT_TEMPLATE = (
+                "This image shows a REFERENCE (left) and a CURRENT (right) view of the same area.\n"
+                "Compare them carefully and answer the question in one short phrase (max 5 words).\n"
+                "Ignore lighting changes, shadows, reflections, and slight viewpoint shifts.\n"
+                "Focus only on physical/object changes. If no change, answer 'no change'.\n"
+                "Question: {qtext}\n"
+                "Answer:"
             )
-            prompt_qry = (
-                "Answer in one short phrase (max 5 words). If unsure, answer 'unknown'. No explanation.\n"
-                f"Question: {qtext}\n"
-                "Answer for the CURRENT image only."
-            )
-            IGNORE = "Ignore lighting changes, shadows, reflections, and viewpoint differences. Focus only on physical/object changes."
-            qtext2 = f"{IGNORE}\n{qtext}"
-            # ref만 묻기: (ref, ref)로 넣어서 단일 이미지처럼 사용
-            ans_ref = vlm.infer_image(ref_crop, qtext2)
-            ans_qry = vlm.infer_image(qry_crop, qtext2)
+            prompt = PROMPT_TEMPLATE.format(qtext=qtext)
+            ans = vlm.infer_image(qry_crop, prompt)
 
             print(f"- {q['id']}: {qtext}")
-            print(f"    REF: {ans_ref}")
-            print(f"    QRY: {ans_qry}")
-            ref_ans[q["id"]] = ans_ref
-            qry_ans[q["id"]] = ans_qry
+            print(f"    ans: {ans}")
 
-        cls = classify_roi_4class(ref_ans,qry_ans,clip_embeder)
+            prompt = PROMPT_TEMPLATE.format(qtext=q["text"])
+            vlm_ans[q["id"]] = ans
+
+        cls = classify_roi_4class_from_compare_questions(vlm_ans)
         roi_classes.append(cls)
         print(f"class :  {cls}")
                     

@@ -2,7 +2,7 @@
 import numpy as np
 import torch
 from PIL import Image
-from transformers import AutoProcessor, Qwen2VLForConditionalGeneration
+from transformers import Qwen2VLForConditionalGeneration, AutoProcessor, BitsAndBytesConfig
 
 
 class VLMWrapper:
@@ -11,20 +11,23 @@ class VLMWrapper:
         self.model = None
         self.processor = None
 
-    def load(
-        self,
-        model_id="Qwen/Qwen2-VL-7B-Instruct",
-        torch_dtype="auto",
-        device_map="auto",
-        **kwargs,
-    ):
+    def load(self, model_id="Qwen/Qwen2-VL-2B-Instruct", **kwargs):
+        # 4-bit 양자화 설정
+        bnb_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_use_double_quant=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16 # 또는 torch.float16
+        )
+
+        print(f"Loading model {model_id} in 4-bit quantization...")
+        
         self.model = Qwen2VLForConditionalGeneration.from_pretrained(
             model_id,
-            torch_dtype=torch_dtype,
-            device_map=device_map,
-            **kwargs,
+            quantization_config=bnb_config,
+            device_map="auto", # 자동으로 GPU에 분산 배치
+            **kwargs
         )
-        self.model.eval()
         self.processor = AutoProcessor.from_pretrained(model_id)
         return self
 
@@ -66,7 +69,6 @@ class VLMWrapper:
             **inputs,
             max_new_tokens=max_new_tokens,
             do_sample=False,
-            temperature=0.0,
         )
 
         # 입력 프롬프트 제거 답변만 디코드

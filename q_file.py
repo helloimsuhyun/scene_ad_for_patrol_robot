@@ -1,49 +1,31 @@
-# questions.py
-
-QUESTIONS = [
-
+QUESTION_PAIRS = [
+    # 1. Hazard (파손 전용)
     {
-        "id": "objects_1",
-        "text": "List the main objects visible in the image as short nouns, separated by commas (max 5).",
-        "type": "list",
-    },
-    {
-        "id": "objects_2",
-        "text": "Name up to five key objects in the image using single-word nouns, comma-separated.",
-        "type": "list",
+        "id": "hazard",
+        "questions": [
+            "Is there any physical object change between the left and right? (Yes/No)",
+            "Is any object broken, cracked, damaged, or structurally degraded on the right compared to the left? (Yes/No)",
+        ],
+        "class": "hazard",
     },
 
-
+    # 2. Door
     {
-        "id": "door_1",
-        "text": "Is a door or gate open? Answer with yes, no, or unknown.",
-        "type": "yesno",
-    },
-    {
-        "id": "door_2",
-        "text": "Do you see an open doorway or gate in the image? Answer with yes, no, or unknown.",
-        "type": "yesno",
+        "id": "door",
+        "questions": [
+            "Is there any physical object change between the left and right? (Yes/No)",
+            "Did the open or closed state of a door or gate change? (Yes/No)",
+        ],
+        "class": "door",
     },
 
+    # 3. Object change (이동/추가/제거)
     {
-        "id": "damage_1",
-        "text": "Is any object damaged or broken? Answer with yes, no, or unknown.",
-        "type": "yesno",
-    },
-    {
-        "id": "damage_2",
-        "text": "Do you see any cracks, breakage, or deformation? Answer with yes, no, or unknown.",
-        "type": "yesno",
-    },
-
-    {
-        "id": "scene_1",
-        "text": "Describe the scene in one short phrase (max 5 words).",
-        "type": "short_text",
-    },
-    {
-        "id": "scene_2",
-        "text": "Summarize what is happening in the image in one short phrase (max 5 words).",
-        "type": "short_text",
+        "id": "object_change",
+        "questions": [
+            "Is there any physical object change between the left and right? (Yes/No)",
+            "Is there a new, removed, or moved object on the right? (Yes/No)",
+        ],
+        "class": "object_change",
     },
 ]
