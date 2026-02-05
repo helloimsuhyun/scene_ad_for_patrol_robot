@@ -136,8 +136,6 @@ def patch_distance_map(q_tokens, r_tokens, Hp, Wp, metric="cosine"): #cos 유사
 # -------------------------
 # DINO change map 후처리 -  threshhold , k-p
 
-def soft_threshold(m, tau):
-    return np.maximum(m - tau, 0.0)
 
 def constant_threshold_keep_value(m, tau):
     return np.where(m >= tau, m, 0.0)
@@ -154,23 +152,7 @@ def postprocess_change_map(m):
 
 
 # -------------------------
-# heatmap overlay 시각화
 
-def make_overlay(rgb_img, heatmap, alpha=0.45):
-    """
-    rgb_img: [H,W,3] uint8
-    heatmap: [H,W] float
-    """
-    hm = heatmap - heatmap.min()
-    hm = hm / (hm.max() + 1e-8)
-
-    hm_u8 = (hm * 255).astype(np.uint8)
-    hm_color = cv2.applyColorMap(hm_u8, cv2.COLORMAP_JET)
-    hm_color = cv2.cvtColor(hm_color, cv2.COLOR_BGR2RGB)
-
-    overlay = (rgb_img.astype(np.float32) * (1 - alpha) + hm_color.astype(np.float32) * alpha)
-    overlay = np.clip(overlay, 0, 255).astype(np.uint8)
-    return overlay
 
 
 ## ----------------- changemap roi
@@ -215,48 +197,82 @@ def remove_inside_rois(rois, inside_thr=0.95):
 
     return keep
 
+def pick_local_maxima_topk(change_map, topk=3, k=3, neigh=11, min_dist=64):
 
-def extract_rois_from_change_map(
-    change_map,
-    min_area=150,
-):
-    H, W = change_map.shape
-    binary = (change_map > 1e-6).astype(np.uint8) * 255
-    num, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+    cm = change_map.astype(np.float32)
+    H, W = cm.shape
+    k = k * 14 # patch size
 
-    rois = []
-    for i in range(1, num):
-        x, y, w, h, area = stats[i]
-        if area < min_area:
-            continue
+    # 1) local energy map
+    E = cv2.boxFilter(cm, -1, (k, k), normalize=False)
 
-        x0, y0, x1, y1 = x, y, x + w, y + h
-        blob_mask = (labels == i)
+    # 2) 로컬 최대 마스크: E == dilate(E) 이면 그 neighborhood에서 최대
+    neigh = neigh | 1  # 홀수 보장
+    kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (neigh, neigh)) # neigh , neigh 의 범위
+    E_dil = cv2.dilate(E, kernel) # 그중 최댓값
+    local_max = (E == E_dil) & (E > 0)  # 값 0은 제외(의미 없음)
 
-        mass = float(change_map[blob_mask].sum())
-        density = mass / (area + 1e-8)
-        #score = mass * (density ** 0.5)
-        score = mass
-
-        rois.append({
-            "id": i,
-            "bbox": (x0, y0, x1, y1),
-            "area": int(area),
-            "mass": mass,
-            "density": density,
-            "score": score,
-            "mask": blob_mask,
-        })
-        
-
-    if not rois:
+    ys, xs = np.where(local_max) #neigh, neigh단위의 최댓값들 ..
+    if len(xs) == 0:
         return []
 
-    # adaptive percentile
-    rois = remove_inside_rois(rois, inside_thr=0.95)
-    rois.sort(key=lambda r: r["score"], reverse=True)
+    vals = E[ys, xs]
+    order = np.argsort(-vals)  # 큰 값부터
 
-    return rois[:5]   # K=10 고정 (VLM 후보 수)
+    # 값 큰 순으로 보면서 min_dist로 NMS 적용해 topk 선택
+    peaks = []
+    for idx in order:
+        x, y, v = int(xs[idx]), int(ys[idx]), float(vals[idx])
+        ok = True
+        for (px, py, _) in peaks:
+            if (x - px) ** 2 + (y - py) ** 2 < (min_dist ** 2):
+                ok = False
+                break
+        if ok:
+            peaks.append((x, y, v))
+            if len(peaks) >= topk:
+                break
+
+    return peaks
+
+def pick_win_by_mass_score(change_map, x, y, win_levels= (48, 72, 96, 128, 160), alpha=0.5):
+    H, W = change_map.shape
+    best = None
+
+    for win in win_levels:
+        half = win // 2
+        x0 = max(0, x - half); x1 = min(W, x + half)
+        y0 = max(0, y - half); y1 = min(H, y + half)
+
+        patch = change_map[y0:y1, x0:x1]
+        mass = float(patch.sum())
+        area = float((y1 - y0) * (x1 - x0))
+        score = mass / (area ** alpha + 1e-8)
+
+        if (best is None) or (score > best["score"]):
+            best = {"win": win, "bbox": (x0,y0,x1,y1), "mass": mass, "area": area, "score": score}
+
+    return best  # dict
+
+def peaks_to_rois(change_map, peaks, win_levels=(48,64,80,96,128), alpha=0.5):
+    rois = []
+    for rid, (x, y, _) in enumerate(peaks, start=1):
+        best = pick_win_by_mass_score(change_map, x, y, win_levels=win_levels, alpha=alpha)
+        x0,y0,x1,y1 = best["bbox"]
+        rois.append({
+            "id": rid,
+            "bbox": (x0,y0,x1,y1),
+            "area": int(best["area"]),
+            "mass": best["mass"],
+            "density": best["mass"]/(best["area"]+1e-8),
+            "score": best["mass"],          
+            "scale_score": best["score"],  
+            "win": best["win"],
+            "mask": None,
+            "peak_xy": (x, y),
+        })
+    rois.sort(key=lambda r: r["score"], reverse=True)
+    return rois
 
 
 def expand_bbox_xyxy(bbox, scale=2.0, W=518, H=518): # changemap으로 찾은 roi영역의 2배를 sam roi로 사용
@@ -501,7 +517,7 @@ def draw_rois_on_image(rgb, rois, color=(0, 255, 0), thickness=2):
         cv2.rectangle(out, (x0, y0), (x1, y1), color, thickness)
 
         label = f"id{r['id']} dino={r['score']:.3f} clipd={r.get('clipdiff',0):.3f}"
-        print(f"id : {r['id']} , dino score : {r['score']} , clipd score : {r.get('clipdiff',0)}")
+        print(f"id : {r['id']} , dino score : {r['score']}")
         cv2.putText(
             out,
             label,
@@ -538,9 +554,27 @@ def visualize_vlm_pairs(candidates, max_show=10, cols=5, figsize=(18, 7)):
 
     plt.tight_layout()
 
+# heatmap overlay 시각화
+
+def make_overlay(rgb_img, heatmap, alpha=0.45):
+    """
+    rgb_img: [H,W,3] uint8
+    heatmap: [H,W] float
+    """
+    hm = heatmap - heatmap.min()
+    hm = hm / (hm.max() + 1e-8)
+
+    hm_u8 = (hm * 255).astype(np.uint8)
+    hm_color = cv2.applyColorMap(hm_u8, cv2.COLORMAP_JET)
+    hm_color = cv2.cvtColor(hm_color, cv2.COLOR_BGR2RGB)
+
+    overlay = (rgb_img.astype(np.float32) * (1 - alpha) + hm_color.astype(np.float32) * alpha)
+    overlay = np.clip(overlay, 0, 255).astype(np.uint8)
+    return overlay
+
 if __name__ == "__main__":
-    query = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/001/RGB/1_01.png"
-    ref   = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/001/RGB/2_01.png"
+    query = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/043/RGB/1_00.png"
+    ref   = "/home/choisuhyun/scene_ad_for_patrol_robot/data/VL-CMU-CD/images/043/RGB/2_00.png"
     
     #dino map
     change_map, overlay_q, overlay_r, score, q_rgb_518, r_rgb_518 = compute_change_map(
@@ -551,9 +585,11 @@ if __name__ == "__main__":
         ms_pool_type="avg",
         ms_agg="top2mean",
     )
+    
+    #find peak k-means고려중
+    peaks = pick_local_maxima_topk(change_map,topk=3,k=3)
 
-    # roi
-    rois = extract_rois_from_change_map(change_map, min_area=150)
+    rois = peaks_to_rois(change_map,peaks)
     print("num rois (DINO):", len(rois))
 
     # VLM 입력(pair) 만들기
@@ -561,7 +597,7 @@ if __name__ == "__main__":
         q_rgb=q_rgb_518,
         r_rgb=r_rgb_518,
         rois=rois,
-        expand_scale=2.0,
+        expand_scale=1.6,
         img_size=518,
         out_h=336,
         border=4,
