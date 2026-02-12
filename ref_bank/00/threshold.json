@@ -1,0 +1,8 @@
+{
+  "plc_idx": "00",
+  "k": 3,
+  "percentile": 95,
+  "threshold": 0.021229932084679604,
+  "num_bank": 98,
+  "num_th": 136
+}
