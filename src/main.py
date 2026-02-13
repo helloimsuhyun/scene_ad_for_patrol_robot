@@ -3,7 +3,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 import matplotlib.pyplot as plt
 
-from dino_emb import load_dinov2
+from dino_emb import load_model
 from banker import load_bank_by_place
 from distance import calibrate_place, infer_one
 
@@ -11,10 +11,10 @@ from distance import calibrate_place, infer_one
 # -------------------------
 # 설정
 # -------------------------
-BANK_ROOT = "/home/choisuhyun/scene_ad_for_patrol_robot/ref_bank"
-PLC_IDX = "00"
+BANK_ROOT = "/home/choisuhyun/scene_ad_for_patrol_robot/data/ref_bank"
+PLC_IDX = "transistor" 
 K = 3
-PERCENTILE = 95
+PERCENTILE = 97
 
 
 # -------------------------
@@ -23,7 +23,12 @@ PERCENTILE = 95
 #  - 나머지 => 이상(1)
 # -------------------------
 def label_from_name(name: str) -> int:
-    return 0 if name.lower().startswith("nomal") else 1
+    name = name.lower()
+    if name.startswith("unnormal"):
+        return 1   # 비정상
+    if name.startswith("nomal"):
+        return 0   # 정상
+    return 1       # 기본값: 비정상
 
 
 def compute_metrics_from_results(results):
@@ -98,7 +103,7 @@ def save_pair_vis_k(topk_paths, query_path, out_path, score, topk_sims, is_chang
 # main
 # -------------------------
 def main():
-    model, device = load_dinov2()
+    model, device = load_model()
 
     # 1) threshold 계산 (bank/th_calib rebuild + threshold.json 생성)
     thr, scores, _ = calibrate_place(
@@ -204,7 +209,35 @@ def main():
     fns = [n for (n, _, pred) in results if label_from_name(n) == 1 and (not pred)]
     print("\nFP files:", fps)
     print("FN files:", fns)
+    txt_path = out_dir / "metrics.txt"
+    with open(txt_path, "w", encoding="utf-8") as f:
+        f.write(f"place={PLC_IDX}\n")
+        f.write(f"K={K}\n")
+        f.write(f"PERCENTILE={PERCENTILE}\n")
+        f.write(f"threshold={thr:.6f}\n\n")
 
+        f.write("=== Confusion Matrix ===\n")
+        f.write(f"TP={m['TP']}  FP={m['FP']}\n")
+        f.write(f"FN={m['FN']}  TN={m['TN']}\n\n")
+
+        f.write("=== Metrics ===\n")
+        f.write(f"Accuracy  : {m['Accuracy']*100:.2f}%\n")
+        f.write(f"Recall/TPR: {m['Recall/TPR']*100:.2f}%\n")
+        f.write(f"Precision : {m['Precision']*100:.2f}%\n")
+        f.write(f"F1        : {m['F1']*100:.2f}%\n")
+        f.write(f"FPR       : {m['FPR']*100:.2f}%\n")
+        f.write(f"FNR       : {m['FNR']*100:.2f}%\n")
+        f.write(f"N_total={m['N_total']}  N_pos={m['N_pos']}  N_neg={m['N_neg']}\n\n")
+
+        f.write("FP files:\n")
+        for n in fps:
+            f.write(f"  {n}\n")
+
+        f.write("\nFN files:\n")
+        for n in fns:
+            f.write(f"  {n}\n")
+
+    print("Saved:", txt_path)
     print("\nDONE")
 
 

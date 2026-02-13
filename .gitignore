@@ -3,6 +3,8 @@
 # -------------------------
 data/
 datasets/
+dinov3/
+past/
 
 # -------------------------
 # Model checkpoints
