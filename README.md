@@ -110,3 +110,11 @@ MVTec AD 데이터셋 일부 클래스에 대해 실험을 수행하였으며, �
 - SAM 기반 object-level scoring
 - RGB-D 정합 기반 구조적 변화 감지
 - 실시간 로봇 시스템 통합
+
+---
+
+## 📚 References
+
+- Deep Nearest Neighbor Anomaly Detection — NeurIPS 2022  
+- An Anomaly Detection System via Moving Surveillance Robots with Human — IROS 2021  
+- Semantic Scene Difference Detection in Daily Life Patroling by Mobile Robots using Pre-Trained Large-Scale Vision-Language Model — ICRA 2024
