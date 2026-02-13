@@ -12,7 +12,7 @@ from distance import calibrate_place, infer_one
 # 설정
 # -------------------------
 BANK_ROOT = "/home/choisuhyun/scene_ad_for_patrol_robot/data/ref_bank"
-PLC_IDX = "transistor" 
+PLC_IDX = "00" 
 K = 3
 PERCENTILE = 97
 
