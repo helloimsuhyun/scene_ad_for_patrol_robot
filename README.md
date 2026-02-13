@@ -12,17 +12,12 @@
 
 ## ⚙️ Pipeline Overview
 
-Image
-↓
-DINOv3 Embedding Extraction
-↓
-Place-specific Reference Bank
-↓
-k-NN Distance Computation
-↓
-Adaptive Thresholding
-↓
-Anomaly Detection
+Image  
+→ DINOv3 Embedding Extraction  
+→ Place-specific Reference Bank  
+→ k-NN Distance Computation  
+→ Adaptive Thresholding  
+→ Anomaly Detection
 
 ---
 
