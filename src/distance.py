@@ -36,8 +36,22 @@ def compute_knn_dist(
 
     return mean_dist, (topk_sim,top_k_idx,ref_img_paths)
 
+
+def th_percentile(scores, percentile):
+    return float(np.percentile(scores, percentile))
+
+def th_gaussian(scores, k=3.0):
+    mu = scores.mean()
+    sigma = scores.std()
+    return float(mu + k * sigma)
+
+def th_robust(scores, k=3.0):
+    med = np.median(scores)
+    mad = np.median(np.abs(scores - med))
+    return float(med + k * mad * 1.4826)
+
 @torch.no_grad()
-def compute_and_save_threshold(bank_root, plc_idx, k=3, percentile=95):
+def compute_and_save_threshold(bank_root, plc_idx, k=3, percentile=95, method = "robust"):
 
     bank_root = Path(bank_root)
     plc_idx = str(plc_idx)
@@ -53,7 +67,18 @@ def compute_and_save_threshold(bank_root, plc_idx, k=3, percentile=95):
     topk_sim, _ = torch.topk(sim, k=k, dim=1)
 
     scores = (1.0 - topk_sim).mean(dim=1).numpy()  # (M,)
-    thr = float(np.percentile(scores, percentile))
+
+    if method == "percentile":
+        thr = th_percentile(scores, percentile)
+
+    elif method == "gaussian":
+        thr = th_gaussian(scores, k=2.5)
+
+    elif method == "robust":
+        thr = th_robust(scores, k=2.5)
+
+    else:
+        raise ValueError(f"Unknown method: {method}")
 
     out = {
         "plc_idx": plc_idx,
@@ -117,6 +142,9 @@ def infer_one(img, plc_idx : str, bank_root, model, device):
     topk_paths = [ref_paths[i] for i in topk_idx]
 
     return dist, thr, is_change, topk_paths, topk_sims
+
+
+
 
 
 def calibrate_place(bank_root, plc_idx, model, device, k=3, percentile=95):
