@@ -34,7 +34,7 @@ MVTec AD의 일부 클래스에 대해 테스트했으며, 클래스별 난이�
 </p>
 
 <p align="center">
-  <img src="./example_leather_cls_query_dist_curve.png" width="745"/>
+  <img src="./example_leather_cls_query_dist_curve.png" width="500"/>
 </p>
 
 ---
@@ -45,11 +45,8 @@ MVTec AD의 일부 클래스에 대해 테스트했으며, 클래스별 난이�
 - Reference bank 기반 정상 데이터 임베딩 관리
 - cosine similarity 기반 anomaly score 계산
 - **Adaptive Threshold 기반 자동 임계값 설정**
-- Scene / Category 단위 이상 점수 계산
+
 - Accuracy, Precision, Recall, F1 등 평가 metric 계산
-- (옵션) Top-k reference + query 시각화 저장
 
 ---
-
-## 동작 구조
 
