@@ -51,6 +51,12 @@ Image
 <p align="center">
   <img src="./exam_chg.png" width="700"/>
 </p>
+<p align="center">
+  <img src="./exam_chg2.png" width="700"/>
+</p>
+<p align="center">
+  <img src="./example_chg.png" width="700"/>
+</p>
 
 <p align="center">
   <img src="./exam_query_dist_curve.png" width="500"/>
