@@ -1,3 +1,7 @@
+# made by gpt 실행 함수
+
+
+
 from pathlib import Path
 import numpy as np
 from PIL import Image, ImageDraw
@@ -12,7 +16,7 @@ from distance import calibrate_place, infer_one
 # 설정
 # -------------------------
 BANK_ROOT = "/home/choisuhyun/scene_ad_for_patrol_robot/data/ref_bank"
-PLC_IDX = "00" 
+PLC_IDX = "pcb4" 
 K = 3
 PERCENTILE = 97
 
@@ -137,7 +141,11 @@ def main():
 
     # 3) query 추론
     query_dir = Path(BANK_ROOT) / PLC_IDX / "query"
-    query_imgs = sorted(query_dir.glob("*.png"))
+    query_imgs = sorted([
+        p for p in query_dir.iterdir()
+        if p.is_file() and p.suffix.lower() in [".png", ".jpg", ".jpeg"]
+    ])
+
 
     pair_dir = out_dir / "pairs"
     pair_dir.mkdir(parents=True, exist_ok=True)

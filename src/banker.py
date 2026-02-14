@@ -131,7 +131,10 @@ def rebuild_bank(save_root, plc_idx , model, device, mode = "bank"):
     save_path = save_root / plc_idx / mode
     npz_path = save_path / f"{plc_idx}.npz"
 
-    img_paths = sorted(save_path.glob("*.png"))
+    IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
+    img_paths = sorted([p for p in save_path.iterdir()
+                    if p.is_file() and p.suffix.lower() in IMG_EXTS])
+
 
     if len(img_paths) == 0:
         print("no images found")
