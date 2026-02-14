@@ -25,8 +25,7 @@ Image
 
 ### 실험 설정 (공통)
 - k = 3
-- Percentile = 97
-- 각 place별 threshold는 th_calib 데이터에서 자동 계산됨
+- 각 class별 threshold는 th_calib 데이터에서 자동 계산됨
 
 ---
 
@@ -132,8 +131,7 @@ Image
 
 ### 실험 설정
 - k = 3
-- Percentile = 97
-- Threshold = 0.0264
+- 각 place별 threshold는 th_calib 데이터에서 자동 계산됨
 
 ### Confusion Matrix
 
