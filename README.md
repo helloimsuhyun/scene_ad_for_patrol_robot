@@ -1,4 +1,4 @@
-# 🔎 k-NN 기반 이상 감지 (Scene Anomaly Detection)
+## 🔎 k-NN 기반 이상 감지 (Scene Anomaly Detection)
 
 본 프로젝트는 **k-NN 임베딩 거리 기반 이상 감지(Anomaly Detection)** 시스템을 구현한 코드이다.
 
