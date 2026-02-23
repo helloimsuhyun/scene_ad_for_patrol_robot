@@ -164,4 +164,3 @@ def rebuild_bank(save_root, plc_idx , model, device, mode = "bank"):
     )
 
     return ref_embs, paths
-
