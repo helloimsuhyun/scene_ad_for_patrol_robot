@@ -5,6 +5,7 @@ data/
 datasets/
 dinov3/
 past/
+recv/
 
 # -------------------------
 # Model checkpoints
