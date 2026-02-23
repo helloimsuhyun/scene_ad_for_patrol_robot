@@ -14,7 +14,7 @@ SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 
 """ 
     로봇쪽 json meta
-    
+
     meta = {
         "place_id": place_id, #str 각 장소별 고유한 id str
         "timestamp": datetime.now().isoformat(),
@@ -70,3 +70,8 @@ async def place_imgs(
             "meta": meta_obj,
         }
     )
+
+if __name__ == "__main__":
+    import uvicorn
+    # uvicorn.run(app, host="0.0.0.0", port=8000) 로봇, 서버 통신이면 
+    uvicorn.run(app, host="127.0.0.1", port=8000)

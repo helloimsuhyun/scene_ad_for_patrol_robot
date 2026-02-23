@@ -103,7 +103,7 @@ def capture_and_send(
     buffer: "FrameBuffer",          # ros callback buffer
     server_url: str,                # http url
     place_id: str,
-    mode: Literal["normal", "query"], # "normal", "query"
+    mode: Literal["bank", "th_calib", "query"], # "normal", "query"
     n_frames: int = 10,
     sample_dt: float = 0.2,
     capture_timeout_s: float = 5.0, # capture timeout
