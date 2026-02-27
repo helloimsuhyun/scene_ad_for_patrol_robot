@@ -75,6 +75,7 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         engine["bank_root"],  
         engine["model"],
         engine["device"],
+        use_two_stage_vlm = False
     )
 
 @app.post("/place_imgs")
@@ -158,6 +159,7 @@ async def place_imgs(
                 ref_topk_json=result.get("ref_topk_json"),
                 summary_text=result.get("summary"),
             )
+        print("add q")
 
 
     return JSONResponse(

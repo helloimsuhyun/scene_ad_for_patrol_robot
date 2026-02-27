@@ -17,7 +17,7 @@ from cap_and_send import FrameBuffer, capture_and_send
 # =============================
 # 사용자 설정
 # =============================
-SERVER_URL = "http://192.168.0.6:8000"
+SERVER_URL = "http://127.0.0.1:8000"
 
 START_PLACE = 0
 PLACE_WIDTH = 2
@@ -25,7 +25,7 @@ PLACE_WIDTH = 2
 # 캡처/전송 옵션
 N_FRAMES = 10
 
-SAMPLE_DT = 0.4
+SAMPLE_DT = 0.2
 CAPTURE_TIMEOUT_S = 5.0
 POST_TIMEOUT_S = 10.0
 

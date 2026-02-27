@@ -16,6 +16,7 @@ from PIL import Image
 
 from banker import load_bank_by_place, BGR_to_RGB
 from dino_emb import make_embed , make_transform
+from vlm_gate import vlm_gate
 
 
 def compute_knn_dist(
@@ -23,19 +24,22 @@ def compute_knn_dist(
     bank_root,
     plc_idx: str,
     k: int = 3,
+    ref_embs: Optional[torch.Tensor] = None,
+    ref_img_paths: Optional[List[str]] = None,
 ):
 
     if q_emb.dim() == 1:
         q_emb = q_emb.unsqueeze(0)  # (1,D)
 
     # load bank
-    ref_embs_np, ref_img_paths = load_bank_by_place(bank_root, plc_idx)
-    if ref_embs_np is None:
-        raise FileNotFoundError(f"No bank found for plc_idx={plc_idx}")
+    if ref_embs is None or ref_img_paths is None:
+        ref_embs_np, ref_img_paths = load_bank_by_place(bank_root, plc_idx)
+        if ref_embs_np is None:
+            raise FileNotFoundError(f"No bank found for plc_idx={plc_idx}")
 
-    ref_embs = torch.from_numpy(ref_embs_np).float()
-
-    ref_embs = ref_embs.to(q_emb.device)
+        ref_embs = torch.from_numpy(ref_embs_np).float().to(q_emb.device)
+    else:
+        ref_embs = ref_embs.to(q_emb.device)
 
     #둘다 정규화 (혹시 모르니)
     q_emb = F.normalize(q_emb, dim=1)
@@ -203,6 +207,7 @@ def infer_event(
     model,
     device,
     event_rule: str = "vote",        # event 단위 이상 결정 정책
+    use_two_stage_vlm = False
 ) -> Dict[str, Any]:
 
     
@@ -248,7 +253,8 @@ def infer_event(
         if q_emb.dim() == 1:
             q_emb = q_emb.unsqueeze(0)
 
-        dist, debug = compute_knn_dist(q_emb, bank_root, plc_idx, k=k)
+        dist, debug = compute_knn_dist(q_emb, bank_root, plc_idx, k=k,
+                              ref_embs=ref_embs, ref_img_paths=ref_img_paths)
 
         topk_sim, topk_idx, ref_paths = debug
         idx_list = topk_idx.squeeze(0).tolist()
@@ -281,9 +287,28 @@ def infer_event(
 
     else:
         raise ValueError(f"Unknown event_mode: {event_rule}")
+    
+    rep = None   
+    summary = ""
+
+    if use_two_stage_vlm:
+        m2 = 0.9
+        max_ratio = max(frame_scores) / (thr + 1e-12)
+        #need_vlm = (anomaly_flag == 1) and (max_ratio < 1.0 + m2)
+        need_vlm = True
+        if need_vlm:
+            idx = int(np.argmax(frame_scores))
+            q_img = imgs_bgr[idx]
+            ref_img_path = topk_paths_all[idx][0]
+            rep = {"frame_idx": idx, "ref_img_path": ref_img_path}
+
+            vlm_result = vlm_gate(q_img, ref_img_path)
+            anomaly_flag = 1 if vlm_result["physical_change"] else 0
+            summary = vlm_result["description"]   
+
 
     ref_topk_json = json.dumps(
-        {"topk_paths": topk_paths_all, "topk_sims": topk_sims_all},
+        {"topk_paths": topk_paths_all, "topk_sims": topk_sims_all, "rep": rep},
         ensure_ascii=False,
     )
 
@@ -295,6 +320,6 @@ def infer_event(
         "event_score": event_score, #이벤트 단위 점수
         "ref_bank_id" : ref_bank_id,
         "ref_topk_json": ref_topk_json, #참조 이미지 경로 , 유사도
-        "summary": "change" if anomaly_flag else "normal", #additional 추가 확장 고려
+        "summary": summary, #additional 추가 확장 고려
     }
 
