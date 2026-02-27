@@ -12,7 +12,7 @@ from typing import List, Dict
 # ✅ 여기만 수정
 # =========================
 ROOT = Path("/home/choisuhyun/scene_ad_for_patrol_robot/dataset")
-APPLY = False  # 먼저 False로 로그 확인 후 True
+APPLY = True  # 먼저 False로 로그 확인 후 True
 SEED = 42
 
 REF_RATIO = 0.6

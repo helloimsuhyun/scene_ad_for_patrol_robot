@@ -17,7 +17,7 @@ from cap_and_send import FrameBuffer, capture_and_send
 # =============================
 # 사용자 설정
 # =============================
-SERVER_URL = "http://127.0.0.1:8000"
+SERVER_URL = "http://192.168.0.6:8000"
 
 START_PLACE = 0
 PLACE_WIDTH = 2
