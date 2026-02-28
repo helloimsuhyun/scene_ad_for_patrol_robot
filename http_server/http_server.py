@@ -75,7 +75,7 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         engine["bank_root"],  
         engine["model"],
         engine["device"],
-        use_two_stage_vlm = False
+        use_two_stage_vlm = True
     )
 
 @app.post("/place_imgs")

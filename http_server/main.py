@@ -49,7 +49,7 @@ def calibrate_one_place(
 if __name__ == "__main__":
     calibrate_one_place(
         bank_root="./recv",   # 너 경로로 수정
-        plc_idx="01",          # 원하는 place id
+        plc_idx="00",          # 원하는 place id
         k=3,
         percentile=95,
     )

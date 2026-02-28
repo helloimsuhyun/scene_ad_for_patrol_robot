@@ -2,7 +2,6 @@
 # -*- coding: utf-8 -*-
 from __future__ import annotations
 
-import time
 import threading
 from typing import Literal
 
@@ -24,7 +23,6 @@ PLACE_WIDTH = 2
 
 # 캡처/전송 옵션
 N_FRAMES = 10
-
 SAMPLE_DT = 0.2
 CAPTURE_TIMEOUT_S = 5.0
 POST_TIMEOUT_S = 10.0
@@ -41,6 +39,10 @@ KEY_MODE_BANK     = ord('b')
 KEY_MODE_TH_CALIB = ord('t')
 KEY_MODE_QUERY    = ord('q')
 
+# query 라벨 토글 키
+KEY_QUERY_NORMAL   = ord('n')  # query에서 GT=normal
+KEY_QUERY_ABNORMAL = ord('a')  # query에서 GT=abnormal
+
 KEY_QUIT = 27  # ESC
 # =============================
 
@@ -53,10 +55,16 @@ def plc_str(plc_idx: int) -> str:
     return z(plc_idx, PLACE_WIDTH)
 
 
-def overlay_status(img_bgr: np.ndarray, place_id: str, mode: str, sending: bool) -> np.ndarray:
+def overlay_status(
+    img_bgr: np.ndarray,
+    place_id: str,
+    mode: str,
+    sending: bool,
+    query_gt: str,
+) -> np.ndarray:
     view = img_bgr.copy()
-    line1 = f"place={place_id}  mode={mode}  sending={int(sending)}"
-    line2 = "Keys: s=send | p/o=place+/- | b=bank t=th_calib q=query | ESC=quit"
+    line1 = f"place={place_id}  mode={mode}  query_gt={query_gt}  sending={int(sending)}"
+    line2 = "Keys: s=send | p/o=place+/- | b=bank t=th_calib q=query | n/a=query gt | ESC=quit"
     cv2.putText(view, line1, (15, 35), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
     cv2.putText(view, line2, (15, 65), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 255, 0), 2)
     return view
@@ -67,6 +75,9 @@ def main():
 
     plc_idx = START_PLACE
     mode: Literal["bank", "th_calib", "query"] = "bank"
+
+    # ✅ query 모드에서만 쓰는 GT 라벨 (키로 바꿀 수 있음)
+    query_gt: Literal["normal", "abnormal"] = "normal"
 
     sending_lock = threading.Lock()
     sending_flag = {"on": False}  # mutable
@@ -83,6 +94,7 @@ def main():
     print(" s : send batch to server")
     print(" p/o : next/prev place")
     print(" b/t/q : mode bank / th_calib / query")
+    print(" n/a : (query only) set GT label normal/abnormal")
     print(" ESC : quit")
     print("Server:", SERVER_URL)
 
@@ -107,7 +119,7 @@ def main():
             buffer.update(color_rgb)
 
             place_id = plc_str(plc_idx)
-            view = overlay_status(color_bgr, place_id, mode, is_sending())
+            view = overlay_status(color_bgr, place_id, mode, is_sending(), query_gt)
             cv2.imshow("CaptureSend", view)
 
             key = cv2.waitKey(1) & 0xFF
@@ -134,6 +146,15 @@ def main():
                 mode = "query"
                 print("Mode -> query")
 
+            # ✅ query GT 라벨 변경 (query 모드에서만 의미 있음)
+            elif key == KEY_QUERY_NORMAL:
+                query_gt = "normal"
+                print("Query GT -> normal")
+
+            elif key == KEY_QUERY_ABNORMAL:
+                query_gt = "abnormal"
+                print("Query GT -> abnormal")
+
             elif key == KEY_SEND:
                 # 전송 중이면 중복 전송 방지
                 if is_sending():
@@ -143,14 +164,17 @@ def main():
                 set_sending(True)
                 place_id_now = plc_str(plc_idx)
                 mode_now = mode
-                if mode_now == "bank" or mode_now == "th_calib":
+
+                # ✅ 여기서 라벨 결정
+                if mode_now in ("bank", "th_calib"):
                     label = "normal"
-                else :
-                    label = "abnormal" 
-                    
+                else:
+                    # query에서는 키로 설정한 GT 사용
+                    label = query_gt
+
                 def worker():
                     try:
-                        print(f"[SEND] place={place_id_now} mode={mode_now} n={N_FRAMES} dt={SAMPLE_DT}")
+                        print(f"[SEND] place={place_id_now} mode={mode_now} gt={label} n={N_FRAMES} dt={SAMPLE_DT}")
                         out = capture_and_send(
                             buffer=buffer,
                             server_url=SERVER_URL,
@@ -160,7 +184,7 @@ def main():
                             sample_dt=SAMPLE_DT,
                             capture_timeout_s=CAPTURE_TIMEOUT_S,
                             post_timeout_s=POST_TIMEOUT_S,
-                            gt=label,                   
+                            gt=label,                   # ✅ GT 라벨 전송
                         )
                         print("[SEND OK]", out)
                     except Exception as e:

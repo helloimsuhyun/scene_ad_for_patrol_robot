@@ -295,7 +295,9 @@ def infer_event(
         m2 = 0.9
         max_ratio = max(frame_scores) / (thr + 1e-12)
         #need_vlm = (anomaly_flag == 1) and (max_ratio < 1.0 + m2)
-        need_vlm = True
+        if anomaly_flag == 1:
+            need_vlm = True
+            
         if need_vlm:
             idx = int(np.argmax(frame_scores))
             q_img = imgs_bgr[idx]
