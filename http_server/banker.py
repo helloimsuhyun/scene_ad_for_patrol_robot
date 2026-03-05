@@ -9,7 +9,6 @@
 # - suhyun
 
 """
-def save_one_to_bank(img, plc_idx : str, save_root):
 def load_bank_by_place(save_root, plc_idx):
 def rebuild_bank(save_root, plc_idx):
 """
@@ -21,73 +20,16 @@ from pathlib import Path
 from datetime import datetime
 from PIL import Image
 from dino_emb import make_embed , make_transform
+from typing import Dict, Tuple, Optional, List
+
+IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 
 def BGR_to_RGB(img_bgr_uint8):
     img_rgb = img_bgr_uint8[:, :, ::-1]          # BGR->RGB
     img_pil = Image.fromarray(img_rgb).convert("RGB")
     return img_pil
 
-#npz에 한개 추가
-def append_to_bank_npz(npz_path, emb, img_path):
-    """
-    npz_path: Path or str (예: bank_03.npz)
-    emb: torch.Tensor [D]
-    img_path: str (이미지 경로)
-    """
-
-    npz_path = Path(npz_path)
-    emb = emb.detach().cpu().numpy().astype(np.float32)
-
-    if npz_path.exists():
-        data = np.load(npz_path, allow_pickle=True)
-        embs = data["embs"]
-        paths = data["paths"].tolist()
-
-        embs = np.vstack([embs, emb])
-        paths.append(str(img_path))
-    else:
-        embs = emb.reshape(1, -1) # (1 D)차원으로 변환
-        paths = [str(img_path)]
-
-    np.savez_compressed(
-        npz_path,
-        embs=embs,
-        paths=np.array(paths, dtype=object),
-    )
-
-
-def save_one_to_bank(img, plc_idx : str, save_root , model , device, mode = "bank"):
-    # input img : npy uint8 이미지
-    # input plc_idx : 촬영 장소에 대한 고유한 인덱스
-    # save_root : ref_bank 저장 상위폴더
-
-    save_root = Path(save_root)
-    plc_idx = str(plc_idx)
-
-    save_path = save_root / plc_idx / mode
-    save_path.mkdir(parents=True,exist_ok= True)
-
-    now = datetime.now()
-    timestamp = now.strftime("%Y%m%d_%H%M%S_%f")[:-3]  # ms 단위
-
-    #이미지 저장
-    img_path = save_path  / f"{timestamp}.png"
-    img = BGR_to_RGB(img)
-    img.save(img_path)
-
-    #임베딩 저장
-    e_path = img_path.with_suffix(".npy")
-    tfm = make_transform()
-    img_tensor = tfm(img)
-    e = make_embed(model,device,img_tensor)
-    #np.save(e_path, e.detach().cpu().numpy().astype(np.float32))
-
-    #save npz
-    npz_path = save_path / f"{plc_idx}.npz"
-    append_to_bank_npz(npz_path,e,img_path)
-
-    return img_path , e_path , npz_path
-
+#경로에따른 npz에서 emb와 해당하는 이미지 경로를 return
 def load_bank_npz(npz_path):
     """
     npz_path: Path or str
@@ -102,65 +44,91 @@ def load_bank_npz(npz_path):
         return None, None
 
     data = np.load(npz_path, allow_pickle=True)
-
     ref_embs = data["embs"]       
     paths = data["paths"].tolist()     
 
     return ref_embs, paths
 
-# 장소 폴더 단위로 npz를 load함
-def load_bank_by_place(save_root, plc_idx, mode = "bank"):
-    """
-    save_root: ref_bank 상위폴더
-    plc_idx: 장소 index (str)
-    """
+# 장소 폴더 단위로 npz를 load, emb와 대응되는 paths를 return
+def load_bank_by_place(save_root, plc_idx, mode="bank"):
+
+    save_root = Path(save_root)
+    plc_idx = str(plc_idx)
+    place_dir = save_root / plc_idx / mode
+
+    npz_global = place_dir / f"{plc_idx}.npz"
+    npz_patch  = place_dir / f"{plc_idx}_patch_.npz"
+
+    return {
+        "global": load_bank_npz(npz_global),
+        "patch":  load_bank_npz(npz_patch),
+    }
+
+#해당 장소의 npz 초기화
+def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
+
+    #임베딩 추출 cfg ----
+    cfg = cfg or {}
+
+    repr_mode   = str(cfg.get("repr", {}).get("repr_mode", "global"))  # global|patch|global_patch
+    global_mode = str(cfg.get("embed", {}).get("global_mode", "patch_mean"))
+    img_size    = int(cfg.get("embed", {}).get("img_size", 560))
+
+    if repr_mode not in {"global", "patch", "global_patch"}:
+        raise ValueError(f"repr_mode must be global|patch|global_patch, got {repr_mode}")
+    effective_mode = "global_patch" if repr_mode == "patch" else repr_mode
 
     save_root = Path(save_root)
     plc_idx = str(plc_idx)
 
-    npz_path = save_root / plc_idx / mode / f"{plc_idx}.npz"
+    place_dir = save_root / plc_idx / mode
+    place_dir.mkdir(parents=True, exist_ok=True)
 
-    return load_bank_npz(npz_path)
+    img_paths = sorted([p for p in place_dir.iterdir()
+                        if p.is_file() and p.suffix.lower() in IMG_EXTS])
 
-#폴더 안 기준으로 npz 재생성
-def rebuild_bank(save_root, plc_idx , model, device, mode = "bank"):
-
-    save_root = Path(save_root)
-    plc_idx = str(plc_idx)
-
-    save_path = save_root / plc_idx / mode
-    npz_path = save_path / f"{plc_idx}.npz"
-
-    IMG_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-    img_paths = sorted([p for p in save_path.iterdir()
-                    if p.is_file() and p.suffix.lower() in IMG_EXTS])
-
-
-    if len(img_paths) == 0:
-        print("no images found")
+    if not img_paths:
+        print(f"[rebuild_bank] no images found: {place_dir}")
         return None
 
-    ref_embs = []
-    paths = []
-    tfm = make_transform()
+    tfm = make_transform(img_size=img_size)
 
-    for img_path in img_paths:
-        img = Image.open(img_path).convert("RGB")
-        
+    # emb를 npz로 저장 ---------------------
+    paths: List[str] = []
+    global_list: List[np.ndarray] = []
+    patch_list: List[np.ndarray] = []
+
+    for p in img_paths:
+        img = Image.open(p).convert("RGB")
         x = tfm(img)
-        e = make_embed(model , device, x)
 
-        ref_embs.append(
-            e.detach().cpu().numpy().astype(np.float32)
+        out = make_embed(
+            model, device, x,
+            repr_mode=effective_mode,      # global|patch|global_patch
+            global_mode=global_mode,
         )
-        paths.append(str(img_path))
 
-    ref_embs = np.vstack(ref_embs)
+        paths.append(str(p))
 
-    np.savez_compressed(
-        npz_path,
-        embs=ref_embs,
-        paths=np.array(paths, dtype=object),
-    )
+        if "global" in out:
+            global_list.append(out["global"].detach().cpu().numpy().astype(np.float32))  # (D,)
+        if "patch" in out:
+            patch_list.append(out["patch"].detach().cpu().numpy().astype(np.float32))   # (P,D)
 
-    return ref_embs, paths
+    # save global
+    if global_list:
+        embs_g = np.stack(global_list, axis=0)  # (N,D)
+        np.savez_compressed(place_dir / f"{plc_idx}.npz",
+                            embs=embs_g, paths=np.array(paths, dtype=object))
+
+    # save patch
+    if patch_list:
+        embs_p = np.stack(patch_list, axis=0)   # (N,P,D)
+        np.savez_compressed(place_dir / f"{plc_idx}_patch_.npz",
+                            embs=embs_p, paths=np.array(paths, dtype=object))
+
+    return {
+        "global": (np.stack(global_list, axis=0) if global_list else None),
+        "patch":  (np.stack(patch_list, axis=0)  if patch_list  else None),
+        "paths": paths,
+    }

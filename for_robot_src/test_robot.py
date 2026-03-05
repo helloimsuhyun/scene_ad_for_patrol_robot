@@ -22,7 +22,7 @@ START_PLACE = 0
 PLACE_WIDTH = 2
 
 # 캡처/전송 옵션
-N_FRAMES = 10
+N_FRAMES = 5
 SAMPLE_DT = 0.2
 CAPTURE_TIMEOUT_S = 5.0
 POST_TIMEOUT_S = 10.0
@@ -103,7 +103,7 @@ def main():
     config = rs.config()
     config.enable_stream(rs.stream.color, W, H, rs.format.bgr8, FPS)
     pipeline.start(config)
-
+    
     try:
         while True:
             frames = pipeline.wait_for_frames()

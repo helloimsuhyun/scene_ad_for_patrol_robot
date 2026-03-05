@@ -24,7 +24,7 @@ def make_transform(img_size=518):
     ])
 
 @torch.no_grad()
-def make_embed(model, device, x, mode="cls+patch_mean"):
+def make_embed(model, device, x, mode="cls"):
 
     # [1,3,H,W]
     x = x.unsqueeze(0).to(device)
@@ -64,7 +64,6 @@ def make_embed(model, device, x, mode="cls+patch_mean"):
     emb = F.normalize(emb, dim=-1)
 
     return emb.squeeze(0).detach().cpu()
-
 
 
 

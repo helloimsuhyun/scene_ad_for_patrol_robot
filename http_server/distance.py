@@ -1,5 +1,5 @@
-# 1. threshold 캘리브레이션 : def calibrate_place(bank_root, plc_idx, model, device, k=3, percentile=95):
-# 2. q 이미지에 대한 추론 : def infer_one(img, plc_idx : str, bank_root, model, device):
+# 1. threshold 캘리브레이션 : def calibrate_place(bank_root, plc_idx, model, device):
+# 2. event단위 q 이미지에 대한 추론 : def infer_event(imgs_bgr: List[np.ndarray],plc_idx: str,bank_root,model,device)
 # - suhyun
 
 import hashlib  
@@ -11,48 +11,145 @@ import json
 from datetime import datetime
 from typing import List, Dict, Any, Optional
 
-
-from PIL import Image
-
-from banker import load_bank_by_place, BGR_to_RGB
+from banker import load_bank_by_place, BGR_to_RGB, rebuild_bank
 from dino_emb import make_embed , make_transform
 from vlm_gate import vlm_gate
+from config import load_cfg
 
+#global dist 계산 함수 > 거리와 제일 유사한 k개 유사도, 인덱스 반환
+def _dist_global(q: torch.Tensor, ref: torch.Tensor, k: int):
+    """
+    q: (D,) or (1,D)
+    ref: (N,D)
+    return dist(float), (topk_sim(1,k), topk_idx(1,k))
+    """
+    if q.dim() == 1:
+        q = q.unsqueeze(0)  # (1,D)
 
-def compute_knn_dist(
-    q_emb: torch.Tensor,
-    bank_root,
-    plc_idx: str,
+    q = F.normalize(q, dim=1)
+    ref = F.normalize(ref, dim=1)
+
+    k = min(k, ref.shape[0])
+    sim = q @ ref.T                       # (1,N)
+    topk_sim, topk_idx = torch.topk(sim, k=k, dim=1)
+    dist = (1.0 - topk_sim).mean().item()
+    return dist, (topk_sim, topk_idx)
+
+#patchcore dist 계산함수
+def _dist_patchcore(
+    q_patch: torch.Tensor,      # (P,D)
+    ref_patch: torch.Tensor,    # (N,P,D)
+    top_p: float = 0.1,
     k: int = 3,
-    ref_embs: Optional[torch.Tensor] = None,
-    ref_img_paths: Optional[List[str]] = None,
 ):
 
-    if q_emb.dim() == 1:
-        q_emb = q_emb.unsqueeze(0)  # (1,D)
+    q = F.normalize(q_patch, dim=1)
+    ref = F.normalize(ref_patch, dim=2)
 
-    # load bank
-    if ref_embs is None or ref_img_paths is None:
-        ref_embs_np, ref_img_paths = load_bank_by_place(bank_root, plc_idx)
-        if ref_embs_np is None:
-            raise FileNotFoundError(f"No bank found for plc_idx={plc_idx}")
+    # ref 이미지 한개 당 patch matching
+    # (N,Pq,Pr)
+    sim = torch.einsum("qd,npd->nqp", q, ref)
+    max_sim = sim.max(dim=2).values       # (N,Pq)
+    dist = 1.0 - max_sim                  # (N,Pq)
 
-        ref_embs = torch.from_numpy(ref_embs_np).float().to(q_emb.device)
+    Pq = dist.shape[1]
+    m = max(1, int(Pq * top_p))
+
+    top_vals, _ = torch.topk(dist, k=m, dim=1)
+
+    # ref 이미지별 이상 점수 > kNN > 평균 이상 점수
+    score_per_img = top_vals.mean(dim=1)  # (N)
+    k2 = min(k, score_per_img.shape[0])
+    best_val, best_idx = torch.topk(-score_per_img, k=k2)
+    topk_score = -best_val
+    score = topk_score.mean().item()
+
+    return score, (topk_score, best_idx)
+
+
+# ------------------------------------------------------------------------------------------------------------
+#각 모드에 맞추어 knn dist를 return 
+def compute_knn_dist(
+    q_out, #q에서 나온 임베팅
+    ref_bank, #bank(npz)임베딩
+    k=3,
+    repr_mode="global",
+    top_p=0.1,
+    preselect_m=10,
+):
+
+    # global emb -------------------------
+
+    if repr_mode == "global":
+
+        ref_embs_np, ref_paths = ref_bank["global"]
+        q = q_out["global"]
+        ref = torch.from_numpy(ref_embs_np).float().to(q.device)
+        dist, debug = _dist_global(q, ref, k)
+
+        return dist, debug, ref_paths
+
+
+    # patch -------------------------
+
+    elif repr_mode == "patch":
+
+        ref_patch_np, ref_paths = ref_bank["patch"]
+        q_patch = q_out["patch"]
+        ref_patch = torch.from_numpy(ref_patch_np).float().to(q_patch.device)
+
+        score, debug = _dist_patchcore(
+            q_patch,
+            ref_patch,
+            top_p=top_p,
+            k=k,
+        )
+
+        return score, debug, ref_paths
+
+
+    # global + patch -------------------------
+
+    elif repr_mode == "global_patch":
+
+        refg_np, ref_paths = ref_bank["global"]
+        refp_np, _ = ref_bank["patch"]
+
+        qg = q_out["global"]
+        qp = q_out["patch"]
+
+        refg = torch.from_numpy(refg_np).float().to(qg.device)
+
+        _, (topk_sim, topk_idx) = _dist_global(
+            qg,
+            refg,
+            min(preselect_m, refg.shape[0]),
+        )
+
+        idx = topk_idx.squeeze(0)
+
+        refp = torch.from_numpy(refp_np).float().to(qp.device)
+
+        refp_sel = refp[idx]
+
+        score, (topk_score_local, topk_idx_local) = _dist_patchcore(
+            qp,
+            refp_sel,
+            top_p=top_p,
+            k=min(k, refp_sel.shape[0]),
+        )
+
+        topk_idx = idx[topk_idx_local]
+
+        debug = {
+            "global_topk": (topk_sim, topk_idx),
+            "patch_topk": (topk_score_local, topk_idx),
+        }
+
+        return score, debug, ref_paths
+
     else:
-        ref_embs = ref_embs.to(q_emb.device)
-
-    #둘다 정규화 (혹시 모르니)
-    q_emb = F.normalize(q_emb, dim=1)
-    ref_embs = F.normalize(ref_embs, dim=1)
-
-    k = min(k, ref_embs.shape[0])
-
-    sim = q_emb @ ref_embs.T                  # (1,N)
-    topk_sim, topk_idx = torch.topk(sim, k=k, dim=1)  # (1,k)
-
-    mean_dist = (1.0 - topk_sim).mean().item()
-    return mean_dist, (topk_sim, topk_idx, ref_img_paths)
-
+        raise ValueError("repr_mode must be global|patch|global_patch")
 
 def th_percentile(scores, percentile):
     return float(np.percentile(scores, percentile))
@@ -68,207 +165,366 @@ def th_robust(scores, k=3.0):
     return float(med + k * mad * 1.4826)
 
 @torch.no_grad()
-def compute_and_save_threshold(bank_root, plc_idx, k=3, percentile=95, method = "robust"):
+def compute_and_save_threshold(
+    bank_root,
+    plc_idx,
+    cfg: dict,
+):
     bank_root = Path(bank_root)
     plc_idx = str(plc_idx)
 
-    bank_npz = bank_root / plc_idx / "bank" / f"{plc_idx}.npz"
-    th_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}.npz"
+    r = cfg.get("repr", {})
+    c = cfg.get("calib", {})
 
-    with open(bank_npz, "rb") as f:
+    repr_mode = str(r.get("repr_mode", "global"))
+    grid_size = int(r.get("grid_size", 4))
+    alpha     = float(r.get("alpha", 0.5))
+
+    k         = int(c.get("k", 3))
+    percentile= int(c.get("percentile", 97))
+    method    = str(c.get("method", "robust"))
+    robust_k  = float(c.get("robust_k", 2.5))
+    gaussian_k= float(c.get("gaussian_k", 2.5))
+
+    # hash는 global bank 기준 유지
+    bank_hash_src = bank_root / plc_idx / "bank" / f"{plc_idx}.npz"
+    with open(bank_hash_src, "rb") as f:
         bank_hash = hashlib.sha1(f.read()).hexdigest()[:8]
 
-    bank = torch.from_numpy(np.load(bank_npz, allow_pickle=True)["embs"]).float()  # (N,D)
-    th   = torch.from_numpy(np.load(th_npz, allow_pickle=True)["embs"]).float()    # (M,D)
+    # ---- load th_calib/bank ----
+    if repr_mode == "global":
+        bank_npz = bank_root / plc_idx / "bank" / f"{plc_idx}.npz"
+        th_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}.npz"
+        bank = torch.from_numpy(np.load(bank_npz, allow_pickle=True)["embs"]).float()
+        th   = torch.from_numpy(np.load(th_npz, allow_pickle=True)["embs"]).float()
+        bank = F.normalize(bank, dim=1)
+        th   = F.normalize(th, dim=1)
+        k2 = min(k, bank.shape[0])
+        sim = th @ bank.T
+        topk_sim, _ = torch.topk(sim, k=k2, dim=1)
+        scores = (1.0 - topk_sim).mean(dim=1).numpy()
 
-    bank = F.normalize(bank, dim=1)
-    th   = F.normalize(th, dim=1)
-    
-    k = min(k, bank.shape[0])
-    sim = th @ bank.T                    # (M,N)
-    topk_sim, _ = torch.topk(sim, k=k, dim=1)
+    elif repr_mode == "patch":
+        bank_npz = bank_root / plc_idx / "bank" / f"{plc_idx}_patch_.npz"
+        th_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}_patch_.npz"
 
-    scores = (1.0 - topk_sim).mean(dim=1).numpy()  # (M,)
+        bank = torch.from_numpy(np.load(bank_npz, allow_pickle=True)["embs"]).float()  # (N,P,D)
+        th   = torch.from_numpy(np.load(th_npz,   allow_pickle=True)["embs"]).float()  # (T,P,D)
 
-    if method == "percentile":
-        thr = th_percentile(scores, percentile)
+        top_p = float(cfg.get("patchcore", {}).get("top_p", 0.1))  
 
-    elif method == "gaussian":
-        thr = th_gaussian(scores, k=2.5)
+        scores = []
+        for i in range(th.shape[0]):
+            q_patch = th[i]  # (P,D)
+            s, _ = _dist_patchcore(q_patch, bank, top_p=top_p, k=k)  
+            scores.append(s)
+        scores = np.array(scores, dtype=np.float32)
 
-    elif method == "robust":
-        thr = th_robust(scores, k=2.5)
+    elif repr_mode == "global_patch":
+        # threshold는 "최종 score=patchcore score" 기준으로 잡는 게 깔끔함
+        bank_g_npz = bank_root / plc_idx / "bank" / f"{plc_idx}.npz"
+        th_g_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}.npz"
+        bank_p_npz = bank_root / plc_idx / "bank" / f"{plc_idx}_patch_.npz"
+        th_p_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}_patch_.npz"
+
+        bank_g = torch.from_numpy(np.load(bank_g_npz, allow_pickle=True)["embs"]).float()  # (N,D)
+        th_g   = torch.from_numpy(np.load(th_g_npz,   allow_pickle=True)["embs"]).float()  # (T,D)
+        bank_p = torch.from_numpy(np.load(bank_p_npz, allow_pickle=True)["embs"]).float()  # (N,P,D)
+        th_p   = torch.from_numpy(np.load(th_p_npz,   allow_pickle=True)["embs"]).float()  # (T,P,D)
+
+        bank_g = F.normalize(bank_g, dim=1)
+        th_g   = F.normalize(th_g, dim=1)
+
+        pcfg = cfg.get("patchcore", {})
+        top_p = float(pcfg.get("top_p", 0.1))
+        preselect_m = int(pcfg.get("preselect_m", 10))
+
+        scores = []
+        for i in range(th_g.shape[0]):
+            # global로 후보 이미지 M개 고르고
+            sim = th_g[i:i+1] @ bank_g.T
+            M = min(preselect_m, bank_g.shape[0])
+            _, idx = torch.topk(sim, k=M, dim=1)
+            idx = idx.squeeze(0)
+
+            bank_sel = bank_p[idx]  # (M,P,D)
+
+            s, _ = _dist_patchcore(th_p[i], bank_sel, top_p=top_p, k=k)
+            scores.append(s)
+
+        scores = np.array(scores, dtype=np.float32)
 
     else:
+        raise ValueError(f"Unknown repr_mode: {repr_mode}")
+
+    # ---- threshold from scores ----
+    if method == "percentile":
+        thr = th_percentile(scores, percentile)
+    elif method == "gaussian":
+        thr = th_gaussian(scores, k=gaussian_k)
+    elif method == "robust":
+        thr = th_robust(scores, k=robust_k)
+    else:
         raise ValueError(f"Unknown method: {method}")
-    
+
     created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
-    ref_bank_id = f"{plc_idx}_{method}_k{k}_p{percentile}_{bank_hash}_{created_at}"
+    ref_bank_id = f"{plc_idx}_{repr_mode}_{method}_k{k}_p{percentile}_{bank_hash}_{created_at}"
 
     out = {
         "plc_idx": plc_idx,
-        "k": int(k),
-        "percentile": int(percentile),
-        "threshold": thr,
-        "num_bank": int(bank.shape[0]),
+        "repr_mode": repr_mode,
+        "grid_size": grid_size,
+        "alpha": alpha,
+        "k": k,
+        "method": method,
+        "percentile": percentile,
+        "robust_k": robust_k,
+        "gaussian_k": gaussian_k,
+        "threshold": float(thr),
         "num_th": int(len(scores)),
-        "ref_bank_id": ref_bank_id
+        "ref_bank_id": ref_bank_id,
+        "created_at": created_at,
     }
 
     thr_path = bank_root / plc_idx / "threshold.json"
-    with open(thr_path, "w", encoding="utf-8") as f:
-        json.dump(out, f, indent=2)
+    thr_path.write_text(json.dumps(out, indent=2, ensure_ascii=False), encoding="utf-8")
+    return float(thr), scores, thr_path
 
+
+def calibrate_place(bank_root, plc_idx, model, device):
+    bank_root = Path(bank_root)
+    plc_idx = str(plc_idx)
+
+    cfg = load_cfg(bank_root)
+
+    rebuild_bank(bank_root, plc_idx, model, device, mode="bank",     cfg=cfg)
+    rebuild_bank(bank_root, plc_idx, model, device, mode="th_calib", cfg=cfg)
+
+    thr, scores, thr_path = compute_and_save_threshold(bank_root, plc_idx, cfg=cfg)    
     return thr, scores, thr_path
 
+
 @torch.no_grad()
-def infer_one(img, plc_idx : str, bank_root, model, device):
-    """
-    img      : numpy uint8 (H,W,3)
-    plc_idx  : str
-    bank_root: ref_bank 폴더
-    return:
-        score: float
-        thr: float
-        is_change: bool
-        topk_paths: list[str]
-        topk_sims: list[float]
-    """
+def infer_one(img, plc_idx, bank_root, model, device):
 
     plc_idx = str(plc_idx)
     bank_root = Path(bank_root)
 
-    #img emb 추출
-    tfm = make_transform()
-    img = BGR_to_RGB(img)
-    img_tensor = tfm(img)
-    q_emb = make_embed(model, device, img_tensor)   
-
-    
-    #th load
-    thr_path = bank_root / plc_idx / "threshold.json"
-    if not thr_path.exists():
-        raise FileNotFoundError(f"No threshold.json for plc_idx={plc_idx}")
-
-    with open(thr_path, "r") as f:
-        meta = json.load(f)
+    meta = json.loads(
+        (bank_root / plc_idx / "threshold.json").read_text()
+    )
 
     thr = float(meta["threshold"])
     k = int(meta["k"])
-    ref_bank_id = str(meta["ref_bank_id"])
+    repr_mode = meta["repr_mode"]
+    ref_bank_id = meta["ref_bank_id"]
 
-    #compute_dist
-    dist , debug = compute_knn_dist(q_emb,bank_root,plc_idx,k=k)
+    cfg = load_cfg(bank_root)
+    tfm = make_transform(img_size=int(img_size))
+    x = tfm(BGR_to_RGB(img))
+
+    embed_cfg = cfg.get("embed", {})
+
+    img_size = embed_cfg.get("img_size", 560)
+    global_mode = embed_cfg.get("global_mode", "patch_mean")
+
+    tfm = make_transform(img_size)
+
+    x = tfm(BGR_to_RGB(img))
+
+    q_out = make_embed(
+        model,
+        device,
+        x,
+        repr_mode=repr_mode,
+        global_mode=global_mode,
+    )
+
+    ref_bank = load_bank_by_place(bank_root, plc_idx)
+
+    pcfg = cfg.get("patchcore", {})
+
+    top_p = pcfg.get("top_p", 0.1)
+    preselect_m = pcfg.get("preselect_m", 10)
+
+    dist, debug, ref_paths = compute_knn_dist(
+        q_out,
+        ref_bank,
+        k=k,
+        repr_mode=repr_mode,
+        top_p=top_p,
+        preselect_m=preselect_m,
+    )
 
     is_change = dist > thr
 
-    # topk 이미지 경로 , 임베딩 반환
-    topk_sim , topk_idx , ref_paths = debug
-    topk_idx = topk_idx.squeeze(0).tolist()
-    topk_sims = topk_sim.squeeze(0).tolist()
-    topk_paths = [ref_paths[i] for i in topk_idx]
+    # --------------------
+    # topk logging
+    # --------------------
 
-    return dist, thr, is_change, topk_paths, topk_sims, ref_bank_id
+    if repr_mode == "global":
 
+        topk_sim, topk_idx = debug
 
-def calibrate_place(bank_root, plc_idx, model, device, k=3, percentile=95):
-    """
-    버튼 한 번으로 캘리브레이션:
-      1. ref bank rebuild
-      2. th_calib rebuild
-      3) threshold 계산/저장
+        idx = topk_idx.squeeze(0).tolist()
+        sims = topk_sim.squeeze(0).tolist()
 
-    return:
-        thr: float
-        scores: np.ndarray (M,)
-        thr_path: Path
-    """
+    elif repr_mode == "patch":
 
-    from banker import rebuild_bank
+        topk_score, topk_idx = debug
 
-    bank_root = Path(bank_root)
-    plc_idx = str(plc_idx)
+        idx = topk_idx.tolist()
+        sims = (-topk_score).tolist()
 
-    rebuild_bank(bank_root, plc_idx, model, device, mode="bank")
-    rebuild_bank(bank_root, plc_idx, model, device, mode="th_calib")
+    else:
 
-    thr, scores, thr_path = compute_and_save_threshold(
-        bank_root, plc_idx, k=k, percentile=percentile
-    )
+        topk_score, topk_idx = debug["patch_topk"]
 
-    return thr, scores, thr_path
+        idx = topk_idx.tolist()
+        sims = (-topk_score).tolist()
 
+    topk_paths = [ref_paths[i] for i in idx]
 
+    return float(dist), thr, bool(is_change), topk_paths, sims, ref_bank_id
+
+#------------------------------- 추론
+
+# event 단위 이상감지
 @torch.no_grad()
 def infer_event(
-    imgs_bgr: List[np.ndarray],      # 여러 장: uint8 BGR
-    plc_idx: str,                    # place_id / plc_idx
-    bank_root,                       # bank 파일의 root
+    imgs_bgr: List[np.ndarray],
+    plc_idx: str,
+    bank_root,
     model,
     device,
-    event_rule: str = "vote",        # event 단위 이상 결정 정책
-    use_two_stage_vlm = False
 ) -> Dict[str, Any]:
+    """
+    repr_mode: "global" | "patch" | "global_patch"
+    - global: global kNN
+    - patch: PatchCore-style (image-level) using patch tokens
+    - global_patch: global로 후보 이미지 preselect 후 patchcore
 
-    
+    return:
+      {
+        "threshold": float,
+        "frame_scores": List[float],
+        "anomaly_flag": int,
+        "frame_change_flags": List[int],
+        "event_score": float,
+        "ref_bank_id": str,
+        "ref_topk_json": str(json),
+        "summary": str,
+      }
+    """
+
     plc_idx = str(plc_idx)
     bank_root = Path(bank_root)
 
     if not imgs_bgr:
         raise ValueError("imgs_bgr is empty")
 
-    # threshold json load
+    # -------------------------
+    # cfg
+    # -------------------------
+    cfg = load_cfg(bank_root)
+
+    infer_cfg = cfg.get("infer", {})
+    event_rule = str(infer_cfg.get("event_rule", "max"))
+    use_two_stage_vlm = bool(infer_cfg.get("use_two_stage_vlm", False))
+
+    e = cfg.get("embed", {})
+    img_size = int(e.get("img_size", 560))
+    global_mode = str(e.get("global_mode", "patch_mean"))
+    tfm = make_transform(img_size=img_size)
+
+    pcfg = cfg.get("patchcore", {})
+    top_p = float(pcfg.get("top_p", 0.1))
+    preselect_m = int(pcfg.get("preselect_m", 10))
+
+    # -------------------------
+    # threshold meta
+    # -------------------------
     thr_path = bank_root / plc_idx / "threshold.json"
     if not thr_path.exists():
         raise FileNotFoundError(f"No threshold.json for plc_idx={plc_idx} ({thr_path})")
-
-    with open(thr_path, "r", encoding="utf-8") as f:
-        meta = json.load(f)
+    meta = json.loads(thr_path.read_text(encoding="utf-8"))
 
     thr = float(meta["threshold"])
-    k = int(meta["k"])
-    ref_bank_id = str(meta["ref_bank_id"])
+    k = int(meta.get("k", 3))
+    ref_bank_id = str(meta.get("ref_bank_id", ""))
 
+    repr_mode = str(meta.get("repr_mode", "global")).lower()
+    if repr_mode in {"patch_global"}:
+        repr_mode = "global_patch"
+    if repr_mode not in {"global", "patch", "global_patch"}:
+        raise ValueError(f"Unknown repr_mode={repr_mode} (use global|patch|global_patch)")
 
-    # bank emb load
-    ref_embs_np, ref_img_paths = load_bank_by_place(bank_root, plc_idx)
-    if ref_embs_np is None:
-        raise FileNotFoundError(f"No bank found for plc_idx={plc_idx}")
+    # -------------------------
+    # bank load
+    # -------------------------
+    ref_bank = load_bank_by_place(bank_root, plc_idx, mode="bank")
 
-    ref_embs = torch.from_numpy(ref_embs_np).float()  # (N,D)
-    k = min(k, ref_embs.shape[0])
-
-    # 각 이미지별 점수 계산
-    tfm = make_transform()  
+    # -------------------------
+    # frame loop
+    # -------------------------
     frame_scores: List[float] = []
     frame_change_flags: List[int] = []
     topk_paths_all: List[List[str]] = []
     topk_sims_all: List[List[float]] = []
 
     for img_bgr in imgs_bgr:
-        img_rgb = BGR_to_RGB(img_bgr)
+        x = tfm(BGR_to_RGB(img_bgr))
 
-        img_tensor = tfm(img_rgb)
-        q_emb = make_embed(model, device, img_tensor)
-        if q_emb.dim() == 1:
-            q_emb = q_emb.unsqueeze(0)
+        # embed
+        q_out = make_embed(
+            model,
+            device,
+            x,
+            repr_mode=repr_mode,          # global|patch|global_patch
+            global_mode=global_mode,
+        )
 
-        dist, debug = compute_knn_dist(q_emb, bank_root, plc_idx, k=k,
-                              ref_embs=ref_embs, ref_img_paths=ref_img_paths)
-
-        topk_sim, topk_idx, ref_paths = debug
-        idx_list = topk_idx.squeeze(0).tolist()
-        sim_list = topk_sim.squeeze(0).tolist()
-        topk_paths = [ref_paths[i] for i in idx_list]
+        # dist
+        dist, debug, ref_paths = compute_knn_dist(
+            q_out,
+            ref_bank,
+            k=k,
+            repr_mode=repr_mode,
+            top_p=top_p,
+            preselect_m=preselect_m,
+        )
 
         is_change = dist > thr
-
         frame_scores.append(float(dist))
         frame_change_flags.append(1 if is_change else 0)
-        topk_paths_all.append(topk_paths)
-        topk_sims_all.append([float(s) for s in sim_list])
 
-    #event 단위 
+        # -------------------------
+        # topk logging (항상 "이미지 단위 topk")
+        # -------------------------
+        if repr_mode == "global":
+            topk_sim, topk_idx = debug
+            idx = topk_idx.squeeze(0).tolist()
+            sims = topk_sim.squeeze(0).tolist()
+            paths = [ref_paths[i] for i in idx]
+
+        elif repr_mode == "patch":
+            topk_score, topk_idx = debug  # (k,), (k,)
+            idx = topk_idx.tolist()
+            paths = [ref_paths[i] for i in idx]
+            sims = (-topk_score).tolist()  # 표시용(작을수록 정상) -> -score
+
+        else:  # global_patch
+            topk_score, topk_idx = debug["patch_topk"]  # (k,), (k,) (원본 ref index)
+            idx = topk_idx.tolist()
+            paths = [ref_paths[i] for i in idx]
+            sims = (-topk_score).tolist()
+
+        topk_paths_all.append([str(p) for p in paths])
+        topk_sims_all.append([float(s) for s in sims])
+
+    # -------------------------
+    # event aggregation
+    # -------------------------
     if event_rule == "mean":
         event_score = float(np.mean(frame_scores))
         anomaly_flag = 1 if event_score > thr else 0
@@ -278,50 +534,48 @@ def infer_event(
         anomaly_flag = 1 if event_score > thr else 0
 
     elif event_rule == "vote":
-        # 프레임별 change 여부 기반 다수결
-        n_abnormal = sum(frame_change_flags)
-        n_total = len(frame_change_flags)
+        n_ab = int(sum(frame_change_flags))
+        n = int(len(frame_change_flags))
+        anomaly_flag = 1 if n_ab >= (n / 2) else 0
+        event_score = float(n_ab / max(1, n))
 
-        anomaly_flag = 1 if n_abnormal >= (n_total / 2) else 0
-        event_score = float(n_abnormal / n_total)  # vote 비율을 점수로 저장
+    elif event_rule == "median":
+        event_score = float(np.median(frame_scores))
+        anomaly_flag = 1 if event_score > thr else 0
 
     else:
-        raise ValueError(f"Unknown event_mode: {event_rule}")
-    
-    rep = None   
-    summary = ""
+        raise ValueError(f"Unknown event_rule: {event_rule}")
 
-    if use_two_stage_vlm:
-        m2 = 0.9
-        max_ratio = max(frame_scores) / (thr + 1e-12)
-        #need_vlm = (anomaly_flag == 1) and (max_ratio < 1.0 + m2)
-        if anomaly_flag == 1:
-            need_vlm = True
-            
-        if need_vlm:
-            idx = int(np.argmax(frame_scores))
-            q_img = imgs_bgr[idx]
-            ref_img_path = topk_paths_all[idx][0]
-            rep = {"frame_idx": idx, "ref_img_path": ref_img_path}
+    # -------------------------
+    # optional: VLM gate
+    # -------------------------
+    rep, summary = None, ""
+    if use_two_stage_vlm and anomaly_flag == 1:
+        idx = int(np.argmax(frame_scores))
+        q_img = imgs_bgr[idx]
+        ref_img_path = topk_paths_all[idx][0] if topk_paths_all[idx] else ""
+        rep = {"frame_idx": idx, "ref_img_path": ref_img_path}
 
+        if ref_img_path:
             vlm_result = vlm_gate(q_img, ref_img_path)
-            anomaly_flag = 1 if vlm_result["physical_change"] else 0
-            summary = vlm_result["description"]   
+            anomaly_flag = 1 if bool(vlm_result.get("physical_change", False)) else 0
+            summary = str(vlm_result.get("description", ""))
 
-
+    # -------------------------
+    # pack
+    # -------------------------
     ref_topk_json = json.dumps(
         {"topk_paths": topk_paths_all, "topk_sims": topk_sims_all, "rep": rep},
         ensure_ascii=False,
     )
 
     return {
-        "threshold": thr, # 해당 plc의 th
-        "frame_scores": frame_scores, # 각 이미지들의 이상 score
-        "anomaly_flag": int(anomaly_flag), #binary 이상 유무
-        "frame_change_flags": frame_change_flags, #각 이미지별 이상 유무
-        "event_score": event_score, #이벤트 단위 점수
-        "ref_bank_id" : ref_bank_id,
-        "ref_topk_json": ref_topk_json, #참조 이미지 경로 , 유사도
-        "summary": summary, #additional 추가 확장 고려
+        "threshold": float(thr),
+        "frame_scores": [float(x) for x in frame_scores],
+        "anomaly_flag": int(anomaly_flag),
+        "frame_change_flags": [int(x) for x in frame_change_flags],
+        "event_score": float(event_score),
+        "ref_bank_id": ref_bank_id,
+        "ref_topk_json": ref_topk_json,
+        "summary": summary,
     }
-

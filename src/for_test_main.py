@@ -15,8 +15,8 @@ from distance import calibrate_place, infer_one
 # -------------------------
 # 설정
 # -------------------------
-BANK_ROOT = "/home/choisuhyun/scene_ad_for_patrol_robot/data/ref_bank"
-PLC_IDX = "03" 
+BANK_ROOT = "/home/choisuhyun/scene_ad_for_patrol_robot/recv"
+PLC_IDX = "00" 
 K = 3
 PERCENTILE = 97
 
@@ -28,9 +28,9 @@ PERCENTILE = 97
 # -------------------------
 def label_from_name(name: str) -> int:
     name = name.lower()
-    if name.startswith("unnormal"):
+    if name.startswith("abnormal"):
         return 1   # 비정상
-    if name.startswith("nomal"):
+    if name.startswith("normal"):
         return 0   # 정상
     return 1       # 기본값: 비정상
 

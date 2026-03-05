@@ -72,10 +72,10 @@ def compute_and_save_threshold(bank_root, plc_idx, k=3, percentile=95, method = 
         thr = th_percentile(scores, percentile)
 
     elif method == "gaussian":
-        thr = th_gaussian(scores, k=2.5)
+        thr = th_gaussian(scores, k=2.0)
 
     elif method == "robust":
-        thr = th_robust(scores, k=2.5)
+        thr = th_robust(scores, k=2.0)
 
     else:
         raise ValueError(f"Unknown method: {method}")
