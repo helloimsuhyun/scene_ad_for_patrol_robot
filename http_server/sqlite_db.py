@@ -1,6 +1,7 @@
 # db.py (운영형: UUID + CHECK + CASCADE + 인덱스)
 import sqlite3
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import List, Optional, Sequence, Union, Dict, Any
 
@@ -70,6 +71,17 @@ def init_db(db: sqlite3.Connection) -> None:
         );
 
         -- =========================
+        -- places: 장소 상태 관리
+        -- =========================
+        CREATE TABLE IF NOT EXISTS places (
+          place_id        TEXT PRIMARY KEY,        -- 장소 ID
+          mode            TEXT NOT NULL DEFAULT 'idle',
+          threshold_ready INTEGER NOT NULL DEFAULT 0,
+          calibrating     INTEGER NOT NULL DEFAULT 0,
+          updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- =========================
         -- 인덱스 (GUI/조회 성능)
         -- =========================
         CREATE INDEX IF NOT EXISTS idx_events_place_time
@@ -80,6 +92,9 @@ def init_db(db: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_frames_event_idx
         ON frames(event_id, idx);
+
+        CREATE INDEX IF NOT EXISTS idx_places_mode
+        ON places(mode);
         """
     )
     db.commit()
@@ -267,3 +282,93 @@ def list_frames(db: sqlite3.Connection, event_id: str) -> List[Dict[str, Any]]:
         (event_id,),
     ).fetchall()
     return [dict(r) for r in rows]
+
+
+#-------------------- place 관련 함수
+
+# 해당 place row가 없으면 기본 상태(idle)로 생성
+def ensure_place(db, place_id: str):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT OR IGNORE INTO places (place_id, mode, threshold_ready, calibrating, updated_at)
+        VALUES (?, 'idle', 0, 0, ?)
+    """, (str(place_id), now))
+    db.commit()
+
+
+# 특정 place 상태 조회 (없으면 자동 생성 후 반환)
+def get_place(db, place_id: str):
+    ensure_place(db, place_id)
+    cur = db.cursor()
+    cur.execute("""
+        SELECT place_id, mode, threshold_ready, calibrating, updated_at
+        FROM places
+        WHERE place_id = ?
+    """, (str(place_id),))
+    row = cur.fetchone()
+    return dict(row) if row else None
+
+
+# 전체 place 상태 리스트 반환
+def list_places(db):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT place_id, mode, threshold_ready, calibrating, updated_at
+        FROM places
+        ORDER BY place_id ASC
+    """)
+    rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+
+# place mode 변경 (idle / bank / th_calib / query)
+def set_place_mode(db, place_id: str, mode: str):
+    ensure_place(db, place_id)
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET mode = ?, updated_at = ?
+        WHERE place_id = ?
+    """, (mode, now, str(place_id)))
+    db.commit()
+
+
+# threshold 준비 여부 상태 업데이트
+def set_place_threshold_ready(db, place_id: str, ready: bool):
+    ensure_place(db, place_id)
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET threshold_ready = ?, updated_at = ?
+        WHERE place_id = ?
+    """, (1 if ready else 0, now, str(place_id)))
+    db.commit()
+
+
+# calibration 진행 중 여부 상태 업데이트
+def set_place_calibrating(db, place_id: str, calibrating: bool):
+    ensure_place(db, place_id)
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET calibrating = ?, updated_at = ?
+        WHERE place_id = ?
+    """, (1 if calibrating else 0, now, str(place_id)))
+    db.commit()
+
+
+# 특정 place 상태 row 삭제
+def delete_place_row(db, place_id: str):
+    cur = db.cursor()
+    cur.execute("DELETE FROM places WHERE place_id = ?", (str(place_id),))
+    db.commit()
+
+# 모든 place 상태 row 삭제
+def delete_all_place_rows(db):
+    cur = db.cursor()
+    cur.execute("DELETE FROM places")
+    db.commit()
