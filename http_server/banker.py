@@ -70,12 +70,12 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
     #임베딩 추출 cfg ----
     cfg = cfg or {}
 
-    repr_mode   = str(cfg.get("repr", {}).get("repr_mode", "global"))  # global|patch|global_patch
+    repr_mode   = str(cfg.get("repr", {}).get("repr_mode", "global"))  # global|patch|global_patch|global_patch_pool
     global_mode = str(cfg.get("embed", {}).get("global_mode", "patch_mean"))
     img_size    = int(cfg.get("embed", {}).get("img_size", 560))
 
-    if repr_mode not in {"global", "patch", "global_patch"}:
-        raise ValueError(f"repr_mode must be global|patch|global_patch, got {repr_mode}")
+    if repr_mode not in {"global", "patch", "global_patch", "global_patch_pool"}:
+        raise ValueError(f"repr_mode must be global|patch|global_patch|global_patch_pool, got {repr_mode}")
     effective_mode = "global_patch" if repr_mode == "patch" else repr_mode
 
     save_root = Path(save_root)
@@ -104,7 +104,7 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
 
         out = make_embed(
             model, device, x,
-            repr_mode=effective_mode,      # global|patch|global_patch
+            repr_mode=effective_mode,      # global|patch|global_patch|global_patch_poll
             global_mode=global_mode,
         )
 

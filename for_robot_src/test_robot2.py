@@ -159,6 +159,10 @@ def main():
 
                 try:
                     mode_now = get_server_mode(SERVER_URL, place_id_now)
+
+                    # overlay 갱신
+                    last_mode = mode_now
+
                 except Exception as e:
                     print("[SEND FAIL] cannot get mode from server:", e)
                     set_sending(False)

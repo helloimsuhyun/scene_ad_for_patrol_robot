@@ -65,12 +65,7 @@
 
     Role
     - mode로 로봇에 어떤 모드로 보낼지 컨트롤함
-    - need_calibration 변수로 
-
-        
-
-
-
+    - need_calibration 변수로 이후 bank나 th_calib에 변화가 생기면, 임계치 재계산 여부를 table에 기록
 
 """
 

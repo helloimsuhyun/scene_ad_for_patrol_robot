@@ -12,10 +12,12 @@ import numpy as np
 import cv2
 import matplotlib.pyplot as plt
 from PIL import Image, ImageDraw
+from torchvision import transforms
 
 import dino_emb
-from distance import infer_event, calibrate_place   # 너의 최신 distance.py 기준
+from distance import infer_event, calibrate_place
 from config import load_cfg
+import vis
 
 
 # =========================
@@ -50,6 +52,31 @@ def normalize_label(x: Optional[str]) -> Optional[str]:
     if s in {"abnormal", "unnomal", "unnormal", "anomaly", "anomal"}:
         return "abnormal"
     return s
+
+
+# =========================
+# model-view helper
+# =========================
+def load_pil_for_model_view(img_path: Path, img_size: int) -> Image.Image:
+    """
+    dino_emb.make_transform()와 같은 공간 기준:
+      Resize(img_size) -> CenterCrop(img_size)
+    단, Normalize/ToTensor는 하지 않고 PIL 이미지만 반환.
+    """
+    img_pil = Image.open(img_path).convert("RGB")
+    img_pil = transforms.Resize(img_size)(img_pil)
+    img_pil = transforms.CenterCrop(img_size)(img_pil)
+    return img_pil
+
+
+def load_bgr_for_model_view(img_path: Path, img_size: int) -> np.ndarray:
+    """
+    model input과 동일한 공간 기준의 BGR 이미지 반환
+    """
+    img_pil = load_pil_for_model_view(img_path, img_size=img_size)
+    img_rgb = np.array(img_pil)
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    return img_bgr
 
 
 def parse_server_filename(p: Path) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[int]]:
@@ -160,14 +187,18 @@ def save_pair_vis_k(
     topk_sims: List[float],
     is_change: bool,
     vis_size: int = 384,
+    model_view_img_size: int = 560,
 ):
+    """
+    ref/query 모두 model-view(Resize+CenterCrop) 기준으로 맞춰서 저장
+    """
     k = len(topk_paths)
 
     ref_imgs = [
-        Image.open(p).convert("RGB").resize((vis_size, vis_size), Image.BICUBIC)
+        load_pil_for_model_view(p, img_size=model_view_img_size).resize((vis_size, vis_size), Image.BICUBIC)
         for p in topk_paths
     ]
-    qry_img = Image.open(query_path).convert("RGB").resize((vis_size, vis_size), Image.BICUBIC)
+    qry_img = load_pil_for_model_view(query_path, img_size=model_view_img_size).resize((vis_size, vis_size), Image.BICUBIC)
 
     if is_change:
         draw_q = ImageDraw.Draw(qry_img)
@@ -187,6 +218,42 @@ def save_pair_vis_k(
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     canvas.save(out_path)
+
+
+def save_top_p_patch_vis(
+    query_path: Path,
+    patch_vis: Dict[str, Any],
+    out_path: Path,
+):
+    """
+    patch heatmap은 반드시 model-view 공간 위에 overlay 해야 좌표가 맞음
+    """
+    if not patch_vis:
+        return
+
+    top_patch_idx = patch_vis.get("top_patch_idx", [])
+    top_patch_vals = patch_vis.get("top_patch_vals", [])
+    img_size = int(patch_vis.get("img_size", 560))
+    patch_size = int(patch_vis.get("patch_size", 14))
+
+    if len(top_patch_idx) == 0:
+        return
+
+    img = load_bgr_for_model_view(query_path, img_size=img_size)
+
+    vis_img = vis.draw_top_p_heatmap(
+        img_bgr=img,
+        top_patch_idx=top_patch_idx,
+        top_patch_vals=top_patch_vals,
+        img_size=img_size,
+        patch_size=patch_size,
+        alpha=0.45,
+        blur_ksize=0,
+        normalize_each=True,
+    )
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), vis_img)
 
 
 def _resolve_path(p: str, bank_root: Path) -> Path:
@@ -223,7 +290,12 @@ def _resolve_path(p: str, bank_root: Path) -> Path:
     return cand1.resolve()
 
 
-def extract_topk_from_out(out: dict, bank_root: Path, k: int = 3) -> Tuple[List[Path], List[float]]:
+def extract_topk_from_out(
+    out: dict,
+    bank_root: Path,
+    rep_idx_fallback: int = 0,
+    k: int = 3,
+) -> Tuple[List[Path], List[float], int]:
     """
     infer_event 결과(ref_topk_json) 구조 지원:
       ref_topk_json = {
@@ -231,29 +303,31 @@ def extract_topk_from_out(out: dict, bank_root: Path, k: int = 3) -> Tuple[List[
         "topk_sims":  [[...], [...], ...],
         "rep": {"frame_idx": i, "ref_img_path": "..."} or None
       }
-    return: (rep_frame_topk_paths, rep_frame_topk_sims)
+
+    return:
+      (rep_frame_topk_paths, rep_frame_topk_sims, rep_idx)
     """
     rj: Any = out.get("ref_topk_json")
     if rj is None:
-        return [], []
+        return [], [], rep_idx_fallback
 
     if isinstance(rj, str):
         try:
             rj = json.loads(rj)
         except Exception:
-            return [], []
+            return [], [], rep_idx_fallback
 
     if isinstance(rj, dict) and ("topk_paths" in rj):
         topk_paths_all = rj.get("topk_paths") or []
         topk_sims_all = rj.get("topk_sims") or []
         rep = rj.get("rep")
 
-        rep_idx = 0
+        rep_idx = rep_idx_fallback
         if isinstance(rep, dict) and isinstance(rep.get("frame_idx"), int):
             rep_idx = int(rep["frame_idx"])
 
         if not isinstance(topk_paths_all, list) or len(topk_paths_all) == 0:
-            return [], []
+            return [], [], rep_idx
 
         rep_idx = max(0, min(rep_idx, len(topk_paths_all) - 1))
 
@@ -261,7 +335,7 @@ def extract_topk_from_out(out: dict, bank_root: Path, k: int = 3) -> Tuple[List[
         s_list = topk_sims_all[rep_idx] if isinstance(topk_sims_all, list) and rep_idx < len(topk_sims_all) else None
 
         if not isinstance(p_list, list) or len(p_list) == 0:
-            return [], []
+            return [], [], rep_idx
 
         pths = [_resolve_path(str(p), bank_root) for p in p_list[:k]]
         if isinstance(s_list, list):
@@ -269,9 +343,9 @@ def extract_topk_from_out(out: dict, bank_root: Path, k: int = 3) -> Tuple[List[
         else:
             ss = [float("nan")] * len(pths)
 
-        return pths, ss
+        return pths, ss, rep_idx
 
-    return [], []
+    return [], [], rep_idx_fallback
 
 
 def plot_curve(xs: np.ndarray, ys: np.ndarray, thr: Optional[float], title: str, out_path: Path):
@@ -292,19 +366,22 @@ def main():
     if not RECV_ROOT.exists():
         raise FileNotFoundError(f"RECV_ROOT not found: {RECV_ROOT.resolve()}")
 
-    # cfg는 "참고용 출력" + distance.py 내부에서 사용할 값은 distance.py가 다시 load_cfg(bank_root)로 읽음
     cfg = load_cfg(RECV_ROOT)
 
     calib_cfg = cfg.get("calib", {})
     infer_cfg = cfg.get("infer", {})
+    embed_cfg = cfg.get("embed", {})
+
     k_cfg = int(calib_cfg.get("k", 3))
     percentile_cfg = int(calib_cfg.get("percentile", 97))
     method_cfg = str(calib_cfg.get("method", "robust"))
     event_rule_cfg = str(infer_cfg.get("event_rule", "max"))
     use_vlm_cfg = bool(infer_cfg.get("use_two_stage_vlm", False))
+    img_size_cfg = int(embed_cfg.get("img_size", 560))
 
     print("[CFG] calib:", {"k": k_cfg, "percentile": percentile_cfg, "method": method_cfg})
     print("[CFG] infer :", {"event_rule": event_rule_cfg, "use_two_stage_vlm": use_vlm_cfg})
+    print("[CFG] embed :", {"img_size": img_size_cfg})
 
     model, device = dino_emb.load_model()
     engine = {"model": model, "device": device, "bank_root": RECV_ROOT}
@@ -319,7 +396,7 @@ def main():
         out_dir.mkdir(parents=True, exist_ok=True)
         print(f"\n===== PLACE {plc} =====")
 
-        # 1) threshold 계산 (cfg 기반)
+        # 1) threshold 계산
         thr, calib_scores, _ = calibrate_place(
             str(RECV_ROOT), plc, model, device
         )
@@ -356,7 +433,6 @@ def main():
 
             imgs_bgr = load_imgs_bgr(b.paths)
 
-            # infer_event도 cfg/threshold.json 기반으로 내부에서 처리
             out = infer_event(
                 imgs_bgr,
                 plc,
@@ -372,11 +448,20 @@ def main():
             y_pred.append(pred_flag)
             event_scores.append(float(out["event_score"]))
 
-            # 대표 query 이미지: 기본은 첫 장 (VLM gate에서 rep을 따로 만들면 extract_topk_from_out가 rep_idx 따라감)
-            rep_q = b.paths[0]
+            # patch_vis 기준 대표 프레임 우선 사용
+            patch_vis = out.get("patch_vis") or {}
+            rep_idx_patch = int(patch_vis.get("frame_idx", 0))
+            rep_idx_patch = max(0, min(rep_idx_patch, len(b.paths) - 1))
 
-            # infer_event 포맷에 맞게 topk 복원
-            topk_paths, topk_sims = extract_topk_from_out(out, engine["bank_root"], k=k_cfg)
+            # topk도 같은 대표 프레임 기준으로 복원
+            topk_paths, topk_sims, rep_idx = extract_topk_from_out(
+                out,
+                engine["bank_root"],
+                rep_idx_fallback=rep_idx_patch,
+                k=k_cfg,
+            )
+            rep_idx = max(0, min(rep_idx, len(b.paths) - 1))
+            rep_q = b.paths[rep_idx]
 
             if len(topk_paths) > 0:
                 out_pair = pair_dir / f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}.png"
@@ -388,6 +473,16 @@ def main():
                     topk_sims=topk_sims[:k_cfg],
                     is_change=bool(pred_flag),
                     vis_size=384,
+                    model_view_img_size=img_size_cfg,
+                )
+
+            if patch_vis:
+                rep_q_patch = b.paths[rep_idx_patch]
+                out_patch = pair_dir / f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_heatmap.png"
+                save_top_p_patch_vis(
+                    query_path=rep_q_patch,
+                    patch_vis=patch_vis,
+                    out_path=out_patch,
                 )
 
             print(f"[EVAL] ts={b.safe_ts} gt={gt} pred={pred_flag} score={out['event_score']:.4f} thr={out['threshold']:.4f}")
@@ -400,6 +495,7 @@ def main():
                 "event_score": float(out["event_score"]),
                 "threshold": float(out["threshold"]),
                 "ref_bank_id": out.get("ref_bank_id"),
+                "rep_idx": int(rep_idx),
             })
 
         # 4) query event_score curve
@@ -427,6 +523,7 @@ def main():
             f.write(f"cfg.calib.method={method_cfg}\n")
             f.write(f"cfg.infer.event_rule={event_rule_cfg}\n")
             f.write(f"cfg.infer.use_two_stage_vlm={use_vlm_cfg}\n")
+            f.write(f"cfg.embed.img_size={img_size_cfg}\n")
             f.write(f"threshold={thr:.6f}\n\n")
             f.write("=== Metrics ===\n")
             if metrics:
@@ -444,7 +541,10 @@ def main():
         print("[OK] saved:", txt_path)
 
         out_json = out_dir / "offline_eval_results.json"
-        out_json.write_text(json.dumps({"metrics": metrics, "results": per_place_results}, indent=2, ensure_ascii=False), encoding="utf-8")
+        out_json.write_text(
+            json.dumps({"metrics": metrics, "results": per_place_results}, indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
         print("[OK] saved:", out_json)
 
     print("\nDONE.")

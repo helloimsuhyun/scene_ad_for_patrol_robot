@@ -1,3 +1,5 @@
+# place.dict
+
 from __future__ import annotations
 
 import shutil
@@ -76,7 +78,7 @@ def delete_threshold(save_root: Path, place_id: str):
         th_path.unlink()
 
 
-# 특정 place 데이터 + place row 삭제
+# 특정 place 데이터 + place row 삭제 - 파일도 다 지움
 def delete_place(db, save_root: Path, place_id: str):
     place_dir = save_root / str(place_id)
     if place_dir.exists():
@@ -84,7 +86,7 @@ def delete_place(db, save_root: Path, place_id: str):
     sqlite_db.delete_place_row(db, place_id)
 
 
-# 전체 place 데이터 + place row 전체 삭제
+# 전체 place 데이터 + place row 전체 삭제 - 파일도 다 지움
 def delete_all_places(db, save_root: Path):
     if save_root.exists():
         shutil.rmtree(save_root)
