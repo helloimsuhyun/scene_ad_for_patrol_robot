@@ -11,6 +11,67 @@
         "label" : gt # 평상시 None, 정답이 주어진 경우에는 normal, unnomal
     }
 
+    서버 db >> sqlite_db
+        event table / frame table / place table
+
+
+
+    >>>> events
+    ------
+    1 row = 1 개 query event
+
+    Columns
+    - event_id        : UUID (PRIMARY KEY)
+    - place_id        : place 고유 id (파일명)
+    - captured_at     : event capture timestamp
+    - anomaly_flag    : 0 = 정상, 1 = 비정상
+
+    Optional fields
+    - anomaly_score   : 이상 점수
+    - threshold_used  : 감지에 사용한 임계치
+    - ref_bank_id     : reference bank identifier
+    - ref_topk_json   : top-k reference matches (JSON)
+    - summary_text    : optional description
+
+    Auto fields
+    - created_at      : db에 기록된 시간
+
+
+    >>>>frames
+    ------
+    1 row = 1개 캡쳐된 이미지
+
+    Columns
+    - frame_id        : UUID (PRIMARY KEY)
+    - event_id        : 위에 event uuid를 그대로 받아옴
+    - idx             : event안에서 1개 frame의 idx
+    - image_path      : 해당 이미지 저장된 경로
+
+    - frame_score     : 해당 frame의 이상 점수
+    - capture_time    : capture timestamp
+
+    Relationship
+    - events (1) → frames (N)
+
+    >>>>places
+    ------
+
+    Columns
+    - place_id          : place 고유 id (파일명)
+    - mode              : current operation mode
+                        ('idle', 'bank', 'th_calib', 'query')
+    - need_calibration  : 임계치 재계산이 필요한 경우 True(1)
+    - updated_at        : last updated time
+
+    Role
+    - mode로 로봇에 어떤 모드로 보낼지 컨트롤함
+    - need_calibration 변수로 
+
+        
+
+
+
+
 """
 
 
@@ -23,7 +84,7 @@ import numpy as np
 
 from pathlib import Path
 from datetime import datetime
-from typing import List, Optional, Dict, Any
+from typing import List
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import JSONResponse
@@ -38,6 +99,14 @@ SAVE_ROOT = Path("./recv")  # 이미지저장 root
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path("./recv/events.db") # db root
 
+def sync_places_from_fs(db, save_root: Path):
+    for p in save_root.iterdir():
+        if not p.is_dir():
+            continue
+
+        place_id = p.name
+        sqlite_db.ensure_place(db, place_id)
+
 # 서버 시작 & 끝 관리 lifespan
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -48,9 +117,21 @@ async def lifespan(app: FastAPI):
     sqlite_db.init_db(app.state.db)
     app.state.db_lock = asyncio.Lock()
 
-    #calibration lock
-    app.state.calib_running = set()
+    sync_places_from_fs(app.state.db, SAVE_ROOT)
+
+    # calibration state
     app.state.calib_lock = asyncio.Lock()
+    app.state.global_calibrating = False
+    app.state.calib_task = None
+
+    # GPU lock
+    app.state.gpu_lock = asyncio.Lock()
+
+    app.state.calib_progress = {
+    "total": 0,
+    "done": 0,
+    "current_place_id": None,
+    }
 
     #model load
     model, device = dino_emb.load_model()
@@ -92,68 +173,33 @@ def run_threshold_calibration(place_id, engine):
     )
     return thr
 
-#임계치 업데이트를 백그라운드 진행하도록 ---------------------------
-async def ensure_calibration_started(place_id: str):
-    async with app.state.calib_lock:
-        th_path = SAVE_ROOT / place_id / "threshold.json"
-        if th_path.exists(): #th가 있으면 
-            print(f"[INFO] threshold already exists for place {place_id}")
-            async with app.state.db_lock:
-                place_manager.set_threshold_ready(app.state.db, place_id, True)
-                place_manager.set_calibrating(app.state.db, place_id, False)
-            return
-
-        if place_id not in app.state.calib_running:
-            print(f"[INFO] threshold.json not found for place {place_id} -> calibrating (background)")
-            app.state.calib_running.add(place_id)
-
-            async with app.state.db_lock:
-                place_manager.set_calibrating(app.state.db, place_id, True)
-
-            task = asyncio.create_task(
-                asyncio.to_thread(
-                    run_threshold_calibration,
-                    place_id,
-                    app.state.engine
-                )
-            )
-
-            def _calib_done_callback(t, pid=place_id):
-                try:
-                    exc = t.exception()
-                    if exc:
-                        print(f"[CALIB ERROR] place={pid} exc={exc}")
-                        place_manager.set_threshold_ready(app.state.db, pid, False)
-                        place_manager.set_calibrating(app.state.db, pid, False)
-                    else:
-                        print(f"[CALIB DONE] place={pid}")
-                        place_manager.set_threshold_ready(app.state.db, pid, True)
-                        place_manager.set_calibrating(app.state.db, pid, False)
-                finally:
-                    app.state.calib_running.discard(pid)
-
-            task.add_done_callback(_calib_done_callback)
-        else:
-            print(f"[INFO] threshold place {place_id} -> calibrating wait")
-
 
 # -----------------------------------------------------------------------------------------------
-# place 상태 조회 / 제어 API
+# place table 상태 조회 / 제어 API
 
 # 모든 place 상태 조회 (GUI 대시보드용)
 @app.get("/places")
 async def get_places():
     async with app.state.db_lock:
         places = place_manager.list_place_status(app.state.db, SAVE_ROOT)
-    return {"ok": True, "places": places}
 
+    return {
+        "ok": True,
+        "global_calibrating": app.state.global_calibrating,
+        "calib_progress": app.state.calib_progress,
+        "places": places,
+    }
 
 # 특정 place 상태 조회
 @app.get("/places/{place_id}")
 async def get_place(place_id: str):
     async with app.state.db_lock:
         place = place_manager.get_place_status(app.state.db, SAVE_ROOT, place_id)
-    return {"ok": True, "place": place}
+    return {
+        "ok": True,
+        "global_calibrating": app.state.global_calibrating,
+        "place": place,
+    }
 
 
 # GUI에서 place mode 변경
@@ -192,51 +238,90 @@ async def delete_all_places():
 @app.delete("/places/{place_id}/threshold")
 async def delete_place_threshold(place_id: str):
     async with app.state.db_lock:
-        place_manager.delete_threshold(app.state.db, SAVE_ROOT, place_id)
+        place_manager.delete_threshold(SAVE_ROOT, place_id)
         place = place_manager.get_place_status(app.state.db, SAVE_ROOT, place_id)
 
     return {"ok": True, "place": place, "status": "threshold_deleted"}
 
 
-# 특정 place recalibration 실행
-@app.post("/places/{place_id}/recalibrate")
-async def recalibrate_place_api(place_id: str):
-    if not place_manager.is_ready_for_calibration(SAVE_ROOT, place_id):
-        async with app.state.db_lock:
-            place = place_manager.get_place_status(app.state.db, SAVE_ROOT, place_id)
-        return {"ok": False, "status": "not_enough_data", "place": place}
-
-    async with app.state.db_lock:
-        place_manager.delete_threshold(app.state.db, SAVE_ROOT, place_id)
-
-    await ensure_calibration_started(place_id)
-    return {"ok": True, "place_id": place_id, "status": "recalibrating"}
-
 @app.post("/places/recalibrate_all")
-async def recalibrate_all_places():
-    async with app.state.db_lock:
-        places = sqlite_db.list_places(app.state.db)
+async def calibrate_all_places():
+    async with app.state.calib_lock:
+        if app.state.global_calibrating or app.state.calib_task is not None:
+            return {"ok": False, "status": "already_calibrating_all"}
 
-    started = []
-    skipped = []
+        app.state.global_calibrating = True
+        app.state.calib_progress = {
+            "total": 0,
+            "done": 0,
+            "current_place_id": None,
+        }
+        app.state.calib_task = asyncio.create_task(run_calibration_job(app))
 
-    for row in places:
-        place_id = row["place_id"]
+    return {"ok": True, "status": "recalibration_started"}
 
-        if place_manager.is_ready_for_calibration(SAVE_ROOT, place_id):
-            async with app.state.db_lock:
-                place_manager.delete_threshold(app.state.db, SAVE_ROOT, place_id)
-            await ensure_calibration_started(place_id)
-            started.append(place_id)
-        else:
-            skipped.append(place_id)
-
+@app.get("/calibration_status")
+async def get_calibration_status():
     return {
         "ok": True,
-        "status": "recalibrating_all",
-        "started": started,
-        "skipped": skipped,
+        "global_calibrating": app.state.global_calibrating,
+        "calib_progress": app.state.calib_progress,
     }
+
+async def run_calibration_job(app: FastAPI):
+
+    try:
+        async with app.state.db_lock:
+            places = sqlite_db.list_places(app.state.db)
+
+        print(f"[CALIB] n_places={len(places)}")
+        print(f"[CALIB] places={places}")
+
+        # progress reset
+        app.state.calib_progress = {
+            "total": len(places),
+            "done": 0,
+            "current_place_id": None,
+        }
+
+        # calibration
+        for row in places:
+            place_id = row["place_id"]
+            app.state.calib_progress["current_place_id"] = place_id
+
+            # 시작 상태 반영
+            async with app.state.db_lock:
+                place_manager.delete_threshold(SAVE_ROOT, place_id)
+
+            try:
+                async with app.state.gpu_lock:
+                    await asyncio.to_thread(
+                        run_threshold_calibration,
+                        place_id,
+                        app.state.engine,
+                    )
+
+                th_path = SAVE_ROOT / place_id / "threshold.json"
+                ok = th_path.exists()
+
+                if not ok:
+                    print(f"[CALIB ERROR] place={place_id} threshold.json not created")
+
+                async with app.state.db_lock:
+                    place_manager.set_need_calibration(app.state.db, place_id, not ok)
+
+            except Exception as e:
+                async with app.state.db_lock:
+                    place_manager.set_need_calibration(app.state.db, place_id, True)
+                print(f"[CALIB ERROR] place={place_id} exc={e}")
+
+            finally:
+                app.state.calib_progress["done"] += 1
+
+    finally:
+        app.state.global_calibrating = False
+        app.state.calib_progress["current_place_id"] = None
+        app.state.calib_task = None
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -251,6 +336,17 @@ async def place_imgs(
         meta_obj = json.loads(meta)
     except Exception:
         raise HTTPException(status_code=400, detail="meta must be valid json string")
+    
+    #캘리브레이션 중이면 저장하지 않고 바로 RETURN
+    if app.state.global_calibrating:
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "global_calibration_in_progress",
+                "meta": meta_obj,
+            },
+            status_code=409,
+        )
 
     place_id = str(meta_obj.get("place_id", "unknown"))
     mode = str(meta_obj.get("mode", "unknown"))
@@ -293,36 +389,16 @@ async def place_imgs(
     resp_status = "saved"
     th_path = SAVE_ROOT / place_id / "threshold.json"
 
-    #mode가 bank / th_calib이면 기존에 있던 thresh hold는 무효화
+
     if mode in ("bank", "th_calib"):
+        # th.json 존재하는데, ref bank 업데이트하면 calibaration 필요로 db에 기록
         if th_path.exists():
-            th_path.unlink()
-            print(f"[INFO] threshold invalidated (deleted): {th_path}")
             async with app.state.db_lock:
-                place_manager.set_threshold_ready(app.state.db, place_id, False)
-                place_manager.set_calibrating(app.state.db, place_id, False)
+                place_manager.set_need_calibration(app.state.db,place_id, True)
 
-    resp_status = "saved"
-    #--- 추론
     if mode == "query":
-        #event 생성하고 , frame일단 집어넣기
-        async with app.state.db_lock:
-            event_id = sqlite_db.insert_event( #event 생성
-                db=app.state.db,
-                place_id=place_id,
-                captured_at=ts,
-            )
 
-            sqlite_db.insert_frames(   #frame 넣기 - 1행 - 1개 frame
-                db=app.state.db,
-                event_id=event_id, 
-                image_paths=saved,
-                frame_scores=None,
-                capture_times=ts, 
-            )
-        
-        #추론 ---
-        if not th_path.exists():
+        if not th_path.exists(): #fail-safe
             return JSONResponse({
                 "ok": False,
                 "status": "threshold_not_ready",
@@ -332,13 +408,31 @@ async def place_imgs(
                 "meta": meta_obj,
             })
 
-        # threshold가 있으면 정상 추론
-        result = await asyncio.to_thread(
-            run_inference_event,
-            imgs_bgr,
-            meta_obj,
-            app.state.engine
-        )
+        #db에 event 생성 / frame 기록
+        async with app.state.db_lock:
+            #event
+            event_id = sqlite_db.insert_event( 
+                db=app.state.db,
+                place_id=place_id,
+                captured_at=ts,
+            )
+            #frame 1행 = 1개 frame
+            sqlite_db.insert_frames(   
+                db=app.state.db,
+                event_id=event_id, 
+                image_paths=saved,
+                frame_scores=None,
+                capture_times=ts, 
+            )
+        
+        #추론 
+        async with app.state.gpu_lock:
+            result = await asyncio.to_thread(
+                run_inference_event,
+                imgs_bgr,
+                meta_obj,
+                app.state.engine
+            )
 
         async with app.state.db_lock:
             sqlite_db.update_frame_scores(app.state.db, event_id, result["frame_scores"])
@@ -352,8 +446,6 @@ async def place_imgs(
                 ref_topk_json=result.get("ref_topk_json"),
                 summary_text=result.get("summary"),
             )
-        print("add q")
-
 
     return JSONResponse(
         {
@@ -369,5 +461,5 @@ async def place_imgs(
 
 if __name__ == "__main__":
     import uvicorn
-    # uvicorn.run(app, host="0.0.0.0", port=8000) 로봇, 서버 통신이면 
-    uvicorn.run(app, host="127.0.0.1", port=8000)
+    #uvicorn.run(app, host="0.0.0.0", port=8000) #로봇, 서버 통신이면 
+    uvicorn.run(app, host="127.0.0.1", port=8000) #한 개 pc안에서 test이면

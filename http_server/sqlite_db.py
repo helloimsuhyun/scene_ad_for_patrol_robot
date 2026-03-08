@@ -1,4 +1,4 @@
-# db.py (운영형: UUID + CHECK + CASCADE + 인덱스)
+
 import sqlite3
 import uuid
 from datetime import datetime
@@ -74,11 +74,11 @@ def init_db(db: sqlite3.Connection) -> None:
         -- places: 장소 상태 관리
         -- =========================
         CREATE TABLE IF NOT EXISTS places (
-          place_id        TEXT PRIMARY KEY,        -- 장소 ID
-          mode            TEXT NOT NULL DEFAULT 'idle',
-          threshold_ready INTEGER NOT NULL DEFAULT 0,
-          calibrating     INTEGER NOT NULL DEFAULT 0,
-          updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        place_id          TEXT PRIMARY KEY,
+        mode              TEXT NOT NULL DEFAULT 'idle'
+                            CHECK (mode IN ('idle', 'bank', 'th_calib', 'query')),
+        need_calibration  INTEGER NOT NULL DEFAULT 1 CHECK (need_calibration IN (0,1)),
+        updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
         );
 
         -- =========================
@@ -95,6 +95,9 @@ def init_db(db: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_places_mode
         ON places(mode);
+
+        CREATE INDEX IF NOT EXISTS idx_places_need_calibration
+        ON places(need_calibration);
         """
     )
     db.commit()
@@ -291,8 +294,8 @@ def ensure_place(db, place_id: str):
     now = datetime.now().isoformat()
     cur = db.cursor()
     cur.execute("""
-        INSERT OR IGNORE INTO places (place_id, mode, threshold_ready, calibrating, updated_at)
-        VALUES (?, 'idle', 0, 0, ?)
+        INSERT OR IGNORE INTO places (place_id, mode, need_calibration, updated_at)
+        VALUES (?, 'idle', 1, ?)
     """, (str(place_id), now))
     db.commit()
 
@@ -302,7 +305,7 @@ def get_place(db, place_id: str):
     ensure_place(db, place_id)
     cur = db.cursor()
     cur.execute("""
-        SELECT place_id, mode, threshold_ready, calibrating, updated_at
+        SELECT place_id, mode, need_calibration, updated_at
         FROM places
         WHERE place_id = ?
     """, (str(place_id),))
@@ -314,7 +317,7 @@ def get_place(db, place_id: str):
 def list_places(db):
     cur = db.cursor()
     cur.execute("""
-        SELECT place_id, mode, threshold_ready, calibrating, updated_at
+        SELECT place_id, mode, need_calibration, updated_at
         FROM places
         ORDER BY place_id ASC
     """)
@@ -334,30 +337,16 @@ def set_place_mode(db, place_id: str, mode: str):
     """, (mode, now, str(place_id)))
     db.commit()
 
-
-# threshold 준비 여부 상태 업데이트
-def set_place_threshold_ready(db, place_id: str, ready: bool):
+#threshold 재계산 필요 여부 업데이트 함수
+def set_place_need_calibration(db, place_id: str, need: bool):
     ensure_place(db, place_id)
     now = datetime.now().isoformat()
     cur = db.cursor()
     cur.execute("""
         UPDATE places
-        SET threshold_ready = ?, updated_at = ?
+        SET need_calibration = ?, updated_at = ?
         WHERE place_id = ?
-    """, (1 if ready else 0, now, str(place_id)))
-    db.commit()
-
-
-# calibration 진행 중 여부 상태 업데이트
-def set_place_calibrating(db, place_id: str, calibrating: bool):
-    ensure_place(db, place_id)
-    now = datetime.now().isoformat()
-    cur = db.cursor()
-    cur.execute("""
-        UPDATE places
-        SET calibrating = ?, updated_at = ?
-        WHERE place_id = ?
-    """, (1 if calibrating else 0, now, str(place_id)))
+    """, (1 if need else 0, now, str(place_id)))
     db.commit()
 
 

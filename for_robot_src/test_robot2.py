@@ -126,12 +126,6 @@ def main():
 
             place_id = plc_str(plc_idx)
 
-            # 서버에서 현재 mode 조회
-            try:
-                last_mode = get_server_mode(SERVER_URL, place_id)
-            except Exception as e:
-                print(f"[WARN] get_server_mode failed for place={place_id}: {e}")
-
             view = overlay_status(color_bgr, place_id, last_mode, is_sending(), query_gt)
             cv2.imshow("CaptureSend", view)
 
