@@ -1,21 +1,29 @@
-# --- Data & Logs (Heavy) ---
-pase_recv/
-dinov3/
-ckpt/
+
+# -------------------------
+# Data & datasets
+# -------------------------
 data/
+datasets/
+dinov3/
 past/
-# recv 폴더 전체를 무시하되, 폴더 자체는 유지하고 config.json만 예외적으로 추적
-**/recv/*
-!**/recv/config.json
+recv/
 
-# --- Database & Files ---
-*.npz
-*.db
-*.sqlite
-*.sqlite3
-*.log
+# -------------------------
+# Model checkpoints
+# -------------------------
+ckpt/
 
-# --- Python ---
+# -------------------------
+# Compressed files
+# -------------------------
+*.zip
+*.tar
+*.tar.gz
+
+# -------------------------
+# (선택) Python 캐시 / 환경
+# -------------------------
+>>>>>>> 394dc0e7c8f2db4132cbb6a6a15bd5367f9fea2f
 __pycache__/
 *.pyc
 *.pyo
