@@ -87,8 +87,8 @@ Image
 - An Anomaly Detection System via Moving Surveillance Robots with Human — IROS 2021  
 - Semantic Scene Difference Detection in Daily Life Patroling by Mobile Robots using Pre-Trained Large-Scale Vision-Language Model — ICRA 2024  
 
-
+#서버실행
 ./run_servers.sh
-
+#gui실헹
 cd sentrynexcontrol
 flutter run -d linux

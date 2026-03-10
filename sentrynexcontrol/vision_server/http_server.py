@@ -527,6 +527,18 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
         async with app.state.db_lock:
             frames = sqlite_db.list_frames(app.state.db, event_id)
             
+        # 각 프레임의 경로를 /images/ 경로에서 접근 가능한 형태로 변환
+        processed_frames = []
+        for f in frames:
+            f_dict = dict(f)
+            raw_path = f_dict["image_path"]
+            # 'recv/' 이후의 경로만 추출하여 상대 경로화
+            if "recv/" in raw_path:
+                f_dict["image_path"] = raw_path.split("recv/")[-1]
+            else:
+                f_dict["image_path"] = Path(raw_path).name
+            processed_frames.append(f_dict)
+            
         events.append({
             "event_id": event_id,
             "place_id": row["place_id"],
@@ -552,7 +564,7 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
             "created_at": row["created_at"],
             "createdAt": row["created_at"],
             
-            "frames": frames,
+            "frames": processed_frames,
         })
 
     return {
