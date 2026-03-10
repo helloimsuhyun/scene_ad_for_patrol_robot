@@ -1,0 +1,53 @@
+# --- Data & Logs (Heavy) ---
+pase_recv/
+dinov3/
+ckpt/
+data/
+past/
+# recv 폴더 전체를 무시하되, 폴더 자체는 유지하고 config.json만 예외적으로 추적
+**/recv/*
+!**/recv/config.json
+
+# --- Database & Files ---
+*.npz
+*.db
+*.sqlite
+*.sqlite3
+*.log
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+.venv/
+pip-log.txt
+
+# --- Deep Learning Weights (Very Heavy) ---
+*.pth
+*.pt
+*.onnx
+*.weights
+*.h5
+*.bin
+
+# --- Media & Images (Heavy) ---
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.bmp
+*.mp4
+*.avi
+
+# --- IDE & OS ---
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+*.iml
+*.iws
+*.ipr
