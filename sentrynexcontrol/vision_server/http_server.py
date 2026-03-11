@@ -76,6 +76,8 @@ from contextlib import asynccontextmanager
 from PIL import Image
 import io
 import numpy as np
+import shutil
+from uuid import uuid4
 
 from pathlib import Path
 from datetime import datetime
@@ -330,6 +332,105 @@ async def run_calibration_job(app: FastAPI):
         app.state.global_calibrating = False
         app.state.calib_progress["current_place_id"] = None
         app.state.calib_task = None
+
+
+# -----------------------------------------------------------------------------------------------
+# GUI bank 이동 endpoint 
+
+class MoveEventToBankReq(BaseModel):
+    event_id: str
+    place_id: Optional[str] = None   # 기본은 event의 place_id 사용
+    move: bool = True                # True면 원본 query 파일 이동, False면 복사
+
+
+@app.post("/move_event")
+async def move_event(req: MoveEventToBankReq):
+
+    # event_id 와 place_id에 대응하는 event와 frames를 가져옴
+    async with app.state.db_lock:
+        event = sqlite_db.get_event(app.state.db, req.event_id)
+        if event is None:
+            raise HTTPException(status_code=404, detail="event not found")
+
+        frames = sqlite_db.list_frames(app.state.db, req.event_id)
+        if not frames:
+            raise HTTPException(status_code=400, detail="event has no frames")
+
+    event_place_id = str(event["place_id"])
+    target_place_id = req.place_id or event_place_id
+
+    # place 보장
+    async with app.state.db_lock:
+        sqlite_db.ensure_place(app.state.db, target_place_id)
+
+    bank_dir = SAVE_ROOT / target_place_id / "bank"
+    bank_dir.mkdir(parents=True, exist_ok=True)
+
+    moved_files = []
+    skipped_files = []
+
+    for i, frame in enumerate(frames):
+        src_path = Path(frame["image_path"])
+
+        if not src_path.exists():
+            skipped_files.append({
+                "frame_id": frame["frame_id"],
+                "reason": "source_not_found",
+                "path": str(src_path),
+            })
+            continue
+
+        ext = src_path.suffix.lower() or ".jpg"
+
+        # bank용 새 파일명
+        # 예: 00_bank_2026-03-11T12-30-00_xxxxx_000.jpg
+        ts = (event["captured_at"] or datetime.now().isoformat()).replace(":", "-")
+        new_name = f"{target_place_id}_bank_{ts}_{uuid4().hex[:8]}_{i:03d}{ext}"
+        dst_path = bank_dir / new_name
+
+        try:   
+            #기존 잇던 파일을 제거
+            if req.move: 
+                shutil.move(str(src_path), str(dst_path))
+                op = "moved"
+            else:
+            #남겨놓고 복사
+                shutil.copy2(str(src_path), str(dst_path))
+                op = "copied"
+
+            moved_files.append({
+                "frame_id": frame["frame_id"],
+                "src": str(src_path),
+                "dst": str(dst_path),
+                "op": op,
+            })
+
+        except Exception as e:
+            skipped_files.append({
+                "frame_id": frame["frame_id"],
+                "reason": f"move_failed: {e}",
+                "path": str(src_path),
+            })
+
+    # bank가 바뀌었으니 threshold 재계산 필요로 places db 변경
+    async with app.state.db_lock:
+        place_manager.set_need_calibration(app.state.db, target_place_id, True)
+        place = place_manager.get_place_status(app.state.db, SAVE_ROOT, target_place_id)
+
+    return {
+        "ok": True,
+        "event_id": req.event_id,
+        "source_place_id": event_place_id,
+        "target_place_id": target_place_id,
+        "bank_dir": str(bank_dir),
+        "n_total_frames": len(frames),
+        "n_moved": len(moved_files),
+        "n_skipped": len(skipped_files),
+        "moved_files": moved_files,
+        "skipped_files": skipped_files,
+        "place": place,
+    }
+
 
 
 # ----------------------------------------------------------------------------------------------------

@@ -27,7 +27,11 @@ from . import vis
 # =========================
 # 설정
 # =========================
-RECV_ROOT = Path("./recv")                 # http_server.py의 SAVE_ROOT
+
+from pathlib import Path
+
+THIS_DIR = Path(__file__).resolve().parent
+RECV_ROOT = THIS_DIR.parent / "recv"
 DB_PATH = RECV_ROOT / "events.db"          # 서버와 동일 DB
 OUT_ROOTNAME = "_offline_out"              # place_dir 하위 출력 폴더명
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
