@@ -81,7 +81,9 @@ from uuid import uuid4
 
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from typing import List, Optional
+from pydantic import BaseModel
+
 
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
@@ -339,25 +341,25 @@ async def run_calibration_job(app: FastAPI):
 
 class MoveEventToBankReq(BaseModel):
     event_id: str
-    place_id: Optional[str] = None   # 기본은 event의 place_id 사용
-    move: bool = True                # True면 원본 query 파일 이동, False면 복사
-
+    place_id: Optional[str] = None
 
 @app.post("/move_event")
 async def move_event(req: MoveEventToBankReq):
+    place_id = req.place_id
+    event_id = req.event_id
 
     # event_id 와 place_id에 대응하는 event와 frames를 가져옴
     async with app.state.db_lock:
-        event = sqlite_db.get_event(app.state.db, req.event_id)
+        event = sqlite_db.get_event(app.state.db, event_id)
         if event is None:
             raise HTTPException(status_code=404, detail="event not found")
 
-        frames = sqlite_db.list_frames(app.state.db, req.event_id)
+        frames = sqlite_db.list_frames(app.state.db, event_id)
         if not frames:
             raise HTTPException(status_code=400, detail="event has no frames")
 
     event_place_id = str(event["place_id"])
-    target_place_id = req.place_id or event_place_id
+    target_place_id = place_id or event_place_id
 
     # place 보장
     async with app.state.db_lock:
@@ -389,14 +391,8 @@ async def move_event(req: MoveEventToBankReq):
         dst_path = bank_dir / new_name
 
         try:   
-            #기존 잇던 파일을 제거
-            if req.move: 
-                shutil.move(str(src_path), str(dst_path))
-                op = "moved"
-            else:
-            #남겨놓고 복사
-                shutil.copy2(str(src_path), str(dst_path))
-                op = "copied"
+            shutil.copy2(str(src_path), str(dst_path))
+            op = "copied"
 
             moved_files.append({
                 "frame_id": frame["frame_id"],
@@ -419,7 +415,7 @@ async def move_event(req: MoveEventToBankReq):
 
     return {
         "ok": True,
-        "event_id": req.event_id,
+        "event_id": event_id,
         "source_place_id": event_place_id,
         "target_place_id": target_place_id,
         "bank_dir": str(bank_dir),
@@ -430,7 +426,6 @@ async def move_event(req: MoveEventToBankReq):
         "skipped_files": skipped_files,
         "place": place,
     }
-
 
 
 # ----------------------------------------------------------------------------------------------------
@@ -472,11 +467,25 @@ async def place_imgs(
     safe_ts = ts.replace(":", "-")
     out_dir = SAVE_ROOT / place_id / mode 
     out_dir.mkdir(parents=True, exist_ok=True)
+    th_path = SAVE_ROOT / place_id / "threshold.json"
+
 
     if label is None:
         prefix = f"{place_id}_{mode}_{safe_ts}"
     else : 
         prefix = f"{label}_{place_id}_{mode}_{safe_ts}"
+
+    #th가 존재하지 않는데 query면 바로 return
+    if mode == "query" and not th_path.exists():
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "threshold_not_ready",
+                "place_id": place_id,
+                "meta": meta_obj,
+            },
+            status_code=409,
+        )
 
     # 파일 저장
     saved = []
@@ -496,8 +505,6 @@ async def place_imgs(
             imgs_bgr.append(bgr)
 
     resp_status = "saved"
-    th_path = SAVE_ROOT / place_id / "threshold.json"
-
 
     if mode in ("bank", "th_calib"):
         # th.json 존재하는데, ref bank 업데이트하면 calibaration 필요로 db에 기록
@@ -506,17 +513,6 @@ async def place_imgs(
                 place_manager.set_need_calibration(app.state.db,place_id, True)
 
     if mode == "query":
-
-        if not th_path.exists(): #fail-safe
-            return JSONResponse({
-                "ok": False,
-                "status": "threshold_not_ready",
-                "place_id": place_id,
-                "n_images": len(saved),
-                "saved_dir": str(out_dir),
-                "meta": meta_obj,
-            })
-
         #db에 event 생성 / frame 기록
         async with app.state.db_lock:
             #event
@@ -566,8 +562,6 @@ async def place_imgs(
         }
     )
 
-from typing import List, Optional
-from pydantic import BaseModel
 
 # ----------------------------------------------------------------------------------------------------
 # GUI event polling API
