@@ -5,90 +5,17 @@
 
 ---
 
-## ⚙️ Pipeline Overview
+## ⚙️ readme - ant_branch
+원활한 gui 개발을 위해 gpu의존 .py와 추론을 더미화 하여 랜덤한 값을 추론값으로 내보내도록 하였다.
 
-Image  
-→ DINO Embedding Extraction  
-→ Place-specific Reference Bank  
-→ k-NN Distance Computation (k=3)  
-→ Adaptive Threshold (Percentile Calibration)  
-→ Anomaly Detection  
+# 사용방법
 
----
 
-## 📈 Industrial Dataset Evaluation (VisA)
-
-- k = 3  
-- Adaptive threshold 적용  
-
-**Overall Performance (Representative Range)**  
-- Accuracy: ~85–90%  
-- Precision: High tendency  
-- Recall: Lower for small/local defects  
-
-> Global CLS embedding 기반 방식은 작은 국소 결함에 둔감한 한계 존재
-
----
-
-## 🏭 Real Patrol Environment Evaluation
-
-- Total: 120 images (Normal 67 / Anomaly 53)  
-- k = 3  
-- Adaptive threshold 적용  
-
-**Results**
-- Accuracy: **90.83%**
-- Recall: **88.68%**
-- Precision: **90.38%**
-- F1 Score: **89.52%**
-
-→ 실제 순찰 환경 적용 가능성 확인
-
----
-
-## 📷 Demo Examples
-
-<p align="center">
-  <img src="./exam_chg.png" width="700"/>
-</p>
-<p align="center">
-  <img src="./exam_chg2.png" width="700"/>
-</p>
-<p align="center">
-  <img src="./example_chg.png" width="700"/>
-</p>
-
-<p align="center">
-  <img src="./exam_query_dist_curve.png" width="500"/>
-</p>
-
----
-
-## 🛠️ Tech Stack
-
-- PyTorch
-- DINO (Self-supervised Vision Transformer)
-- NumPy / Scikit-learn
-- OpenCV
-
----
-
-## 🚀 Future Work
-
-- Patch-level anomaly localization  
-- RGB-D 기반 구조 변화 감지  
-- ROS 연동 실시간 파이프라인 통합  
-
----
-
-## 📚 References
-
-- Deep Nearest Neighbor Anomaly Detection — NeurIPS 2022  
-- An Anomaly Detection System via Moving Surveillance Robots with Human — IROS 2021  
-- Semantic Scene Difference Detection in Daily Life Patroling by Mobile Robots using Pre-Trained Large-Scale Vision-Language Model — ICRA 2024  
-
-#서버실행
+# 서버실행
 ./run_servers.sh
-#gui실헹
+
+# gui실헹
+
 cd sentrynexcontrol
-flutter run -d linux
+flutter run -d linux # 네트워크 있는 경우
+flutter run -d web-server # 없는 경우 
