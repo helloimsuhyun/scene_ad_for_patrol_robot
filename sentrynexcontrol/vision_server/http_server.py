@@ -1,24 +1,22 @@
 # http_server.py
 
-""" 
+"""
     로봇쪽에서 보내는 json meta
 
     meta = {
-        "place_id": place_id, #str 각 장소별 고유한 id str
+        "place_id": place_id, # str 각 장소별 고유한 id str
         "timestamp": datetime.now().isoformat(),
-        "n_frames": len(frames), 
-        "mode" : mode, # bank, query, th_calib로 제한
-        "label" : gt # 평상시 None, 정답이 주어진 경우에는 normal, unnomal
+        "n_frames": len(frames),
+        "mode": mode, # bank, query, th_calib로 제한
+        "label": gt # 평상시 None, 정답이 주어진 경우에는 normal, unnormal
     }
 
     서버 db >> sqlite_db
         event table / frame table / place table
 
-
-
     >>>> events
     ------
-    1 row = 1 개 query event
+    1 row = 1개 query event
 
     Columns
     - event_id        : UUID (PRIMARY KEY)
@@ -36,82 +34,158 @@
     Auto fields
     - created_at      : db에 기록된 시간
 
-
-    >>>>frames
+    >>>> frames
     ------
     1 row = 1개 캡쳐된 이미지
 
     Columns
     - frame_id        : UUID (PRIMARY KEY)
-    - event_id        : 위에 event uuid를 그대로 받아옴
-    - idx             : event안에서 1개 frame의 idx
-    - image_path      : 해당 이미지 저장된 경로
-
+    - event_id        : 위 event uuid
+    - idx             : event 안에서 frame index
+    - image_path      : 해당 이미지 저장 경로
     - frame_score     : 해당 frame의 이상 점수
     - capture_time    : capture timestamp
 
     Relationship
     - events (1) → frames (N)
 
-    >>>>places
+    >>>> places
     ------
-
     Columns
     - place_id          : place 고유 id (파일명)
     - mode              : current operation mode
-                        ('idle', 'bank', 'th_calib', 'query')
+                          ('idle', 'bank', 'th_calib', 'query')
     - need_calibration  : 임계치 재계산이 필요한 경우 True(1)
     - updated_at        : last updated time
 
     Role
-    - mode로 로봇에 어떤 모드로 보낼지 컨트롤함
-    - need_calibration 변수로 이후 bank나 th_calib에 변화가 생기면, 임계치 재계산 여부를 table에 기록
-
+    - mode로 로봇에 어떤 모드로 보낼지 컨트롤
+    - need_calibration으로 bank/th_calib 변화 시 임계치 재계산 필요 여부 기록
 """
 
-
-import json
-import asyncio
-from contextlib import asynccontextmanager
-from PIL import Image
+import os
 import io
-import numpy as np
+import json
 import shutil
+import random
+import asyncio
 from uuid import uuid4
-
 from pathlib import Path
 from datetime import datetime
-from typing import List
+from contextlib import asynccontextmanager
+from typing import List, Optional
 
+import numpy as np
+from PIL import Image
+from pydantic import BaseModel
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
 from . import sqlite_db
-from . import dino_emb
+#from . import dino_emb
 from . import place_manager
-from .distance import infer_event, calibrate_place
+#from .distance import infer_event, calibrate_place
 
-# path 
-SAVE_ROOT = Path("./recv")  # 이미지저장 root
+
+# -------------------------------------------------------------------
+# config
+
+USE_MOCK_INFERENCE = True
+
+# path
+SAVE_ROOT = Path("./recv")
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
-DB_PATH = Path("./recv/events.db") # db root
+
+DB_PATH = Path("./recv/events.db")
+
+
+# -------------------------------------------------------------------
+# utils
 
 def sync_places_from_fs(db, save_root: Path):
     for p in save_root.iterdir():
         if not p.is_dir():
             continue
-
         place_id = p.name
         sqlite_db.ensure_place(db, place_id)
 
-# 서버 시작 & 끝 관리 lifespan
+
+def run_mock_inference_event(imgs_bgr, meta_obj, engine):
+    """
+    GPU 없이도 GUI / DB / API 흐름 테스트 가능하게 하는 mock 추론.
+    """
+    place_id = str(meta_obj.get("place_id", "unknown"))
+    n = len(imgs_bgr)
+
+    # 간단한 deterministic-like mock:
+    # label이 abnormal/unnormal이면 비정상 쪽으로,
+    # normal이면 정상 쪽으로,
+    # 없으면 랜덤 스코어 생성
+    label = meta_obj.get("label", None)
+
+    if label in ("abnormal", "unnormal", "anomaly"):
+        frame_scores = [round(random.uniform(0.22, 0.35), 4) for _ in range(n)]
+        summary = "[MOCK] abnormal event"
+    elif label == "normal":
+        frame_scores = [round(random.uniform(0.02, 0.10), 4) for _ in range(n)]
+        summary = "[MOCK] normal event"
+    else:
+        frame_scores = [round(random.uniform(0.02, 0.30), 4) for _ in range(n)]
+        summary = "[MOCK] dummy inference result"
+
+    threshold = 0.15
+    event_score = max(frame_scores) if frame_scores else 0.0
+    anomaly_flag = int(event_score > threshold)
+
+    ref_topk = [
+        {"rank": 1, "ref": f"{place_id}_mock_ref_001.jpg", "score": 0.081},
+        {"rank": 2, "ref": f"{place_id}_mock_ref_002.jpg", "score": 0.127},
+        {"rank": 3, "ref": f"{place_id}_mock_ref_003.jpg", "score": 0.154},
+    ]
+
+    return {
+        "frame_scores": frame_scores,
+        "event_score": event_score,
+        "anomaly_flag": anomaly_flag,
+        "threshold": threshold,
+        "ref_bank_id": f"mock_bank_{place_id}",
+        "ref_topk_json": json.dumps(ref_topk, ensure_ascii=False),
+        "summary": summary,
+    }
+
+
+def run_mock_threshold_calibration(place_id, engine):
+    """
+    실제 calibrate_place 대신 threshold.json을 직접 생성.
+    """
+    place_dir = SAVE_ROOT / place_id
+    place_dir.mkdir(parents=True, exist_ok=True)
+
+    threshold = 0.15
+    threshold_json = {
+        "place_id": place_id,
+        "threshold": threshold,
+        "mode": "mock",
+        "created_at": datetime.now().isoformat(),
+        "note": "mock calibration result",
+    }
+
+    th_path = place_dir / "threshold.json"
+    th_path.write_text(
+        json.dumps(threshold_json, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return threshold
+
+
+# -------------------------------------------------------------------
+# lifespan
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
-    # 서버 시작시에 실행
-    # db connect & init(없으면 만들어줌)
+    # 서버 시작 시
     app.state.db = sqlite_db.connect_db(DB_PATH)
     sqlite_db.init_db(app.state.db)
     app.state.db_lock = asyncio.Lock()
@@ -123,31 +197,37 @@ async def lifespan(app: FastAPI):
     app.state.global_calibrating = False
     app.state.calib_task = None
 
-    # GPU lock
+    # GPU / inference lock
     app.state.gpu_lock = asyncio.Lock()
 
     app.state.calib_progress = {
-    "total": 0,
-    "done": 0,
-    "current_place_id": None,
+        "total": 0,
+        "done": 0,
+        "current_place_id": None,
     }
 
-    #model load
-    model, device = dino_emb.load_model()
+    # model load
+    if USE_MOCK_INFERENCE:
+        model, device = None, "mock"
+        print("------------ MOCK inference mode enabled")
+    else:
+        raise RuntimeError("Real inference disabled in this build")
+
     app.state.engine = {
         "model": model,
         "device": device,
-        "bank_root":SAVE_ROOT,
+        "bank_root": SAVE_ROOT,
     }
 
-    print(" ------------Server startup complete")
+    print("------------ Server startup complete")
 
-    yield  # ------------- 
+    yield
 
-    # 서버 종료 시 (shutdown)
-    print(" ------------ Server shutting down")
+    # 서버 종료 시
+    print("------------ Server shutting down")
     app.state.db.close()
     print("DB closed")
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -162,8 +242,13 @@ app.add_middleware(
 app.mount("/images", StaticFiles(directory=str(SAVE_ROOT)), name="images")
 
 
-#추론함수 호출 -------------------------------------------
+# -------------------------------------------------------------------
+# inference wrappers
+
 def run_inference_event(imgs_bgr, meta_obj, engine):
+    if USE_MOCK_INFERENCE:
+        return run_mock_inference_event(imgs_bgr, meta_obj, engine)
+    """
     place_id = str(meta_obj.get("place_id", "unknown"))
     return infer_event(
         imgs_bgr,
@@ -172,9 +257,13 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         engine["model"],
         engine["device"],
     )
+    """
 
-#임계치 업데이트 함수 호출----------------------------------
+
 def run_threshold_calibration(place_id, engine):
+    if USE_MOCK_INFERENCE:
+        return run_mock_threshold_calibration(place_id, engine)
+    """
     thr, scores, _ = calibrate_place(
         engine["bank_root"],
         place_id,
@@ -182,12 +271,12 @@ def run_threshold_calibration(place_id, engine):
         engine["device"],
     )
     return thr
+    """
 
 
-# -----------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # place table 상태 조회 / 제어 API
 
-# 모든 place 상태 조회 (GUI 대시보드용)
 @app.get("/places")
 async def get_places():
     async with app.state.db_lock:
@@ -200,7 +289,7 @@ async def get_places():
         "places": places,
     }
 
-# 특정 place 상태 조회
+
 @app.get("/places/{place_id}")
 async def get_place(place_id: str):
     async with app.state.db_lock:
@@ -212,7 +301,6 @@ async def get_place(place_id: str):
     }
 
 
-# GUI에서 place mode 변경
 @app.post("/places/{place_id}/config")
 async def set_place_config(
     place_id: str,
@@ -228,7 +316,6 @@ async def set_place_config(
     return {"ok": True, "place": place}
 
 
-# 특정 place 전체 삭제
 @app.delete("/places/{place_id}")
 async def delete_place(place_id: str):
     async with app.state.db_lock:
@@ -236,7 +323,6 @@ async def delete_place(place_id: str):
     return {"ok": True, "place_id": place_id, "status": "place_deleted"}
 
 
-# 전체 place 전체 삭제
 @app.delete("/places")
 async def delete_all_places():
     async with app.state.db_lock:
@@ -244,7 +330,6 @@ async def delete_all_places():
     return {"ok": True, "status": "all_places_deleted"}
 
 
-# 특정 place threshold 삭제
 @app.delete("/places/{place_id}/threshold")
 async def delete_place_threshold(place_id: str):
     async with app.state.db_lock:
@@ -270,6 +355,7 @@ async def calibrate_all_places():
 
     return {"ok": True, "status": "recalibration_started"}
 
+
 @app.get("/calibration_status")
 async def get_calibration_status():
     return {
@@ -278,8 +364,8 @@ async def get_calibration_status():
         "calib_progress": app.state.calib_progress,
     }
 
-async def run_calibration_job(app: FastAPI):
 
+async def run_calibration_job(app: FastAPI):
     try:
         async with app.state.db_lock:
             places = sqlite_db.list_places(app.state.db)
@@ -287,19 +373,16 @@ async def run_calibration_job(app: FastAPI):
         print(f"[CALIB] n_places={len(places)}")
         print(f"[CALIB] places={places}")
 
-        # progress reset
         app.state.calib_progress = {
             "total": len(places),
             "done": 0,
             "current_place_id": None,
         }
 
-        # calibration
         for row in places:
             place_id = row["place_id"]
             app.state.calib_progress["current_place_id"] = place_id
 
-            # 시작 상태 반영
             async with app.state.db_lock:
                 place_manager.delete_threshold(SAVE_ROOT, place_id)
 
@@ -334,19 +417,17 @@ async def run_calibration_job(app: FastAPI):
         app.state.calib_task = None
 
 
-# -----------------------------------------------------------------------------------------------
-# GUI bank 이동 endpoint 
+# -------------------------------------------------------------------
+# GUI bank 이동 endpoint
 
 class MoveEventToBankReq(BaseModel):
     event_id: str
-    place_id: Optional[str] = None   # 기본은 event의 place_id 사용
-    move: bool = True                # True면 원본 query 파일 이동, False면 복사
+    place_id: Optional[str] = None
+    move: bool = True
 
 
 @app.post("/move_event")
 async def move_event(req: MoveEventToBankReq):
-
-    # event_id 와 place_id에 대응하는 event와 frames를 가져옴
     async with app.state.db_lock:
         event = sqlite_db.get_event(app.state.db, req.event_id)
         if event is None:
@@ -359,7 +440,6 @@ async def move_event(req: MoveEventToBankReq):
     event_place_id = str(event["place_id"])
     target_place_id = req.place_id or event_place_id
 
-    # place 보장
     async with app.state.db_lock:
         sqlite_db.ensure_place(app.state.db, target_place_id)
 
@@ -381,20 +461,15 @@ async def move_event(req: MoveEventToBankReq):
             continue
 
         ext = src_path.suffix.lower() or ".jpg"
-
-        # bank용 새 파일명
-        # 예: 00_bank_2026-03-11T12-30-00_xxxxx_000.jpg
         ts = (event["captured_at"] or datetime.now().isoformat()).replace(":", "-")
         new_name = f"{target_place_id}_bank_{ts}_{uuid4().hex[:8]}_{i:03d}{ext}"
         dst_path = bank_dir / new_name
 
-        try:   
-            #기존 잇던 파일을 제거
-            if req.move: 
+        try:
+            if req.move:
                 shutil.move(str(src_path), str(dst_path))
                 op = "moved"
             else:
-            #남겨놓고 복사
                 shutil.copy2(str(src_path), str(dst_path))
                 op = "copied"
 
@@ -412,7 +487,6 @@ async def move_event(req: MoveEventToBankReq):
                 "path": str(src_path),
             })
 
-    # bank가 바뀌었으니 threshold 재계산 필요로 places db 변경
     async with app.state.db_lock:
         place_manager.set_need_calibration(app.state.db, target_place_id, True)
         place = place_manager.get_place_status(app.state.db, SAVE_ROOT, target_place_id)
@@ -432,21 +506,19 @@ async def move_event(req: MoveEventToBankReq):
     }
 
 
-
-# ----------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # 이미지를 받은 경우 endpoint
+
 @app.post("/place_imgs")
 async def place_imgs(
-    images: List[UploadFile] = File(...),  # 클라이언트에서 ("images", (...)) 반복
-    meta: str = Form(...),                 # 클라이언트에서 ("meta", (None, json, "application/json"))
+    images: List[UploadFile] = File(...),
+    meta: str = Form(...),
 ):
-    # meta 파싱
     try:
         meta_obj = json.loads(meta)
     except Exception:
         raise HTTPException(status_code=400, detail="meta must be valid json string")
-    
-    #캘리브레이션 중이면 저장하지 않고 바로 RETURN
+
     if app.state.global_calibrating:
         return JSONResponse(
             {
@@ -459,7 +531,7 @@ async def place_imgs(
 
     place_id = str(meta_obj.get("place_id", "unknown"))
     mode = str(meta_obj.get("mode", "unknown"))
-    label = meta_obj.get("label", None)  
+    label = meta_obj.get("label", None)
     ts = meta_obj.get("timestamp") or datetime.now().isoformat()
 
     async with app.state.db_lock:
@@ -468,19 +540,17 @@ async def place_imgs(
     if mode not in ("bank", "th_calib", "query"):
         raise HTTPException(status_code=400, detail="mode must be one of bank/th_calib/query")
 
-    # 저장 디렉토리: root / place / mode
     safe_ts = ts.replace(":", "-")
-    out_dir = SAVE_ROOT / place_id / mode 
+    out_dir = SAVE_ROOT / place_id / mode
     out_dir.mkdir(parents=True, exist_ok=True)
 
     if label is None:
         prefix = f"{place_id}_{mode}_{safe_ts}"
-    else : 
+    else:
         prefix = f"{label}_{place_id}_{mode}_{safe_ts}"
 
-    # 파일 저장
     saved = []
-    imgs_bgr = [] 
+    imgs_bgr = []
 
     for i, uf in enumerate(images):
         ext = Path(uf.filename).suffix.lower() or ".jpg"
@@ -490,57 +560,54 @@ async def place_imgs(
         out_path.write_bytes(data)
         saved.append(str(out_path))
 
-        if mode == "query": #바로 메모리 끌고와서 추론할 준비
+        if mode == "query":
             rgb = np.array(Image.open(io.BytesIO(data)).convert("RGB"), dtype=np.uint8)
-            bgr = rgb[:, :, ::-1].copy()  
+            bgr = rgb[:, :, ::-1].copy()
             imgs_bgr.append(bgr)
 
     resp_status = "saved"
     th_path = SAVE_ROOT / place_id / "threshold.json"
 
-
     if mode in ("bank", "th_calib"):
-        # th.json 존재하는데, ref bank 업데이트하면 calibaration 필요로 db에 기록
         if th_path.exists():
             async with app.state.db_lock:
-                place_manager.set_need_calibration(app.state.db,place_id, True)
+                place_manager.set_need_calibration(app.state.db, place_id, True)
 
     if mode == "query":
+        if not th_path.exists():
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "status": "threshold_not_ready",
+                    "place_id": place_id,
+                    "n_images": len(saved),
+                    "saved_dir": str(out_dir),
+                    "meta": meta_obj,
+                },
+                status_code=409,
+            )
 
-        if not th_path.exists(): #fail-safe
-            return JSONResponse({
-                "ok": False,
-                "status": "threshold_not_ready",
-                "place_id": place_id,
-                "n_images": len(saved),
-                "saved_dir": str(out_dir),
-                "meta": meta_obj,
-            })
-
-        #db에 event 생성 / frame 기록
         async with app.state.db_lock:
-            #event
-            event_id = sqlite_db.insert_event( 
+            event_id = sqlite_db.insert_event(
                 db=app.state.db,
                 place_id=place_id,
                 captured_at=ts,
             )
-            #frame 1행 = 1개 frame
-            sqlite_db.insert_frames(   
+
+            sqlite_db.insert_frames(
                 db=app.state.db,
-                event_id=event_id, 
+                event_id=event_id,
                 image_paths=saved,
                 frame_scores=None,
-                capture_times=ts, 
+                capture_times=ts,
             )
-        
-        #추론 
+
         async with app.state.gpu_lock:
             result = await asyncio.to_thread(
                 run_inference_event,
                 imgs_bgr,
                 meta_obj,
-                app.state.engine
+                app.state.engine,
             )
 
         async with app.state.db_lock:
@@ -566,10 +633,8 @@ async def place_imgs(
         }
     )
 
-from typing import List, Optional
-from pydantic import BaseModel
 
-# ----------------------------------------------------------------------------------------------------
+# -------------------------------------------------------------------
 # GUI event polling API
 
 class TestCreateEventReq(BaseModel):
@@ -580,16 +645,6 @@ class TestCreateEventReq(BaseModel):
 
 @app.get("/events")
 async def get_events(since: Optional[str] = None, limit: int = 50):
-    """
-    Flutter polling용.
-    - since가 없으면 최근 이벤트 목록 반환
-    - since가 있으면 그 시각 이후의 이벤트만 반환
-    응답 형식:
-    {
-        "ok": True,
-        "events": [...]
-    }
-    """
     async with app.state.db_lock:
         cur = app.state.db.cursor()
 
@@ -624,22 +679,22 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
     events = []
     for row in rows:
         event_id = row["event_id"]
-        # Fetch frames for this event
+
         async with app.state.db_lock:
             frames = sqlite_db.list_frames(app.state.db, event_id)
-            
-        # 각 프레임의 경로를 /images/ 경로에서 접근 가능한 형태로 변환
+
         processed_frames = []
         for f in frames:
             f_dict = dict(f)
             raw_path = f_dict["image_path"]
-            # 'recv/' 이후의 경로만 추출하여 상대 경로화
+
             if "recv/" in raw_path:
                 f_dict["image_path"] = raw_path.split("recv/")[-1]
             else:
                 f_dict["image_path"] = Path(raw_path).name
+
             processed_frames.append(f_dict)
-            
+
         events.append({
             "event_id": event_id,
             "place_id": row["place_id"],
@@ -664,7 +719,7 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
 
             "created_at": row["created_at"],
             "createdAt": row["created_at"],
-            
+
             "frames": processed_frames,
         })
 
@@ -672,6 +727,7 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
         "ok": True,
         "events": events,
     }
+
 
 @app.get("/events/{event_id}")
 async def get_event_detail(event_id: str):
@@ -688,11 +744,9 @@ async def get_event_detail(event_id: str):
         "frames": frames,
     }
 
+
 @app.post("/test/create_event")
 async def create_test_event(req: TestCreateEventReq):
-    """
-    GUI 테스트용 더미 이벤트 생성
-    """
     now = datetime.now().isoformat()
 
     async with app.state.db_lock:
@@ -719,7 +773,6 @@ async def create_test_event(req: TestCreateEventReq):
         "ok": True,
         "event_id": event_id,
     }
-
 
 
 if __name__ == "__main__":
