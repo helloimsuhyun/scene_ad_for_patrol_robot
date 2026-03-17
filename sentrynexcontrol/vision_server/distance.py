@@ -745,7 +745,7 @@ def infer_event(
     
     margin = decision_score - thr
 
-    #gui표시용 event 스코어 정규화
+    #gui표시용 event 스코어
     event_score = float(np.clip(
         50.0 + 50.0 * (margin / max(thr, 1e-8)),
         0.0,
