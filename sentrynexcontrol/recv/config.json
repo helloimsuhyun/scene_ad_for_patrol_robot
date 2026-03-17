@@ -8,8 +8,8 @@
         "repr_mode": "global_patch"
     },
     "patchcore": {
-        "top_p": 0.1,
-        "preselect_m": 15
+        "top_p": 0.10,
+        "preselect_m": 10
     },
     "calib": {
         "k": 3,

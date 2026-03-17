@@ -32,6 +32,45 @@ def get_top_p_patch_info(repr_mode: str, debug: dict):
     else:
         return None, None
 
+#()
+from scipy import ndimage
+import math
+
+def _infer_patch_grid(P: int):
+    side = int(math.sqrt(P))
+    if side * side != P:
+        raise ValueError(f"Patch count P={P} is not a perfect square.")
+    return side, side
+
+
+def _remove_small_blob_from_patch_dist(
+    patch_dist_1d: torch.Tensor,   # (P,)
+    patch_thr: float,
+    min_area: int = 3,
+) -> torch.Tensor:
+    """
+    patch_dist_1d에서 threshold 넘는 patch들 중
+    connected component 크기가 min_area 미만인 blob 제거.
+
+    return:
+        keep_mask: (P,) bool tensor
+    """
+    P = int(patch_dist_1d.numel())
+    Hp, Wp = _infer_patch_grid(P)
+
+    score_map = patch_dist_1d.detach().cpu().numpy().reshape(Hp, Wp)
+    mask = score_map > patch_thr
+
+    labeled, n = ndimage.label(mask)
+    keep = np.zeros_like(mask, dtype=bool)
+
+    for i in range(1, n + 1):
+        comp = (labeled == i)
+        if comp.sum() >= min_area:
+            keep |= comp
+
+    keep_mask = torch.from_numpy(keep.reshape(-1)).to(patch_dist_1d.device)
+    return keep_mask
 
 
 #global dist 계산 함수 > 거리와 제일 유사한 k개 유사도, 인덱스 반환
@@ -53,6 +92,8 @@ def _dist_global(q: torch.Tensor, ref: torch.Tensor, k: int):
     dist = (1.0 - topk_sim).mean().item()
     return dist, (topk_sim, topk_idx)
 
+
+"""
 #patchcore dist 계산함수
 def _dist_patchcore(
     q_patch: torch.Tensor,      # (P,D)
@@ -96,6 +137,84 @@ def _dist_patchcore(
         "top_patch_vals": top_patch_vals,   # (m,)
     }
     return score, debug
+"""
+
+USE_SMALL_BLOB_FILTER = True
+BLOB_MIN_AREA = 3
+
+def _dist_patchcore(
+    q_patch: torch.Tensor,      # (P,D)
+    ref_patch: torch.Tensor,    # (N,P,D)
+    top_p: float = 0.1,
+    k: int = 3,
+):
+    q = F.normalize(q_patch, dim=1)
+    # ref = F.normalize(ref_patch, dim=2) # bank쪽에서 한번에 정규화
+    ref = ref_patch
+
+    # (N,Pq,Pr)
+    sim = torch.einsum("qd,npd->nqp", q, ref)
+    max_sim = sim.max(dim=2).values       # (N,Pq)
+    dist = 1.0 - max_sim                  # (N,Pq)
+
+    Pq = dist.shape[1]
+    m = max(1, int(Pq * top_p))
+
+    # ref image별 상위 top_p patch 평균
+    top_vals_all, _ = torch.topk(dist, k=m, dim=1)   # (N,m)
+    score_per_img = top_vals_all.mean(dim=1)         # (N,)
+
+    k2 = min(k, score_per_img.shape[0])
+    best_val, best_idx = torch.topk(-score_per_img, k=k2)
+    topk_score = -best_val                           # (k,)
+
+    # 가장 좋은 ref image 1개 기준
+    best_img_idx = best_idx[0]                       # scalar
+    best_patch_dist = dist[best_img_idx]             # (Pq,)
+
+    keep_mask = None
+
+    if USE_SMALL_BLOB_FILTER:
+        # 기존 top-p 후보의 하한값을 patch threshold로 사용
+        raw_top_patch_vals, _ = torch.topk(best_patch_dist, k=m)
+        patch_thr = float(raw_top_patch_vals[-1].item())
+
+        keep_mask = _remove_small_blob_from_patch_dist(
+            best_patch_dist,
+            patch_thr=patch_thr,
+            min_area=BLOB_MIN_AREA,
+        )
+
+        kept_patch_dist = best_patch_dist[keep_mask]
+
+        if kept_patch_dist.numel() > 0:
+            m_kept = max(1, int(kept_patch_dist.numel() * top_p))
+            top_patch_vals, top_local_idx = torch.topk(kept_patch_dist, k=m_kept)
+
+            kept_orig_idx = torch.nonzero(keep_mask, as_tuple=False).squeeze(1)
+            top_patch_idx = kept_orig_idx[top_local_idx]
+
+            score = top_patch_vals.mean().item()
+        else:
+            top_patch_vals = torch.empty(0, device=best_patch_dist.device)
+            top_patch_idx = torch.empty(0, dtype=torch.long, device=best_patch_dist.device)
+            score = 0.0
+
+    else:
+        top_patch_vals, top_patch_idx = torch.topk(best_patch_dist, k=m)
+        score = topk_score.mean().item()
+
+    debug = {
+        "topk_score": topk_score,            # (k,)
+        "topk_idx": best_idx,               # (k,)
+        "best_img_idx": best_img_idx,       # scalar
+        "best_patch_dist": best_patch_dist, # (Pq,)
+        "top_patch_idx": top_patch_idx,     # (m') filtering 후 달라질 수 있음
+        "top_patch_vals": top_patch_vals,   # (m')
+        "keep_mask": keep_mask,             # (Pq,) or None
+    }
+    return score, debug
+
 
 
 def _dist_patch_pool(
@@ -523,7 +642,8 @@ def infer_one(img, plc_idx, bank_root, model, device):
         sims = topk_sim.squeeze(0).tolist()
 
     elif repr_mode == "patch":
-        topk_score, topk_idx = debug
+        topk_score = debug["topk_score"]
+        topk_idx = debug["topk_idx"]
         idx = topk_idx.tolist()
         sims = (-topk_score).tolist()
 
@@ -674,7 +794,8 @@ def infer_event(
             paths = [ref_paths[i] for i in idx]
 
         elif repr_mode == "patch":
-            topk_score, topk_idx = debug
+            topk_score = debug["topk_score"]
+            topk_idx = debug["topk_idx"]
             idx = topk_idx.tolist()
             paths = [ref_paths[i] for i in idx]
             sims = (-topk_score).tolist()
