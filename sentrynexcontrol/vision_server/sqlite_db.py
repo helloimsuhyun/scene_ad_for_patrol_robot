@@ -49,6 +49,7 @@ def init_db(db: sqlite3.Connection) -> None:
           ref_bank_id     TEXT,
           ref_topk_json   TEXT,
           summary_text    TEXT,
+          manual_label TEXT,
 
           created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
         );
@@ -396,13 +397,30 @@ def delete_all_place_rows(db):
     cur.execute("DELETE FROM places")
     db.commit()
 
+# ---------------------------------- 관리자 event 라벨링 관련 db 유틸
+
+def set_event_manual_label(
+    db: sqlite3.Connection,
+    event_id: str,
+    manual_label: Optional[str],
+) -> None:
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE events
+        SET manual_label = ?
+        WHERE event_id = ?
+        """,
+        (manual_label, event_id),
+    )
+    db.commit()
+
+
 # ---------------------------------- 교시 / patrol 관련 place db 유틸
 
+# 새로 place가 들어오면 현재 마지막 active의 다음 순서로 초기 배정
 def get_next_patrol_order(db: sqlite3.Connection) -> int:
-    """
-    현재 active place들 중 가장 큰 patrol_order 다음 값을 반환
-    새 place를 맨 뒤에 append할 때 사용
-    """
+
     cur = db.cursor()
     row = cur.execute("""
         SELECT COALESCE(MAX(patrol_order), -1) + 1 AS next_order
