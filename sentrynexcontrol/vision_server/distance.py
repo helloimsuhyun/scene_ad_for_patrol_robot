@@ -722,25 +722,35 @@ def infer_event(
     # event aggregation
     # -------------------------
     if event_rule == "mean":
-        event_score = float(np.mean(frame_scores))
-        anomaly_flag = 1 if event_score > thr else 0
+        decision_score = float(np.mean(frame_scores))
+        anomaly_flag = 1 if decision_score > thr else 0
 
     elif event_rule == "max":
-        event_score = float(np.max(frame_scores))
-        anomaly_flag = 1 if event_score > thr else 0
+        decision_score = float(np.max(frame_scores))
+        anomaly_flag = 1 if decision_score > thr else 0
+
+    elif event_rule == "median":
+        decision_score = float(np.median(frame_scores))
+        anomaly_flag = 1 if decision_score > thr else 0
 
     elif event_rule == "vote":
+        decision_score = float(np.median(frame_scores))  
+
         n_ab = int(sum(frame_change_flags))
         n = int(len(frame_change_flags))
         anomaly_flag = 1 if n_ab >= (n / 2) else 0
-        event_score = float(n_ab / max(1, n))
-
-    elif event_rule == "median":
-        event_score = float(np.median(frame_scores))
-        anomaly_flag = 1 if event_score > thr else 0
 
     else:
         raise ValueError(f"Unknown event_rule: {event_rule}")
+    
+    margin = decision_score - thr
+
+    #gui표시용 event 스코어 정규화
+    event_score = float(np.clip(
+        50.0 + 50.0 * (margin / max(thr, 1e-8)),
+        0.0,
+        100.0
+    ))
     
     rep_idx = int(np.argmax(frame_scores)) if len(frame_scores) > 0 else 0 # vis
 

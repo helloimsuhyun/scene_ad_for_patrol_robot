@@ -4,6 +4,7 @@
 
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torchvision import transforms
 
@@ -16,6 +17,12 @@ def load_model(model_name="dinov2_vits14", device=None):
 
 def make_transform(img_size=560):
     return transforms.Compose([
+        # 4:3 비율로 좌우 crop
+        transforms.Lambda(lambda img: (
+            TF.center_crop(img, (img.height, int(img.height * 4 / 3)))
+            if img.width / img.height > 4/3
+            else TF.center_crop(img, (int(img.width * 3 / 4), img.width))
+        )),
         transforms.Resize(img_size),
         transforms.CenterCrop(img_size),
         transforms.ToTensor(),
