@@ -4,7 +4,7 @@ import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
 
 // 시그널링 서버 주소 (signaling_server.py - 포트 8001)
-const String _signalingUrl = 'http://127.0.0.1:8001';
+const String _signalingUrl = 'http://172.17.78.222:8001';
 
 class CameraStreamWidget extends StatefulWidget {
   const CameraStreamWidget({super.key});

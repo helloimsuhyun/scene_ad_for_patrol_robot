@@ -150,7 +150,7 @@ class _EventMarker extends ConsumerWidget {
                             decoration: const BoxDecoration(color: Color(0xFF11121A)),
                             child: event.frames.isNotEmpty
                                 ? Image.network(
-                                    'http://localhost:8000/images/${event.frames.first.imagePath.replaceFirst("recv/", "")}',
+                                    'http://172.17.78.222:8000/images/${event.frames.first.imagePath.replaceFirst("recv/", "")}',
                                     fit: BoxFit.cover,
                                     errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.grey, size: 24),
                                   )
