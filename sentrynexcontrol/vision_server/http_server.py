@@ -187,7 +187,7 @@ def run_threshold_calibration(place_id, engine):
 
 
 # -----------------------------------------------------------------------------------------------
-# place table 상태 조회 / 제어 API
+# GUI place table 상태 조회 / 제어 API
 
 # 모든 place 상태 조회 (GUI 대시보드용)
 @app.get("/places")
@@ -255,7 +255,7 @@ async def delete_place_threshold(place_id: str):
 
     return {"ok": True, "place": place, "status": "threshold_deleted"}
 
-
+# 캘리브레이션 endpoint
 @app.post("/places/recalibrate_all")
 async def calibrate_all_places():
     async with app.state.calib_lock:
@@ -272,6 +272,7 @@ async def calibrate_all_places():
 
     return {"ok": True, "status": "recalibration_started"}
 
+# 현재 캘리브레이션 상태 endpoint
 @app.get("/calibration_status")
 async def get_calibration_status():
     return {
@@ -334,6 +335,49 @@ async def run_calibration_job(app: FastAPI):
         app.state.global_calibrating = False
         app.state.calib_progress["current_place_id"] = None
         app.state.calib_task = None
+
+# GUI Place table control endpoint -----------------------------------------------------------
+
+class UpdatePlaceNameReq(BaseModel):
+    display_name: str
+
+#display name을 변경
+@app.patch("/places/{place_id}/display_name")
+async def update_place_name(place_id: str, req: UpdatePlaceNameReq):
+    async with app.state.db_lock:
+        sqlite_db.set_place_display_name(app.state.db, place_id, req.display_name)
+        place = sqlite_db.get_place(app.state.db, place_id)
+    return {"ok": True, "place": place}
+
+
+class UpdatePatrolEnabledReq(BaseModel):
+    patrol_enabled: bool
+
+#로봇에게 전달할 순찰 목록에 넣을지 말지를 변경
+@app.patch("/places/{place_id}/patrol_enabled")
+async def update_patrol_enabled(place_id: str, req: UpdatePatrolEnabledReq):
+    async with app.state.db_lock:
+        sqlite_db.set_place_patrol_enabled(app.state.db, place_id, req.patrol_enabled)
+        place = sqlite_db.get_place(app.state.db, place_id)
+    return {"ok": True, "place": place}
+
+# 순찰 순서를 reorder
+class ReorderPatrolReq(BaseModel):
+    place_ids: List[str]
+
+@app.patch("/places/patrol_order")
+async def update_patrol_order(req: ReorderPatrolReq):
+    try:
+        async with app.state.db_lock:
+            sqlite_db.reorder_patrol_places(app.state.db, req.place_ids)
+            places = sqlite_db.list_places(app.state.db, active_only=True)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    return {
+        "ok": True,
+        "places": places,
+    }
 
 
 # -----------------------------------------------------------------------------------------------
@@ -430,6 +474,7 @@ async def move_event(req: MoveEventToBankReq):
 
 # ----------------------------------------------------------------------------------------------------
 # 이미지를 받은 경우 endpoint
+
 @app.post("/place_imgs")
 async def place_imgs(
     images: List[UploadFile] = File(...),  # 클라이언트에서 ("images", (...)) 반복
@@ -682,38 +727,64 @@ async def get_event_detail(event_id: str):
         "frames": frames,
     }
 
-@app.post("/test/create_event")
-async def create_test_event(req: TestCreateEventReq):
-    """
-    GUI 테스트용 더미 이벤트 생성
-    """
-    now = datetime.now().isoformat()
+# --------------- 로봇용 endpoint-----------------------
+# --------------- 로봇 교시 및 waypoint 조회 -------------
 
+class TeachPlaceReq(BaseModel):
+    place_id: str
+    x: float
+    y: float
+    yaw: float
+    display_name: Optional[str] = None
+    patrol_enabled: bool = True
+    patrol_order: Optional[int] = None
+
+#로봇 교시 유틸
+@app.post("/robot/teach")
+async def teach_place(req: TeachPlaceReq):
     async with app.state.db_lock:
-        sqlite_db.ensure_place(app.state.db, req.place_id)
+        existing = sqlite_db.get_place(app.state.db, req.place_id)
 
-        event_id = sqlite_db.insert_event(
+        if req.patrol_order is not None and req.patrol_order < 0:
+            raise HTTPException(status_code=400, detail="patrol_order must be >= 0")
+
+        if req.patrol_order is not None:
+            patrol_order = int(req.patrol_order)
+        elif existing is not None and existing.get("patrol_order") is not None:
+            # 이미 존재하는 place를 다시 teach하는 경우 기존 순서 유지
+            patrol_order = int(existing["patrol_order"])
+        else:
+            # 새 place면 자동으로 맨 뒤에 append
+            patrol_order = sqlite_db.get_next_patrol_order(app.state.db)
+
+        sqlite_db.upsert_place_waypoint(
             db=app.state.db,
             place_id=req.place_id,
-            captured_at=now,
+            x=req.x,
+            y=req.y,
+            yaw=req.yaw,
+            display_name=req.display_name,
+            patrol_enabled=req.patrol_enabled,
+            patrol_order=patrol_order,
         )
-
-        sqlite_db.update_event_result(
-            app.state.db,
-            event_id=event_id,
-            anomaly_flag=int(req.anomaly_flag),
-            anomaly_score=0.999 if int(req.anomaly_flag) == 1 else 0.05,
-            threshold_used=0.15,
-            ref_bank_id=None,
-            ref_topk_json=None,
-            summary_text=req.summary_text or "[TEST] mock event",
-        )
+        place = sqlite_db.get_place(app.state.db, req.place_id)
 
     return {
         "ok": True,
-        "event_id": event_id,
+        "status": "place_taught",
+        "place": place,
     }
 
+@app.get("/robot/patrol_points")
+async def get_patrol_points():
+    async with app.state.db_lock:
+        places = sqlite_db.list_patrol_places(app.state.db)
+
+    return {
+        "ok": True,
+        "n_places": len(places),
+        "places": places,
+    }
 
 
 if __name__ == "__main__":
