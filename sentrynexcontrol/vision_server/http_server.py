@@ -94,7 +94,10 @@ from .distance import infer_event, calibrate_place
 
 # path 
 SAVE_ROOT = Path("./recv")  # 이미지저장 root
+AUDIO_ROOT = Path("./recv_audio") # 오디오 저장 root
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
+AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
+
 DB_PATH = Path("./recv/events.db") # db root
 
 def sync_places_from_fs(db, save_root: Path):
@@ -164,6 +167,7 @@ app.add_middleware(
 )
 
 app.mount("/images", StaticFiles(directory=str(SAVE_ROOT)), name="images")
+app.mount("/audio", StaticFiles(directory=str(AUDIO_ROOT)), name="audio")
 
 # --------------------------------------------------------------------------------------------------------
 # 추론함수 호출 ------------------------------------------------
@@ -825,6 +829,106 @@ async def get_robot_pose():
     return {
         "ok": True,
         "pose": app.state.robot_pose,
+    }
+
+
+# ----------------------------------------------------------------오디오 이벤트 endpoint
+# 오디오 이벤트를 받고, db에 넣는 endpoint
+@app.post("/upload_audio")
+async def upload_audio_event(
+    file: UploadFile = File(...),
+    x: float = Form(...),
+    y: float = Form(...),
+    yaw: float = Form(...),
+    timestamp: str = Form(...),
+    doa: float = Form(...),
+    model_label: Optional[str] = Form(None),
+):
+    ext = Path(file.filename or "").suffix.lower()
+    if ext not in [".wav", ".wave"]:
+        raise HTTPException(status_code=400, detail="only wav file is allowed")
+
+    audio_event_id = str(uuid4())
+    safe_ts = timestamp.replace(":", "-")
+    save_path = AUDIO_ROOT / f"{audio_event_id}_{safe_ts}.wav"
+
+    data = await file.read()
+    save_path.write_bytes(data)
+
+    async with app.state.db_lock:
+        sqlite_db.insert_audio_event(
+            db=app.state.db,
+            audio_event_id=audio_event_id,
+            timestamp=timestamp,
+            audio_path=str(save_path),
+            x=x,
+            y=y,
+            yaw=yaw,
+            doa=doa,
+            model_label=model_label,
+        )
+
+    return {
+        "ok": True,
+        "audio_event_id": audio_event_id,
+        "audio_path": str(save_path),
+        "audio_url": f"/audio/{save_path.name}",
+    }
+
+#------------ 
+@app.get("/audio_events")
+async def get_audio_events(unchecked_only: bool = False):
+    async with app.state.db_lock:
+        rows = sqlite_db.list_audio_events(app.state.db, unchecked_only=unchecked_only)
+
+    audio_events = []
+    for row in rows:
+        item = dict(row)
+        item["audio_url"] = f"/audio/{Path(item['audio_path']).name}"
+        audio_events.append(item)
+
+    return {
+        "ok": True,
+        "audio_events": audio_events,
+    }
+
+#------------------------ 개별 이벤트 조회
+@app.get("/audio_events/{audio_event_id}")
+async def get_audio_event_detail(audio_event_id: str):
+    async with app.state.db_lock:
+        row = sqlite_db.get_audio_event(app.state.db, audio_event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="audio event not found")
+
+    item = dict(row)
+    item["audio_url"] = f"/audio/{Path(item['audio_path']).name}"
+
+    return {
+        "ok": True,
+        "audio_event": item,
+    }
+
+# ----------------- 오디오 이벤트 라벨링
+class UpdateAudioLabelReq(BaseModel):
+    admin_label: Optional[str] = None
+
+@app.patch("/audio_events/{audio_event_id}/label")
+async def update_audio_event_label(audio_event_id: str, req: UpdateAudioLabelReq):
+    async with app.state.db_lock:
+        row = sqlite_db.get_audio_event(app.state.db, audio_event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="audio event not found")
+
+        sqlite_db.set_audio_event_admin_label(
+            app.state.db,
+            audio_event_id,
+            req.admin_label,
+        )
+        updated = sqlite_db.get_audio_event(app.state.db, audio_event_id)
+
+    return {
+        "ok": True,
+        "audio_event": updated,
     }
 
 

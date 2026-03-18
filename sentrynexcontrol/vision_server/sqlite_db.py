@@ -1,4 +1,4 @@
-# sqlite_dl
+#sqlite_dl.py
 
 import sqlite3
 import uuid
@@ -94,6 +94,27 @@ def init_db(db: sqlite3.Connection) -> None:
         );
 
         -- =========================
+        -- audio_events: 오디오 이벤트 관리
+        -- =========================
+        CREATE TABLE IF NOT EXISTS audio_events (
+            audio_event_id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            audio_path TEXT NOT NULL,
+
+            x REAL,
+            y REAL,
+            yaw REAL,
+
+            doa REAL,
+            model_label TEXT,
+
+            admin_checked INTEGER NOT NULL DEFAULT 0,
+            admin_label TEXT,
+
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- =========================
         -- 인덱스 (GUI/조회 성능)
         -- =========================
         CREATE INDEX IF NOT EXISTS idx_events_place_time
@@ -119,6 +140,16 @@ def init_db(db: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_places_patrol_order
         ON places(patrol_order);
+
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_time
+        ON audio_events(timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_admin_checked
+        ON audio_events(admin_checked);
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_model_label
+        ON audio_events(model_label);
         """
     )
     db.commit()
@@ -577,4 +608,78 @@ def list_patrol_places(db):
         ORDER BY patrol_order ASC, place_id ASC
     """)
     rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+# ======================================= 오디오 관련 함수
+
+# 오디오 이벤트 db에 넣는 함수
+def insert_audio_event(
+    db: sqlite3.Connection,
+    timestamp: ISO8601,
+    audio_path: str,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+    yaw: Optional[float] = None,
+    doa: Optional[float] = None,
+    model_label: Optional[str] = None,
+    audio_event_id: Optional[str] = None,
+) -> str:
+    aid = audio_event_id or _uuid()
+    cur = db.cursor()
+    cur.execute(
+        """
+        INSERT INTO audio_events
+        (audio_event_id, timestamp, audio_path, x, y, yaw, doa, model_label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (aid, timestamp, audio_path, x, y, yaw, doa, model_label),
+    )
+    db.commit()
+    return aid
+
+# 관리자 오디오 이벤트 라벨링
+def set_audio_event_admin_label(
+    db: sqlite3.Connection,
+    audio_event_id: str,
+    admin_label: Optional[str],
+) -> None:
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE audio_events
+        SET admin_checked = 1,
+            admin_label = ?
+        WHERE audio_event_id = ?
+        """,
+        (admin_label, audio_event_id),
+    )
+    db.commit()
+
+#오디오 이벤트 조회 함수 (id로 조회)
+def get_audio_event(db: sqlite3.Connection, audio_event_id: str) -> Optional[Dict[str, Any]]:
+    cur = db.cursor()
+    row = cur.execute(
+        "SELECT * FROM audio_events WHERE audio_event_id = ?",
+        (audio_event_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+#오디오 이벤트 조회 (list 형태로 여러개 / 체크 안된것만 할것지 설정 가능)
+def list_audio_events(db: sqlite3.Connection, unchecked_only: bool = False) -> List[Dict[str, Any]]:
+    cur = db.cursor()
+    if unchecked_only:
+        rows = cur.execute(
+            """
+            SELECT * FROM audio_events
+            WHERE admin_checked = 0
+            ORDER BY timestamp DESC
+            """
+        ).fetchall()
+    else:
+        rows = cur.execute(
+            """
+            SELECT * FROM audio_events
+            ORDER BY timestamp DESC
+            """
+        ).fetchall()
     return [dict(r) for r in rows]
