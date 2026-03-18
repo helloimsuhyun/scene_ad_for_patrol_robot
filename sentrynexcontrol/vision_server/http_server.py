@@ -850,7 +850,12 @@ async def upload_audio_event(
 
     audio_event_id = str(uuid4())
     safe_ts = timestamp.replace(":", "-")
-    save_path = AUDIO_ROOT / f"{audio_event_id}_{safe_ts}.wav"
+
+    safe_label = "unlabeled" if model_label is None else str(model_label).strip()
+    if not safe_label:
+        safe_label = "unlabeled"
+    safe_label = safe_label.replace("/", "_").replace(" ", "_")
+    save_path = AUDIO_ROOT / f"{audio_event_id}_{safe_label}_{safe_ts}.wav"
 
     data = await file.read()
     save_path.write_bytes(data)
