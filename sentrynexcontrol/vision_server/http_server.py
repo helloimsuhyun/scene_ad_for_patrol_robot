@@ -698,31 +698,15 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
         events.append({
             "event_id": event_id,
             "place_id": row["place_id"],
-
             "captured_at": row["captured_at"],
-            "capturedAt": row["captured_at"],
-
             "anomaly_flag": int(row["anomaly_flag"]) if row["anomaly_flag"] is not None else 0,
-            "anomalyFlag": int(row["anomaly_flag"]) if row["anomaly_flag"] is not None else 0,
-
             "anomaly_score": float(row["anomaly_score"]) if row["anomaly_score"] is not None else None,
-            "anomalyScore": float(row["anomaly_score"]) if row["anomaly_score"] is not None else None,
-
             "threshold_used": float(row["threshold_used"]) if row["threshold_used"] is not None else None,
-            "thresholdUsed": float(row["threshold_used"]) if row["threshold_used"] is not None else None,
-
             "ref_bank_id": row["ref_bank_id"],
             "ref_topk_json": row["ref_topk_json"],
-
             "summary_text": row["summary_text"],
-            "summaryText": row["summary_text"],
-
             "manual_label": row["manual_label"],
-            "manualLabel": row["manual_label"],
-
             "created_at": row["created_at"],
-            "createdAt": row["created_at"],
-
             "frames": processed_frames,
         })
 
