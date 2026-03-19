@@ -5,7 +5,7 @@ import 'package:http/http.dart' as http;
 import '../models/event_model.dart';
 
 // 파이썬 서버 주소 (FastAPI uvicorn 기본 8000 포트)
-const String _baseUrl = 'http://172.17.78.222:8000';
+const String _baseUrl = 'http://localhost:8000';
 
 class EventListNotifier extends StateNotifier<List<Event>> {
   EventListNotifier() : super([]);

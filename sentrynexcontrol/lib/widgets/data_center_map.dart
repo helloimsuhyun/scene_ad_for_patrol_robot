@@ -1,8 +1,10 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/event_provider.dart';
+import '../providers/audio_event_provider.dart';
 import '../models/event_model.dart';
 import 'event_detail_dialog.dart';
+import 'audio_marker.dart';
 
 // 맵 상에서 클릭된 이벤트를 추적하기 위한 로컬 상태
 final _selectedMapEventProvider = StateProvider<String?>((ref) => null);
@@ -50,6 +52,9 @@ class DataCenterMap extends ConsumerWidget {
                   ),
                   //---------- 각 장소별 최신 이벤트 마커 표시 ----------
                   ...latestEventsByPlace.values.map((event) => _EventMarker(event: event)),
+
+                  //---------- 오디오 이벤트 마커 (미확인 이벤트만 표시) ----------
+                  ...ref.watch(audioEventListProvider).map((ae) => AudioMarker(event: ae)),
                 ],
               ),
             ),

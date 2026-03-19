@@ -127,8 +127,27 @@ async def lifespan(app: FastAPI):
     app.state.global_calibrating = False
     app.state.calib_task = None
 
-    #robot position
-    app.state.robot_pose = None
+    #robot 현재 / 목표 position
+    app.state.robot_pose = {
+        "x": None,
+        "y": None,
+        "yaw": None,
+        "status": "idle",
+        "timestamp": None,
+    }
+
+    app.state.robot_goal = {
+        "x": None,
+        "y": None,
+        "yaw": None,
+        "next_place_id": None,
+        "timestamp": None,
+    }
+
+    app.state.robot_command = {
+        "command": "idle",
+        "timestamp": None,
+    }
 
     # GPU lock
     app.state.gpu_lock = asyncio.Lock()
@@ -330,7 +349,7 @@ async def place_imgs(
 
 
 # -----------------------------------------------------------------------------------------------
-# GUI place table 상태 조회 / 제어 API ( 주로 운영 중 사용 endpoint 모음)
+# GUI place table 상태 조회 / 제어 API ( 주로 관리자 캘리브레이션 데이터 수집 사용 endpoint 모음)
 # place 상태 조회 / mode 변경 
 
 # 모든 place 상태 조회 (GUI 대시보드용)
@@ -476,8 +495,8 @@ async def run_calibration_job(app: FastAPI):
         app.state.calib_progress["current_place_id"] = None
         app.state.calib_task = None
 
-# --------------------------------------------------------------------------------------------
-# GUI Place table 제어 endpoint 모음 -----------------------------------------------------------
+
+# ======================================================================= GUI Place table 제어 endpoint 모음 (이벤트 라벨링 / 순찰 순서)
 # ( 관리자의 이벤트 라벨링 / display name 변경 / 특정 waypoint 순찰 여부 변경)
 
 class UpdatePlaceNameReq(BaseModel):
@@ -634,9 +653,10 @@ async def move_event(req: MoveEventToBankReq):
     }
 
 
-# ----------------------------------------------------------------------------------------------------
+# ========================================================================================= vision 이상감지 이벤트 GUI 조회 / Pooling endpoint
 # GUI event polling API
 
+# 이벤트 polling 최근에 생긴 것
 @app.get("/events")
 async def get_events(since: Optional[str] = None, limit: int = 50):
     """
@@ -719,6 +739,7 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
         "events": events,
     }
 
+# 이벤트 조회 (db에 있는)
 @app.get("/events/{event_id}")
 async def get_event_detail(event_id: str):
     async with app.state.db_lock:
@@ -734,7 +755,7 @@ async def get_event_detail(event_id: str):
         "frames": frames,
     }
 
-# --------------- 로봇 조회/호출 endpoint-------------------------------------------------------------------------------
+#========================================================================================= robot 교시 endpoint
 # --------------- 로봇 교시 및 waypoint 조회 -------------
 
 class TeachPlaceReq(BaseModel):
@@ -794,6 +815,7 @@ async def get_patrol_points():
         "places": places,
     } 
 
+#========================================================================================= robot 실시간 위치 endpoint
 # ----------------------------------------------------------------로봇 위치 표시 endpoint
 # 로봇 현재 위치 표시용 endpoint
 
@@ -801,24 +823,46 @@ class RobotPoseReq(BaseModel):
     x: float
     y: float
     yaw: float
-    next_place_id: Optional[str] = None
     status: Optional[str] = None   # 예: moving / idle / error
     timestamp: Optional[str] = None
 
-# 로봇 -> 서버 : 현재 pose 업로드 endpoint
+class RobotGoalReq(BaseModel):
+    x: float
+    y: float
+    yaw: float
+    next_place_id: Optional[str] = None 
+    timestamp: Optional[str] = None
+
+# 로봇 -> 서버 : 현재 pose 업로드 endpoint ( 로봇쪽에서 주기적으로 송신 /robot_pose)
 @app.post("/robot/pose")
 async def update_robot_pose(req: RobotPoseReq):
     print(
         f"[ROBOT POSE] x={req.x:.3f}, y={req.y:.3f}, yaw={req.yaw:.3f}, "
-        f"next_place_id={req.next_place_id}, status={req.status}",
+        f"status={req.status}",
         flush=True,
     )
     app.state.robot_pose = {
         "x": req.x,
         "y": req.y,
         "yaw": req.yaw,
-        "next_place_id": req.next_place_id,
         "status": req.status or "moving",
+        "timestamp": req.timestamp or datetime.now().isoformat(),
+    }
+    return {"ok": True}
+
+#로봇 -> 서버 : 목표 지점 업로드 endpoint ( 로봇에서 이벤트성으로 송신 ) : 로봇 nav2의 단기적인 목표 위치 /goal_pose_2d (x,y, yaw)와 로봇쪽에서 다음에 방문하고자 하는 place의 place_id를 송신
+@app.post("/robot/goal")
+async def update_robot_goal(req: RobotGoalReq):
+    print(
+        f"[GOAL POSE] x={req.x:.3f}, y={req.y:.3f}, yaw={req.yaw:.3f}, "
+        f"[NEXT_PLACE_ID]={req.next_place_id}",
+        flush=True,
+    )
+    app.state.robot_goal = {
+        "x": req.x,
+        "y": req.y,
+        "yaw": req.yaw,
+        "next_place_id": req.next_place_id,
         "timestamp": req.timestamp or datetime.now().isoformat(),
     }
     return {"ok": True}
@@ -831,7 +875,51 @@ async def get_robot_pose():
         "pose": app.state.robot_pose,
     }
 
+# GUI -> 서버 : 로봇의 가장 최신 goal 조회
+@app.get("/robot/goal")
+async def get_robot_goal():
+    return {
+        "ok": True,
+        "goal": app.state.robot_goal,
+    }
 
+# ------------------------------------서버 > 로봇 주행명령 endpoint
+class RobotCommandReq(BaseModel):
+    command: str
+    timestamp: Optional[str] = None
+
+# ------------------------------------ GUI > 서버 로봇 주행명령 endpoint
+@app.post("/robot/command")
+async def update_robot_command(req: RobotCommandReq):
+    command = str(req.command).strip()
+    if not command:
+        raise HTTPException(status_code=400, detail="command must not be empty")
+
+    app.state.robot_command = {
+        "command": command,
+        "timestamp": req.timestamp or datetime.now().isoformat(),
+    }
+
+    print(
+        f"[ROBOT COMMAND] command={command}",
+        flush=True,
+    )
+
+    return {
+        "ok": True,
+        "command": app.state.robot_command,
+    }
+
+#----------------------------------- 서버 > 로봇 주행명령 송신 endpoint
+@app.get("/robot/command")
+async def get_robot_command():
+    return {
+        "ok": True,
+        "command": app.state.robot_command.get("command"),
+        "timestamp": app.state.robot_command.get("timestamp"),
+    }
+
+#========================================================================================= audio endpoint
 # ----------------------------------------------------------------오디오 이벤트 endpoint
 # 오디오 이벤트를 받고, db에 넣는 endpoint
 @app.post("/upload_audio")
@@ -858,6 +946,8 @@ async def upload_audio_event(
     save_path = AUDIO_ROOT / f"{audio_event_id}_{safe_label}_{safe_ts}.wav"
 
     data = await file.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty audio file")
     save_path.write_bytes(data)
 
     async with app.state.db_lock:
@@ -880,11 +970,72 @@ async def upload_audio_event(
         "audio_url": f"/audio/{save_path.name}",
     }
 
-#------------ 
+
+# ---------------------------------------------------------------------------audio event GUI Pooling 및 조회 / 관리 endpoint
+# audio event gui pooling
+
 @app.get("/audio_events")
-async def get_audio_events(unchecked_only: bool = False):
+async def get_audio_events(
+    since: Optional[str] = None,
+    limit: int = 50,
+    unchecked_only: bool = False,
+):
+    """
+    since가 없으면 최근 오디오 이벤트 목록 반환
+    since가 있으면 그 시각 이후의 오디오 이벤트만 반환
+    unchecked_only=true 이면 admin_label이 없는 항목만 반환
+    """
     async with app.state.db_lock:
-        rows = sqlite_db.list_audio_events(app.state.db, unchecked_only=unchecked_only)
+        cur = app.state.db.cursor()
+
+        if since is None:
+            if unchecked_only:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audio_events
+                    WHERE admin_label IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audio_events
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+        else:
+            if unchecked_only:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audio_events
+                    WHERE created_at > ?
+                      AND admin_label IS NULL
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (since, limit),
+                )
+            else:
+                cur.execute(
+                    """
+                    SELECT *
+                    FROM audio_events
+                    WHERE created_at > ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                    """,
+                    (since, limit),
+                )
+
+        rows = cur.fetchall()
 
     audio_events = []
     for row in rows:
@@ -897,7 +1048,7 @@ async def get_audio_events(unchecked_only: bool = False):
         "audio_events": audio_events,
     }
 
-#------------------------ 개별 이벤트 조회
+#개별 event 조회
 @app.get("/audio_events/{audio_event_id}")
 async def get_audio_event_detail(audio_event_id: str):
     async with app.state.db_lock:
@@ -935,6 +1086,7 @@ async def update_audio_event_label(audio_event_id: str, req: UpdateAudioLabelReq
         "ok": True,
         "audio_event": updated,
     }
+
 
 
 if __name__ == "__main__":
