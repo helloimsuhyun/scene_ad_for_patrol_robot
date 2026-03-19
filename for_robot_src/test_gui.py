@@ -10,6 +10,7 @@ BRIDGE_URL = "http://192.168.0.24:8090"   # ROS2 patrol_http_bridge device IP
 TIMEOUT = 5
 
 MODE_CYCLE = ["idle", "bank", "th_calib", "query"]
+VALID_ROBOT_COMMANDS = ["idle", "start", "pause", "resume", "stop", "teach", "reload_waypoints"]
 
 
 # =========================
@@ -63,6 +64,23 @@ def delete_all_places():
 
 def delete_threshold(place_id: str):
     resp = requests.delete(f"{SERVER_URL}/places/{place_id}/threshold", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_robot_command():
+    resp = requests.get(f"{SERVER_URL}/robot/command", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def set_robot_command(command: str):
+    command = normalize_robot_command(command)
+    resp = requests.post(
+        f"{SERVER_URL}/robot/command",
+        json={"command": command},
+        timeout=TIMEOUT,
+    )
     resp.raise_for_status()
     return resp.json()
 
@@ -133,6 +151,9 @@ def print_help():
     print("  place <place_id>               -> 현재 선택 place 설정/조회")
     print("  mode <place_id> <mode>         -> 특정 place mode 변경")
     print("     valid mode: idle bank th_calib query")
+    print("  cmdget                         -> 현재 robot command 조회")
+    print("  cmd <command>                  -> robot command 설정")
+    print("     valid command: idle start pause resume stop teach reload_waypoints")
     print("  delplace <place_id>            -> 특정 place 삭제")
     print("  delall                         -> 전체 place 삭제")
     print("  delth <place_id>               -> 특정 place threshold 삭제")
@@ -157,6 +178,13 @@ def print_calibration_status(data: dict):
 
     print(f"calib_progress: {done}/{total} ({pct:.1f}%)")
     print("current_place_id:", current)
+
+
+def print_robot_command(data: dict):
+    print("\n=== ROBOT COMMAND ===")
+    print("ok:", data.get("ok"))
+    print("command:", data.get("command"))
+    print("timestamp:", data.get("timestamp"))
 
 
 def print_one_place(p: dict):
@@ -278,6 +306,13 @@ def normalize_label(value: str) -> str:
     return alias[s]
 
 
+def normalize_robot_command(value: str) -> str:
+    s = str(value).strip().lower()
+    if s not in VALID_ROBOT_COMMANDS:
+        raise ValueError(f"command must be one of: {', '.join(VALID_ROBOT_COMMANDS)}")
+    return s
+
+
 def next_place_id(current_place: str | None) -> str:
     if current_place is None:
         return "00"
@@ -343,7 +378,7 @@ def show_current_place(current_place: str):
 
 def main():
     current_place = "00"
-    current_label = "normal"   # query mode 전용
+    current_label = "normal"
 
     print_help()
     print(f"\ncurrent_selected_place: {current_place}")
@@ -459,6 +494,22 @@ def main():
 
             elif op == "w":
                 watch_calibration_status()
+
+            elif op == "cmdget":
+                data = get_robot_command()
+                print_robot_command(data)
+
+            elif op == "cmd":
+                if len(cmd) != 2:
+                    print("usage: cmd <idle|start|pause|resume|stop|teach|reload_waypoints>")
+                    continue
+
+                data = set_robot_command(cmd[1])
+                print_robot_command({
+                    "ok": data.get("ok"),
+                    "command": data.get("command", {}).get("command"),
+                    "timestamp": data.get("command", {}).get("timestamp"),
+                })
 
             elif op == "mode":
                 if len(cmd) != 3:
