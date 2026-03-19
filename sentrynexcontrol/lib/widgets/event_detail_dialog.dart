@@ -4,7 +4,7 @@ import '../providers/event_provider.dart';
 import '../models/event_model.dart';
 
 // 서버 주소 (중앙 집중 관리 권장)
-const String _imageUrlBase = 'http://172.17.78.222:8000/images/';
+const String _imageUrlBase = 'http://localhost:8000/images/';
 
 String formatEventTime(String isoString) {
   try {

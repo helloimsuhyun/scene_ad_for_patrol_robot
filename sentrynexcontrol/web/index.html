@@ -33,31 +33,6 @@
   <link rel="manifest" href="manifest.json">
 </head>
 <body>
-  <script>
-    //---------- 인터넷 없는 환경을 위한 서비스 워커 강제 제거 ----------
-    if (window.navigator && navigator.serviceWorker) {
-      navigator.serviceWorker.getRegistrations().then(function(registrations) {
-        for(let registration of registrations) {
-          registration.unregister();
-        }
-      });
-    }
-
-    //---------- 로딩 상태 모니터링 ----------
-    window.addEventListener('load', function(ev) {
-      setTimeout(function() {
-        if (!window._flutter) {
-          console.error('Flutter 부트스트랩 로드 실패');
-          // 사용자에게 가시적으로 알림 (흰 화면 방지)
-          document.body.innerHTML = '<div style="color:white; background:#11121A; height:100vh; display:flex; align-items:center; justify-content:center; flex-direction:column; font-family:sans-serif;">' +
-            '<h2>GUI 실행 실패 (인터넷 연결 필요 또는 캐시 문제)</h2>' +
-            '<p>1. 브라우저 캐시를 삭제하고 다시 시도해주세요.</p>' +
-            '<p>2. 빌드 시 --web-renderer html 옵션을 사용했는지 확인해주세요.</p>' +
-            '</div>';
-        }
-      }, 5000);
-    });
-  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

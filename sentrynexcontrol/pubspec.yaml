@@ -37,7 +37,6 @@ dependencies:
   flutter_riverpod: ^2.6.1
   http: ^1.6.0
   flutter_webrtc: ^0.12.5
-  audioplayers: ^6.1.0
 
 dev_dependencies:
   flutter_test:
