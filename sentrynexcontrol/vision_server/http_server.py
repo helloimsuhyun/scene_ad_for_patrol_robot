@@ -75,22 +75,30 @@ import io
 import numpy as np
 import shutil
 from uuid import uuid4
-
 from pathlib import Path
 from datetime import datetime
 from typing import List, Optional
 from pydantic import BaseModel
 
 
+import numpy as np
+from PIL import Image
+from pydantic import BaseModel
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import JSONResponse
 
 from . import sqlite_db
-from . import dino_emb
+#from . import dino_emb
 from . import place_manager
-from .distance import infer_event, calibrate_place
+#from .distance import infer_event, calibrate_place
+
+
+# -------------------------------------------------------------------
+# config
+
+USE_MOCK_INFERENCE = True
 
 # path 
 SAVE_ROOT = Path("./recv")  # 이미지저장 root
@@ -104,7 +112,6 @@ def sync_places_from_fs(db, save_root: Path):
     for p in save_root.iterdir():
         if not p.is_dir():
             continue
-
         place_id = p.name
         sqlite_db.ensure_place(db, place_id)
 
@@ -113,9 +120,7 @@ def sync_places_from_fs(db, save_root: Path):
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-
-    # 서버 시작시에 실행
-    # db connect & init(없으면 만들어줌)
+    # 서버 시작 시
     app.state.db = sqlite_db.connect_db(DB_PATH)
     sqlite_db.init_db(app.state.db)
     app.state.db_lock = asyncio.Lock()
@@ -153,27 +158,33 @@ async def lifespan(app: FastAPI):
     app.state.gpu_lock = asyncio.Lock()
 
     app.state.calib_progress = {
-    "total": 0,
-    "done": 0,
-    "current_place_id": None,
+        "total": 0,
+        "done": 0,
+        "current_place_id": None,
     }
 
-    #model load
-    model, device = dino_emb.load_model()
+    # model load
+    if USE_MOCK_INFERENCE:
+        model, device = None, "mock"
+        print("------------ MOCK inference mode enabled")
+    else:
+        raise RuntimeError("Real inference disabled in this build")
+
     app.state.engine = {
         "model": model,
         "device": device,
-        "bank_root":SAVE_ROOT,
+        "bank_root": SAVE_ROOT,
     }
 
-    print(" ------------Server startup complete")
+    print("------------ Server startup complete")
 
-    yield  # ------------- 
+    yield
 
-    # 서버 종료 시 (shutdown)
-    print(" ------------ Server shutting down")
+    # 서버 종료 시
+    print("------------ Server shutting down")
     app.state.db.close()
     print("DB closed")
+
 
 app = FastAPI(lifespan=lifespan)
 
@@ -193,6 +204,9 @@ app.mount("/audio", StaticFiles(directory=str(AUDIO_ROOT)), name="audio")
 # --------------------------------------------------------------------------------------------------------
 
 def run_inference_event(imgs_bgr, meta_obj, engine):
+    if USE_MOCK_INFERENCE:
+        return run_mock_inference_event(imgs_bgr, meta_obj, engine)
+    """
     place_id = str(meta_obj.get("place_id", "unknown"))
     return infer_event(
         imgs_bgr,
@@ -204,6 +218,9 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
 
 #임계치 업데이트 함수 호출----------------------------------
 def run_threshold_calibration(place_id, engine):
+    if USE_MOCK_INFERENCE:
+        return run_mock_threshold_calibration(place_id, engine)
+    """
     thr, scores, _ = calibrate_place(
         engine["bank_root"],
         place_id,
@@ -352,7 +369,6 @@ async def place_imgs(
 # GUI place table 상태 조회 / 제어 API ( 주로 관리자 캘리브레이션 데이터 수집 사용 endpoint 모음)
 # place 상태 조회 / mode 변경 
 
-# 모든 place 상태 조회 (GUI 대시보드용)
 @app.get("/places")
 async def get_places():
     async with app.state.db_lock:
@@ -365,7 +381,7 @@ async def get_places():
         "places": places,
     }
 
-# 특정 place 상태 조회
+
 @app.get("/places/{place_id}")
 async def get_place(place_id: str):
     async with app.state.db_lock:
@@ -449,19 +465,16 @@ async def run_calibration_job(app: FastAPI):
         print(f"[CALIB] n_places={len(places)}")
         print(f"[CALIB] places={places}")
 
-        # progress reset
         app.state.calib_progress = {
             "total": len(places),
             "done": 0,
             "current_place_id": None,
         }
 
-        # calibration
         for row in places:
             place_id = row["place_id"]
             app.state.calib_progress["current_place_id"] = place_id
 
-            # 시작 상태 반영
             async with app.state.db_lock:
                 place_manager.delete_threshold(SAVE_ROOT, place_id)
 
@@ -586,7 +599,6 @@ async def move_event(req: MoveEventToBankReq):
     event_place_id = str(event["place_id"])
     target_place_id = place_id or event_place_id
 
-    # place 보장
     async with app.state.db_lock:
         sqlite_db.ensure_place(app.state.db, target_place_id)
 
@@ -608,9 +620,6 @@ async def move_event(req: MoveEventToBankReq):
             continue
 
         ext = src_path.suffix.lower() or ".jpg"
-
-        # bank용 새 파일명
-        # 예: 00_bank_2026-03-11T12-30-00_xxxxx_000.jpg
         ts = (event["captured_at"] or datetime.now().isoformat()).replace(":", "-")
         new_name = f"{target_place_id}_bank_{ts}_{uuid4().hex[:8]}_{i:03d}{ext}"
         dst_path = bank_dir / new_name
@@ -633,7 +642,6 @@ async def move_event(req: MoveEventToBankReq):
                 "path": str(src_path),
             })
 
-    # bank가 바뀌었으니 threshold 재계산 필요로 places db 변경
     async with app.state.db_lock:
         place_manager.set_need_calibration(app.state.db, target_place_id, True)
         place = place_manager.get_place_status(app.state.db, SAVE_ROOT, target_place_id)
@@ -659,16 +667,6 @@ async def move_event(req: MoveEventToBankReq):
 # 이벤트 polling 최근에 생긴 것
 @app.get("/events")
 async def get_events(since: Optional[str] = None, limit: int = 50):
-    """
-    Flutter polling용.
-    - since가 없으면 최근 이벤트 목록 반환
-    - since가 있으면 그 시각 이후의 이벤트만 반환
-    응답 형식:
-    {
-        "ok": True,
-        "events": [...]
-    }
-    """
     async with app.state.db_lock:
         cur = app.state.db.cursor()
 
@@ -703,11 +701,10 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
     events = []
     for row in rows:
         event_id = row["event_id"]
-        # Fetch frames for this event
+
         async with app.state.db_lock:
             frames = sqlite_db.list_frames(app.state.db, event_id)
-            
-        # 각 프레임의 경로를 /images/ 경로에서 접근 가능한 형태로 변환
+
         processed_frames = []
         for f in frames:
             f_dict = dict(f)
@@ -717,7 +714,7 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
             f_dict["image_url"] = f"/images/{rel_path}"
 
             processed_frames.append(f_dict)
-            
+
         events.append({
             "event_id": event_id,
             "place_id": row["place_id"],
