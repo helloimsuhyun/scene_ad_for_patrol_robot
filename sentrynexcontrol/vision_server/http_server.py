@@ -711,12 +711,11 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
         processed_frames = []
         for f in frames:
             f_dict = dict(f)
-            raw_path = f_dict["image_path"]
-            # 'recv/' 이후의 경로만 추출하여 상대 경로화
-            if "recv/" in raw_path:
-                f_dict["image_path"] = raw_path.split("recv/")[-1]
-            else:
-                f_dict["image_path"] = Path(raw_path).name
+
+            raw_path = str(f_dict["image_path"])
+            rel_path = str(Path(raw_path).relative_to(SAVE_ROOT)).replace("\\", "/")
+            f_dict["image_url"] = f"/images/{rel_path}"
+
             processed_frames.append(f_dict)
             
         events.append({
@@ -749,10 +748,20 @@ async def get_event_detail(event_id: str):
 
         frames = sqlite_db.list_frames(app.state.db, event_id)
 
+    processed_frames = []
+    for f in frames:
+        f_dict = dict(f)
+
+        raw_path = str(f_dict["image_path"])
+        rel_path = str(Path(raw_path).relative_to(SAVE_ROOT)).replace("\\", "/")
+        f_dict["image_url"] = f"/images/{rel_path}"
+
+        processed_frames.append(f_dict)
+
     return {
         "ok": True,
         "event": event,
-        "frames": frames,
+        "frames": processed_frames,
     }
 
 #========================================================================================= robot 교시 endpoint
@@ -883,7 +892,7 @@ async def get_robot_goal():
         "goal": app.state.robot_goal,
     }
 
-# ------------------------------------서버 > 로봇 주행명령 endpoint
+# ------------------------------------ GUI > 서버 로봇 주행명령 endpoint
 class RobotCommandReq(BaseModel):
     command: str
     timestamp: Optional[str] = None

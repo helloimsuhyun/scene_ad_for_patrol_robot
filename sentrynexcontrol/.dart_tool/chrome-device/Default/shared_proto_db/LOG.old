@@ -1,4 +1,2 @@
-2026/03/11-02:40:42.240 7b7c Reusing MANIFEST /tmp/flutter_tools.HNVMNO/flutter_tools_chrome_device.NTZAPG/Default/shared_proto_db/MANIFEST-000001
-2026/03/11-02:40:42.240 7b7c Recovering log #4
-2026/03/11-02:40:42.240 7b7c Reusing old log /tmp/flutter_tools.HNVMNO/flutter_tools_chrome_device.NTZAPG/Default/shared_proto_db/000004.log 
-2026/03/11-02:40:42.240 7b7c Delete type=0 #3
+2026/03/19-23:43:00.808 3249 Creating DB /tmp/flutter_tools.GDNQNE/flutter_tools_chrome_device.CIFRYI/Default/shared_proto_db since it was missing.
+2026/03/19-23:43:00.838 3249 Reusing MANIFEST /tmp/flutter_tools.GDNQNE/flutter_tools_chrome_device.CIFRYI/Default/shared_proto_db/MANIFEST-000001
