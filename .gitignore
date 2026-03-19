@@ -60,3 +60,9 @@ Thumbs.db
 *.iml
 *.iws
 *.ipr
+
+.dart_tool/
+build/
+.flutter-plugins-dependencies
+*.log
+chrome-device/
