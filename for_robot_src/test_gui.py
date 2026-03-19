@@ -6,7 +6,7 @@ import requests
 from pprint import pprint
 
 SERVER_URL = "http://127.0.0.1:8000"      # vision server
-BRIDGE_URL = "http://192.168.0.24:8090"   # ROS2 patrol_http_bridge device IP
+BRIDGE_URL = "http://192.162.213.80:8090"   # ROS2 patrol_http_bridge device IP
 TIMEOUT = 5
 
 MODE_CYCLE = ["idle", "bank", "th_calib", "query"]
@@ -85,6 +85,18 @@ def set_robot_command(command: str):
     return resp.json()
 
 
+def get_robot_pose():
+    resp = requests.get(f"{SERVER_URL}/robot/pose", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_robot_goal():
+    resp = requests.get(f"{SERVER_URL}/robot/goal", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
 # =========================
 # ROS2 Patrol bridge API
 # =========================
@@ -142,6 +154,7 @@ def print_help():
     print("  c          -> 현재 place로 capture")
     print("  v          -> 현재 place 설정 후 capture")
     print("  l          -> 현재 place 상세 조회")
+    print("  g          -> 현재 robot pose / goal / next_place_id 조회")
     print("  s          -> calibration status 조회")
     print("  w          -> calibration status watch")
     print("  r          -> 전체 place recalibration 시작")
@@ -185,6 +198,26 @@ def print_robot_command(data: dict):
     print("ok:", data.get("ok"))
     print("command:", data.get("command"))
     print("timestamp:", data.get("timestamp"))
+
+
+def print_robot_state():
+    pose_data = get_robot_pose()
+    goal_data = get_robot_goal()
+
+    pose = pose_data.get("pose", {}) or {}
+    goal = goal_data.get("goal", {}) or {}
+
+    print("\n=== ROBOT STATE ===")
+    print(
+        f"robot_pose: x={pose.get('x')}, y={pose.get('y')}, yaw={pose.get('yaw')}"
+    )
+    print(f"robot_status: {pose.get('status')}")
+    print(f"pose_timestamp: {pose.get('timestamp')}")
+    print(
+        f"robot_goal: x={goal.get('x')}, y={goal.get('y')}, yaw={goal.get('yaw')}"
+    )
+    print(f"next_place_id: {goal.get('next_place_id')}")
+    print(f"goal_timestamp: {goal.get('timestamp')}")
 
 
 def print_one_place(p: dict):
@@ -483,6 +516,9 @@ def main():
                 current_place = ensure_current_place(current_place)
                 show_current_place(current_place)
                 print(f"current_query_label: {current_label}")
+
+            elif op == "g":
+                print_robot_state()
 
             elif op == "s":
                 data = get_calibration_status()

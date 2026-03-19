@@ -4,7 +4,9 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import '../models/event_model.dart';
 
-// 파이썬 서버 주소 (FastAPI uvicorn 기본 8000 포트)
+//---------- 서버 주소 설정 (인터넷이 없는 로컬 WiFi 환경의 경우) ----------
+// 1. 같은 기기에서 브라우저를 띄울 때는 'localhost'가 작동합니다.
+// 2. 태블릿 등 외부 기기에서 접속 시 서버 PC의 IP(예: '192.168.x.x')로 수정이 필요합니다.
 const String _baseUrl = 'http://localhost:8000';
 
 class EventListNotifier extends StateNotifier<List<Event>> {
