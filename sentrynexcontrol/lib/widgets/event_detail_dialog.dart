@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/event_provider.dart';
 import '../models/event_model.dart';
+import 'package:http/http.dart' as http;
 
 // 서버 주소 (중앙 집중 관리 권장)
 const String _imageUrlBase = 'http://localhost:8000/images/';
@@ -102,6 +103,76 @@ void showEventDetailDialog(BuildContext context, WidgetRef ref, Event event) {
                     ],
                   ],
                 ),
+              ),
+              const SizedBox(height: 24),
+              //---------- 시스템 오탐지 피드백 버튼 영역 ----------
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF22C55E).withOpacity(0.15),
+                        foregroundColor: const Color(0xFF22C55E),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        elevation: 0,
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      icon: const Icon(Icons.check_circle_outline, size: 18),
+                      label: const Text('정상 (오탐지 - 뱅크 추가)'),
+                      onPressed: () async {
+                        try {
+                          Navigator.of(context).pop();
+                          final response = await http.post(
+                            Uri.parse('http://127.0.0.1:8000/move_event'),
+                            headers: {'Content-Type': 'application/json'},
+                            body: '{"event_id": "${event.eventId}", "move": true}',
+                          );
+                          if (response.statusCode != 200) {
+                            debugPrint('Failed to move event: \${response.body}');
+                          }
+                        } catch (e) {
+                          debugPrint('Error moving event: $e');
+                        }
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFEF4444),
+                        side: const BorderSide(color: Color(0xFFEF4444)),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      icon: const Icon(Icons.warning_amber_rounded, size: 18),
+                      label: const Text('비정상 1 (파손/침입)'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: OutlinedButton.icon(
+                      style: OutlinedButton.styleFrom(
+                        foregroundColor: const Color(0xFFF97316),
+                        side: const BorderSide(color: Color(0xFFF97316)),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                      ),
+                      icon: const Icon(Icons.error_outline, size: 18),
+                      label: const Text('비정상 2 (기타 이상)'),
+                      onPressed: () {
+                        Navigator.of(context).pop();
+                      },
+                    ),
+                  ),
+                ],
               ),
             ],
           ),

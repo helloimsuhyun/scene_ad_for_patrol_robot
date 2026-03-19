@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
 import 'sidebar_menu.dart';
 import '../widgets/camera_stream_widget.dart';
+import '../widgets/manual_controller_panel.dart';
 
-enum Pages { dashboard, map, logs, settings }
+enum Pages { dashboard, map, logs, control, settings }
 
 class Sidebar extends StatelessWidget {
   final Pages currentPage;
@@ -75,15 +76,25 @@ class Sidebar extends StatelessWidget {
           ),
           const SizedBox(height: 6),
           SidebarMenu(
+            title: '제어',
+            icon: Icons.compare_arrows,
+            isSelected: currentPage == Pages.control,
+            onTap: () => onPageSelected(Pages.control),
+          ),
+          const SizedBox(height: 6),
+          SidebarMenu(
             title: '설정',
             icon: Icons.settings_outlined,
             isSelected: currentPage == Pages.settings,
             onTap: () => onPageSelected(Pages.settings),
           ),
           //---------- 메뉴 아래: 로봇 카메라 실시간 스트림 ----------
-          const SizedBox(height: 20),
-          const CameraStreamWidget(),
           const Spacer(),
+          const CameraStreamWidget(),
+          const SizedBox(height: 16),
+          //---------- 카메라 아래: 수동 조작 컨트롤러 ----------
+          const ManualControllerPanel(),
+          const SizedBox(height: 16),
           //---------- 사이드바 하단 접기/열기 버튼 ----------
           Align(
             alignment: Alignment.centerRight,
