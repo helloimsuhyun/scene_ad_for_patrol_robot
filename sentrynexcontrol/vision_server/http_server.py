@@ -17,8 +17,9 @@ Optional fields
 - ref_bank_id     : 사용된 reference bank 식별자
 - ref_topk_json   : top-k reference 매칭 결과(JSON)
 - summary_text    : 이벤트 요약 설명
-- manual_label    : 관리자 수동 라벨
-                    (예: false_positive, true_anomaly, NULL=미검토)
+- admin_checked   : 관리자 검토 여부 (0/1)
+- admin_label     : 관리자 라벨
+                    (예: false_positive, true_anomaly, NULL=미검토 또는 미지정)
 
 Auto fields
 - created_at      : DB 기록 시각
@@ -503,7 +504,7 @@ class UpdatePlaceNameReq(BaseModel):
     display_name: str
 
 class UpdateEventLabelReq(BaseModel):
-    manual_label: Optional[str] = None
+    admin_label: Optional[str] = None
 
 class UpdatePatrolEnabledReq(BaseModel):
     patrol_enabled: bool
@@ -519,7 +520,7 @@ async def update_event_label(event_id: str, req: UpdateEventLabelReq):
         if event is None:
             raise HTTPException(status_code=404, detail="event not found")
 
-        sqlite_db.set_event_manual_label(app.state.db, event_id, req.manual_label)
+        sqlite_db.set_event_manual_label(app.state.db, event_id, req.admin_label)
         updated_event = sqlite_db.get_event(app.state.db, event_id)
 
     return {
@@ -636,6 +637,7 @@ async def move_event(req: MoveEventToBankReq):
     # bank가 바뀌었으니 threshold 재계산 필요로 places db 변경
     async with app.state.db_lock:
         place_manager.set_need_calibration(app.state.db, target_place_id, True)
+        sqlite_db.set_event_manual_label(app.state.db, event_id, "normal")
         place = place_manager.get_place_status(app.state.db, SAVE_ROOT, target_place_id)
 
     return {
@@ -676,8 +678,8 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
             cur.execute(
                 """
                 SELECT event_id, place_id, captured_at, anomaly_flag,
-                       anomaly_score, threshold_used, ref_bank_id,
-                       ref_topk_json, summary_text, manual_label, created_at
+                    anomaly_score, threshold_used, ref_bank_id,
+                    ref_topk_json, summary_text, admin_checked, admin_label, created_at
                 FROM events
                 ORDER BY captured_at DESC
                 LIMIT ?
@@ -688,8 +690,8 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
             cur.execute(
                 """
                 SELECT event_id, place_id, captured_at, anomaly_flag,
-                       anomaly_score, threshold_used, ref_bank_id,
-                       ref_topk_json, summary_text, manual_label, created_at
+                    anomaly_score, threshold_used, ref_bank_id,
+                    ref_topk_json, summary_text, admin_checked, admin_label, created_at
                 FROM events
                 WHERE captured_at > ?
                 ORDER BY captured_at DESC
@@ -729,7 +731,8 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
             "ref_bank_id": row["ref_bank_id"],
             "ref_topk_json": row["ref_topk_json"],
             "summary_text": row["summary_text"],
-            "manual_label": row["manual_label"],
+            "admin_checked": int(row["admin_checked"]) if row["admin_checked"] is not None else 0,
+            "admin_label": row["admin_label"],
             "created_at": row["created_at"],
             "frames": processed_frames,
         })

@@ -49,7 +49,9 @@ def init_db(db: sqlite3.Connection) -> None:
           ref_bank_id     TEXT,
           ref_topk_json   TEXT,
           summary_text    TEXT,
-          manual_label TEXT,
+
+          admin_checked   INTEGER NOT NULL DEFAULT 0,
+          admin_label     TEXT,
 
           created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
         );
@@ -439,7 +441,8 @@ def set_event_manual_label(
     cur.execute(
         """
         UPDATE events
-        SET manual_label = ?
+        SET admin_checked = 1,
+            admin_label = ?
         WHERE event_id = ?
         """,
         (manual_label, event_id),
