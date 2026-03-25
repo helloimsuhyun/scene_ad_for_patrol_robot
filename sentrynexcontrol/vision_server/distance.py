@@ -138,7 +138,7 @@ def _dist_patchcore(
     return score, debug
 """
 
-USE_SMALL_BLOB_FILTER = True
+USE_SMALL_BLOB_FILTER = False
 BLOB_MIN_AREA = 3
 
 def _dist_patchcore(

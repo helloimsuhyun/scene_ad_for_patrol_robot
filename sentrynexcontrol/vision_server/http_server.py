@@ -370,12 +370,14 @@ async def get_places():
 @app.get("/places/{place_id}")
 async def get_place(place_id: str):
     async with app.state.db_lock:
+        sqlite_db.ensure_place(app.state.db, place_id)
         place = place_manager.get_place_status(app.state.db, SAVE_ROOT, place_id)
     return {
         "ok": True,
         "global_calibrating": app.state.global_calibrating,
         "place": place,
     }
+
 
 # GUI에서 place mode 변경 (bank / th_calib / query)
 @app.post("/places/{place_id}/config")
@@ -385,12 +387,15 @@ async def set_place_config(
 ):
     try:
         async with app.state.db_lock:
+            sqlite_db.ensure_place(app.state.db, place_id)
             place_manager.set_place_mode(app.state.db, place_id, mode)
             place = place_manager.get_place_status(app.state.db, SAVE_ROOT, place_id)
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
     return {"ok": True, "place": place}
+
+
 
 # 특정 place 전체 삭제
 @app.delete("/places/{place_id}")
@@ -853,7 +858,7 @@ async def update_robot_pose(req: RobotPoseReq):
     }
     return {"ok": True}
 
-#로봇 -> 서버 : 목표 지점 업로드 endpoint ( 로봇에서 이벤트성으로 송신 ) : 로봇 nav2의 단기적인 목표 위치 /goal_pose_2d (x,y, yaw)와 로봇쪽에서 다음에 방문하고자 하는 place의 place_id를 송신
+# 로봇 -> 서버 : 목표 지점 업로드 endpoint ( 로봇에서 이벤트성으로 송신 ) : 로봇 nav2의 단기적인 목표 위치 /goal_pose_2d (x,y, yaw)와 로봇쪽에서 다음에 방문하고자 하는 place의 place_id를 송신
 @app.post("/robot/goal")
 async def update_robot_goal(req: RobotGoalReq):
     print(
@@ -886,7 +891,7 @@ async def get_robot_goal():
         "goal": app.state.robot_goal,
     }
 
-# ------------------------------------서버 > 로봇 주행명령 endpoint
+# ------------------------------------ 서버 > 로봇 주행명령 endpoint
 class RobotCommandReq(BaseModel):
     command: str
     timestamp: Optional[str] = None
@@ -925,6 +930,7 @@ async def get_robot_command():
 #========================================================================================= audio endpoint
 # ----------------------------------------------------------------오디오 이벤트 endpoint
 # 오디오 이벤트를 받고, db에 넣는 endpoint
+
 @app.post("/upload_audio")
 async def upload_audio_event(
     file: UploadFile = File(...),
@@ -974,7 +980,7 @@ async def upload_audio_event(
     }
 
 
-# ---------------------------------------------------------------------------audio event GUI Pooling 및 조회 / 관리 endpoint
+# --------------------------------------------------------------------------- audio event GUI Pooling 및 조회 / 관리 endpoint
 # audio event gui pooling
 
 @app.get("/audio_events")
