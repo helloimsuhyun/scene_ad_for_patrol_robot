@@ -15,7 +15,7 @@
     "k": 3,
     "method": "robust",
     "gaussian_k": 2.5,
-    "robust_k": 1.5,
+    "robust_k": 2.0,
     "percentile": 97
   },
   "infer": {

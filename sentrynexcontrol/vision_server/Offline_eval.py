@@ -297,6 +297,13 @@ def save_top_p_patch_vis(
 
     img = load_bgr_for_model_view(query_path, img_size=img_size)
 
+    print(
+        "top_patch_vals:",
+        float(np.min(top_patch_vals)),
+        float(np.mean(top_patch_vals)),
+        float(np.max(top_patch_vals)),
+    )
+
     vis_img = vis.draw_top_p_heatmap(
         img_bgr=img,
         top_patch_idx=top_patch_idx,
@@ -305,7 +312,9 @@ def save_top_p_patch_vis(
         patch_size=patch_size,
         alpha=0.45,
         blur_ksize=0,
-        normalize_each=True,
+        normalize_each=False,
+        abs_min=0.2,
+        abs_max=0.80,
     )
 
     out_path.parent.mkdir(parents=True, exist_ok=True)

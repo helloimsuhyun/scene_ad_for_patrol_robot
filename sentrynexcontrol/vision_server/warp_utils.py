@@ -21,7 +21,7 @@ def warp_query_to_bank(query_bgr, H, bank_hw):
 
     return warped, warped_mask
 
-# warped_mask와 dino patch gird 사이즈를 받아서 각 patch의 사용여부를 계산
+# warped_mask와 dino patch gird 사이즈를 받아서 각 patch의 사용여부를 thr기준으로 계산
 def make_patch_valid_mask(mask_hw, grid_h, grid_w, thr=0.8):
     mask = cv2.resize(mask_hw, (grid_w, grid_h), interpolation=cv2.INTER_AREA)
     mask = mask.astype(np.float32) / 255.0
@@ -30,7 +30,7 @@ def make_patch_valid_mask(mask_hw, grid_h, grid_w, thr=0.8):
 
 def crop_common_valid_region(warped_q_bgr, ref_bgr, warped_mask, margin=8, min_size=64):
     """
-    warped_mask 기준으로 공통 valid bbox를 잡아서
+    warped_mask 기준으로 공통 valid bbox ROI 를 잡아서
     warped query / ref / mask를 동일하게 crop.
 
     margin: bbox 안쪽으로 추가로 깎을 픽셀 수

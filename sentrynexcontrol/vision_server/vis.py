@@ -25,6 +25,8 @@ def draw_top_p_heatmap(
     alpha: float = 0.45,
     blur_ksize: int = 0,
     normalize_each: bool = True,
+    abs_min: float | None = None,
+    abs_max: float | None = None,
 ) -> np.ndarray:
     """
     top-p patch index/value를 sparse heatmap으로 만든 뒤
@@ -55,6 +57,7 @@ def draw_top_p_heatmap(
     heat = np.zeros((num_patches,), dtype=np.float32)
 
     vals = np.asarray(top_patch_vals, dtype=np.float32)
+
     if normalize_each:
         vmin = float(vals.min())
         vmax = float(vals.max())
@@ -62,6 +65,14 @@ def draw_top_p_heatmap(
             vals = (vals - vmin) / (vmax - vmin)
         else:
             vals = np.ones_like(vals, dtype=np.float32)
+    else:
+        if abs_min is None or abs_max is None:
+            raise ValueError("normalize_each=False 일 때 abs_min, abs_max를 지정해야 합니다.")
+        if abs_max <= abs_min:
+            raise ValueError("abs_max must be greater than abs_min")
+
+        vals = (vals - abs_min) / (abs_max - abs_min)
+        vals = np.clip(vals, 0.0, 1.0)
 
     for idx, val in zip(top_patch_idx, vals):
         idx = int(idx)
