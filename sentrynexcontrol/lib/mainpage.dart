@@ -9,6 +9,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'features/control/calibration_provider.dart';
 import 'providers/event_provider.dart';
 import 'models/event_model.dart';
+import 'widgets/event_detail_dialog.dart';
 
 class MainPage extends ConsumerStatefulWidget {
   const MainPage({super.key});
@@ -19,6 +20,14 @@ class MainPage extends ConsumerStatefulWidget {
 
 class MainPageState extends ConsumerState<MainPage> {
   Pages _currentPage = Pages.dashboard;
+
+  final List<Widget> _pages = const [
+    DashboardScreen(),
+    MapScreen(),
+    LogsScreen(),
+    ControlScreen(),
+    SettingsScreen(),
+  ];
 
   @override
   Widget build(BuildContext context) {
@@ -56,6 +65,11 @@ class MainPageState extends ConsumerState<MainPage> {
               duration: const Duration(seconds: 4),
             ),
           );
+          
+          // 새로 추가된 기능: 스낵바와 동시에 팝업 창 즉시 띄우기
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            showEventDetailDialog(context, ref, newEvent);
+          });
         }
       }
     });
@@ -80,7 +94,12 @@ class MainPageState extends ConsumerState<MainPage> {
                 ),
               ),
               //---------- 우측 메인 콘텐츠 영역 ----------
-              Expanded(child: buildPage()),
+              Expanded(
+                child: IndexedStack(
+                  index: _currentPage.index,
+                  children: _pages,
+                ),
+              ),
             ],
           ),
           
@@ -122,21 +141,5 @@ class MainPageState extends ConsumerState<MainPage> {
       ),
     );
   }
-
-  Widget buildPage() {
-    switch (_currentPage) {
-      case Pages.dashboard:
-        return const DashboardScreen();
-      case Pages.map:
-        return const MapScreen();
-      case Pages.logs:
-        return const LogsScreen();
-      case Pages.control:
-        return const ControlScreen();
-      case Pages.settings:
-        return const SettingsScreen();
-      default:
-        return const SizedBox.shrink();
-    }
-  }
 }
+

@@ -1,4 +1,6 @@
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
+import 'dart:convert';
 
 class ManualControllerPanel extends StatefulWidget {
   const ManualControllerPanel({super.key});
@@ -9,6 +11,18 @@ class ManualControllerPanel extends StatefulWidget {
 
 class _ManualControllerPanelState extends State<ManualControllerPanel> {
   bool isManualControlEnabled = false;
+
+  Future<void> _sendCommand(String cmd) async {
+    try {
+      await http.post(
+        Uri.parse('http://127.0.0.1:8000/robot/command'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'command': cmd}),
+      );
+    } catch (e) {
+      debugPrint('Manual Command Error: $e');
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -57,7 +71,7 @@ class _ManualControllerPanelState extends State<ManualControllerPanel> {
                     child: _DirectionButton(
                       icon: Icons.keyboard_arrow_up,
                       isEnabled: isManualControlEnabled,
-                      onPressed: () {},
+                      onPressed: () => _sendCommand('forward'),
                     ),
                   ),
                   // 하 (Backward)
@@ -66,7 +80,7 @@ class _ManualControllerPanelState extends State<ManualControllerPanel> {
                     child: _DirectionButton(
                       icon: Icons.keyboard_arrow_down,
                       isEnabled: isManualControlEnabled,
-                      onPressed: () {},
+                      onPressed: () => _sendCommand('backward'),
                     ),
                   ),
                   // 좌 (Left)
@@ -75,7 +89,7 @@ class _ManualControllerPanelState extends State<ManualControllerPanel> {
                     child: _DirectionButton(
                       icon: Icons.keyboard_arrow_left,
                       isEnabled: isManualControlEnabled,
-                      onPressed: () {},
+                      onPressed: () => _sendCommand('turn_left'),
                     ),
                   ),
                   // 우 (Right)
@@ -84,7 +98,7 @@ class _ManualControllerPanelState extends State<ManualControllerPanel> {
                     child: _DirectionButton(
                       icon: Icons.keyboard_arrow_right,
                       isEnabled: isManualControlEnabled,
-                      onPressed: () {},
+                      onPressed: () => _sendCommand('turn_right'),
                     ),
                   ),
                   // 중앙 데코 (로봇 아이콘 표시 등)

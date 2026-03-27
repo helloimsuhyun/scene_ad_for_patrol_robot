@@ -1,3 +1,4 @@
+#sqlite_dl.py
 
 import sqlite3
 import uuid
@@ -32,6 +33,36 @@ def connect_db(db_path: Union[str, Path]) -> sqlite3.Connection:
 # db생성, 이미 있으면 무시하고 없으면 만들기
 def init_db(db: sqlite3.Connection) -> None:
     cur = db.cursor()
+    
+    # ----------------------------------------------------
+    # 자동 마이그레이션 (schema update)
+    # ----------------------------------------------------
+    
+    # 1. events 테이블 마이그레이션
+    try:
+        cur.execute("SELECT admin_checked FROM events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE events ADD COLUMN admin_checked INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE events ADD COLUMN admin_label TEXT")
+        except:
+            pass
+
+    # 2. places 테이블 마이그레이션
+    try:
+        cur.execute("SELECT is_active FROM places LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE places ADD COLUMN display_name TEXT")
+            cur.execute("ALTER TABLE places ADD COLUMN x REAL")
+            cur.execute("ALTER TABLE places ADD COLUMN y REAL")
+            cur.execute("ALTER TABLE places ADD COLUMN yaw REAL")
+            cur.execute("ALTER TABLE places ADD COLUMN patrol_enabled INTEGER NOT NULL DEFAULT 1")
+            cur.execute("ALTER TABLE places ADD COLUMN patrol_order INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE places ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        except:
+            pass
+
     cur.executescript(
         """
         -- =========================
@@ -48,6 +79,9 @@ def init_db(db: sqlite3.Connection) -> None:
           ref_bank_id     TEXT,
           ref_topk_json   TEXT,
           summary_text    TEXT,
+
+          admin_checked   INTEGER NOT NULL DEFAULT 0,
+          admin_label     TEXT,
 
           created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
         );
@@ -74,11 +108,42 @@ def init_db(db: sqlite3.Connection) -> None:
         -- places: 장소 상태 관리
         -- =========================
         CREATE TABLE IF NOT EXISTS places (
-        place_id          TEXT PRIMARY KEY,
-        mode              TEXT NOT NULL DEFAULT 'idle'
-                            CHECK (mode IN ('idle', 'bank', 'th_calib', 'query')),
-        need_calibration  INTEGER NOT NULL DEFAULT 1 CHECK (need_calibration IN (0,1)),
-        updated_at        TEXT NOT NULL DEFAULT (datetime('now'))
+            place_id           TEXT PRIMARY KEY,
+
+            display_name       TEXT,
+            x                  REAL,
+            y                  REAL,
+            yaw                REAL,
+
+            patrol_enabled     INTEGER NOT NULL DEFAULT 1 CHECK (patrol_enabled IN (0,1)),
+            patrol_order       INTEGER NOT NULL DEFAULT 0,
+            is_active          INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+
+            mode               TEXT NOT NULL DEFAULT 'idle'
+                                CHECK (mode IN ('idle', 'bank', 'th_calib', 'query')),
+            need_calibration   INTEGER NOT NULL DEFAULT 1 CHECK (need_calibration IN (0,1)),
+            updated_at         TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- =========================
+        -- audio_events: 오디오 이벤트 관리
+        -- =========================
+        CREATE TABLE IF NOT EXISTS audio_events (
+            audio_event_id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            audio_path TEXT NOT NULL,
+
+            x REAL,
+            y REAL,
+            yaw REAL,
+
+            doa REAL,
+            model_label TEXT,
+
+            admin_checked INTEGER NOT NULL DEFAULT 0,
+            admin_label TEXT,
+
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
         );
 
         -- =========================
@@ -98,6 +163,25 @@ def init_db(db: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_places_need_calibration
         ON places(need_calibration);
+
+        CREATE INDEX IF NOT EXISTS idx_places_active
+        ON places(is_active);
+
+        CREATE INDEX IF NOT EXISTS idx_places_patrol_enabled
+        ON places(patrol_enabled);
+
+        CREATE INDEX IF NOT EXISTS idx_places_patrol_order
+        ON places(patrol_order);
+
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_time
+        ON audio_events(timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_admin_checked
+        ON audio_events(admin_checked);
+
+        CREATE INDEX IF NOT EXISTS idx_audio_events_model_label
+        ON audio_events(model_label);
         """
     )
     db.commit()
@@ -290,22 +374,36 @@ def list_frames(db: sqlite3.Connection, event_id: str) -> List[Dict[str, Any]]:
 #-------------------- place 관련 함수
 
 # 해당 place row가 없으면 기본 상태(idle)로 생성
-def ensure_place(db, place_id: str):
+def ensure_place(db, place_id: str, display_name: Optional[str] = None):
     now = datetime.now().isoformat()
     cur = db.cursor()
     cur.execute("""
-        INSERT OR IGNORE INTO places (place_id, mode, need_calibration, updated_at)
-        VALUES (?, 'idle', 1, ?)
-    """, (str(place_id), now))
+        INSERT OR IGNORE INTO places
+        (place_id, display_name, patrol_enabled, is_active, mode, need_calibration, updated_at)
+        VALUES (?, ?, 1, 1, 'idle', 1, ?)
+    """, (str(place_id), display_name or str(place_id), now))
     db.commit()
 
-
-# 특정 place 상태 조회 (없으면 자동 생성 후 반환)
-def get_place(db, place_id: str):
-    ensure_place(db, place_id)
+# 새 장소 추가 (프론트 맵 클릭 생성용)
+def create_place(db, place_id: str, display_name: str, x: float, y: float, yaw: float, patrol_enabled: int = 0):
+    now = datetime.now().isoformat()
     cur = db.cursor()
     cur.execute("""
-        SELECT place_id, mode, need_calibration, updated_at
+        INSERT INTO places
+        (place_id, display_name, x, y, yaw, patrol_enabled, is_active, mode, need_calibration, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 'idle', 1, ?)
+    """, (str(place_id), display_name, x, y, yaw, patrol_enabled, now))
+    db.commit()
+    return get_place(db, place_id)
+
+
+# 특정 place 상태 조회 
+def get_place(db, place_id: str):
+    cur = db.cursor()
+    cur.execute("""
+        SELECT place_id, display_name, x, y, yaw,
+            patrol_enabled, patrol_order, is_active,
+            mode, need_calibration, updated_at
         FROM places
         WHERE place_id = ?
     """, (str(place_id),))
@@ -314,13 +412,25 @@ def get_place(db, place_id: str):
 
 
 # 전체 place 상태 리스트 반환
-def list_places(db):
+def list_places(db, active_only: bool = True):
     cur = db.cursor()
-    cur.execute("""
-        SELECT place_id, mode, need_calibration, updated_at
-        FROM places
-        ORDER BY place_id ASC
-    """)
+    if active_only:
+        cur.execute("""
+            SELECT place_id, display_name, x, y, yaw,
+                patrol_enabled, patrol_order, is_active,
+                mode, need_calibration, updated_at
+            FROM places
+            WHERE is_active = 1
+            ORDER BY patrol_order ASC, place_id ASC
+        """)
+    else:
+        cur.execute("""
+            SELECT place_id, display_name, x, y, yaw,
+                patrol_enabled, patrol_order, is_active,
+                mode, need_calibration, updated_at
+            FROM places
+            ORDER BY patrol_order ASC, place_id ASC
+        """)
     rows = cur.fetchall()
     return [dict(r) for r in rows]
 
@@ -361,3 +471,260 @@ def delete_all_place_rows(db):
     cur = db.cursor()
     cur.execute("DELETE FROM places")
     db.commit()
+
+# ---------------------------------- 관리자 event 라벨링 관련 db 유틸
+
+def set_event_manual_label(
+    db: sqlite3.Connection,
+    event_id: str,
+    manual_label: Optional[str],
+) -> None:
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE events
+        SET admin_checked = 1,
+            admin_label = ?
+        WHERE event_id = ?
+        """,
+        (manual_label, event_id),
+    )
+    db.commit()
+
+
+# ---------------------------------- 교시 / patrol 관련 place db 유틸
+
+# 새로 place가 들어오면 현재 마지막 active의 다음 순서로 초기 배정
+def get_next_patrol_order(db: sqlite3.Connection) -> int:
+
+    cur = db.cursor()
+    row = cur.execute("""
+        SELECT COALESCE(MAX(patrol_order), -1) + 1 AS next_order
+        FROM places
+        WHERE is_active = 1
+    """).fetchone()
+    return int(row["next_order"])
+
+
+def set_place_patrol_order(db: sqlite3.Connection, place_id: str, patrol_order: int) -> None:
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET patrol_order = ?, updated_at = ?
+        WHERE place_id = ?
+    """, (int(patrol_order), now, str(place_id)))
+    db.commit()
+
+
+def reorder_patrol_places(db: sqlite3.Connection, ordered_place_ids: List[str]) -> None:
+    """
+    GUI에서 전달한 전체 place 순서대로 patrol_order를 0,1,2... 재부여
+    주의: active place 전체 리스트를 넘긴다고 가정
+    """
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+
+    existing_rows = cur.execute("""
+        SELECT place_id
+        FROM places
+        WHERE is_active = 1
+    """).fetchall()
+    existing_ids = {row["place_id"] for row in existing_rows}
+
+    req_ids = [str(pid) for pid in ordered_place_ids]
+    missing = [pid for pid in req_ids if pid not in existing_ids]
+    if missing:
+        raise ValueError(f"unknown place_ids: {missing}")
+
+    # active 전체를 보내는 정책 체크
+    if set(req_ids) != existing_ids:
+        raise ValueError("place_ids must contain all active places exactly once")
+
+    if len(req_ids) != len(set(req_ids)):
+        raise ValueError("duplicate place_id in reorder request")
+
+    for idx, place_id in enumerate(req_ids):
+        cur.execute("""
+            UPDATE places
+            SET patrol_order = ?, updated_at = ?
+            WHERE place_id = ?
+        """, (idx, now, place_id))
+
+    db.commit()
+
+
+def upsert_place_waypoint(
+    db: sqlite3.Connection,
+    place_id: str,
+    x: float,
+    y: float,
+    yaw: float,
+    display_name: Optional[str] = None,
+    patrol_enabled: bool = True,
+    patrol_order: int = 0,
+) -> None:
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO places
+        (place_id, display_name, x, y, yaw, patrol_enabled, patrol_order, is_active,
+         mode, need_calibration, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'idle', 1, ?)
+        ON CONFLICT(place_id) DO UPDATE SET
+            display_name = COALESCE(excluded.display_name, places.display_name),
+            x = excluded.x,
+            y = excluded.y,
+            yaw = excluded.yaw,
+            patrol_enabled = excluded.patrol_enabled,
+            patrol_order = excluded.patrol_order,
+            is_active = 1,
+            updated_at = excluded.updated_at
+    """, (
+        str(place_id),
+        display_name if display_name is not None else str(place_id),
+        float(x),
+        float(y),
+        float(yaw),
+        1 if patrol_enabled else 0,
+        int(patrol_order),
+        now,
+    ))
+    db.commit()
+
+
+def set_place_display_name(db, place_id: str, display_name: str):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET display_name = ?, updated_at = ?
+        WHERE place_id = ?
+    """, (display_name, now, str(place_id)))
+    db.commit()
+
+
+def set_place_patrol_enabled(db, place_id: str, enabled: bool):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET patrol_enabled = ?, updated_at = ?
+        WHERE place_id = ?
+    """, (1 if enabled else 0, now, str(place_id)))
+    db.commit()
+
+
+def deactivate_place(db, place_id: str):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET is_active = 0, updated_at = ?
+        WHERE place_id = ?
+    """, (now, str(place_id)))
+    db.commit()
+
+
+def reactivate_place(db, place_id: str):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        UPDATE places
+        SET is_active = 1, updated_at = ?
+        WHERE place_id = ?
+    """, (now, str(place_id)))
+    db.commit()
+
+
+def list_patrol_places(db):
+    """
+    현재 순찰 waypoint로 지정된 place들을 patrol_order 기준으로 반환
+    """
+    cur = db.cursor()
+    cur.execute("""
+        SELECT place_id, display_name, x, y, yaw, patrol_order
+        FROM places
+        WHERE is_active = 1
+          AND patrol_enabled = 1
+          AND x IS NOT NULL
+          AND y IS NOT NULL
+          AND yaw IS NOT NULL
+        ORDER BY patrol_order ASC, place_id ASC
+    """)
+    rows = cur.fetchall()
+    return [dict(r) for r in rows]
+
+# ======================================= 오디오 관련 함수
+
+# 오디오 이벤트 db에 넣는 함수
+def insert_audio_event(
+    db: sqlite3.Connection,
+    timestamp: ISO8601,
+    audio_path: str,
+    x: Optional[float] = None,
+    y: Optional[float] = None,
+    yaw: Optional[float] = None,
+    doa: Optional[float] = None,
+    model_label: Optional[str] = None,
+    audio_event_id: Optional[str] = None,
+) -> str:
+    aid = audio_event_id or _uuid()
+    cur = db.cursor()
+    cur.execute(
+        """
+        INSERT INTO audio_events
+        (audio_event_id, timestamp, audio_path, x, y, yaw, doa, model_label)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (aid, timestamp, audio_path, x, y, yaw, doa, model_label),
+    )
+    db.commit()
+    return aid
+
+# 관리자 오디오 이벤트 라벨링
+def set_audio_event_admin_label(
+    db: sqlite3.Connection,
+    audio_event_id: str,
+    admin_label: Optional[str],
+) -> None:
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE audio_events
+        SET admin_checked = 1,
+            admin_label = ?
+        WHERE audio_event_id = ?
+        """,
+        (admin_label, audio_event_id),
+    )
+    db.commit()
+
+#오디오 이벤트 조회 함수 (id로 조회)
+def get_audio_event(db: sqlite3.Connection, audio_event_id: str) -> Optional[Dict[str, Any]]:
+    cur = db.cursor()
+    row = cur.execute(
+        "SELECT * FROM audio_events WHERE audio_event_id = ?",
+        (audio_event_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+#오디오 이벤트 조회 (list 형태로 여러개 / 체크 안된것만 할것지 설정 가능)
+def list_audio_events(db: sqlite3.Connection, unchecked_only: bool = False) -> List[Dict[str, Any]]:
+    cur = db.cursor()
+    if unchecked_only:
+        rows = cur.execute(
+            """
+            SELECT * FROM audio_events
+            WHERE admin_checked = 0
+            ORDER BY timestamp DESC
+            """
+        ).fetchall()
+    else:
+        rows = cur.execute(
+            """
+            SELECT * FROM audio_events
+            ORDER BY timestamp DESC
+            """
+        ).fetchall()
+    return [dict(r) for r in rows]

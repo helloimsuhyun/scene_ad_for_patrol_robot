@@ -33,6 +33,12 @@ def _build_place_status(row, save_root: Path):
 
     return {
         "place_id": place_id,
+        "display_name": row.get("display_name"),
+        "x": row.get("x"),
+        "y": row.get("y"),
+        "yaw": row.get("yaw"),
+        "patrol_enabled": row.get("patrol_enabled"),
+        "patrol_order": row.get("patrol_order"),
         "mode": row["mode"],
         "need_calibration": bool(row["need_calibration"]),
         "bank_target": BANK_TARGET,

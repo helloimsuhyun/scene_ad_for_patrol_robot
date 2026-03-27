@@ -15,7 +15,10 @@ from typing import List, Dict, Any, Optional
 
 from .banker import load_bank_by_place, BGR_to_RGB, rebuild_bank
 from .dino_emb import make_embed , make_transform
-from .vlm_gate import vlm_gate
+try:
+    from .vlm_gate import vlm_gate
+except ImportError:
+    vlm_gate = None
 from .config import load_cfg
 
 # vis helper
@@ -754,7 +757,7 @@ def infer_event(
         ref_img_path = topk_paths_all[idx][0] if topk_paths_all[idx] else ""
         rep = {"frame_idx": idx, "ref_img_path": ref_img_path}
 
-        if ref_img_path:
+        if ref_img_path and vlm_gate is not None:
             vlm_result = vlm_gate(q_img, ref_img_path)
             anomaly_flag = 1 if bool(vlm_result.get("physical_change", False)) else 0
             summary = str(vlm_result.get("description", ""))

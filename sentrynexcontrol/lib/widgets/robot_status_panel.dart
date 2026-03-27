@@ -2,6 +2,12 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
+import '../providers/robot_provider.dart';
+import '../features/control/control_provider.dart'; // placesProvider 참조
+import 'patrol_route_dialog.dart';
+
+// 로봇 현재 목표 지점 폴링은 실제 연동 시 활성화 예정
+// final _robotGoalProvider = StreamProvider...
 
 // 수동 캡처 대기를 위한 로딩 상태
 final _isCapturingProvider = StateProvider<bool>((ref) => false);
@@ -18,6 +24,7 @@ class RobotStatusPanel extends ConsumerStatefulWidget {
 
 class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
   bool isCliButtonsEnabled = false;
+  // 로컬 _isPatrolling 제거 (전역 patrolStatusProvider 사용)
 
   Future<void> _triggerCapture(
     BuildContext context,
@@ -103,6 +110,32 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
     }
   }
 
+  Future<void> _sendRobotCommand(String cmd) async {
+    debugPrint('Robot Command Received: $cmd');
+    // 순찰 시작/정지 버튼에 따라 전역 순찰 상태 즉시 반영
+    if (cmd == 'start_patrol') {
+      debugPrint('Setting patrolStatusProvider to TRUE');
+      ref.read(patrolStatusProvider.notifier).state = true;
+    } else if (cmd == 'pause_patrol' || cmd == 'return_to_charge') {
+      debugPrint('Setting patrolStatusProvider to FALSE');
+      ref.read(patrolStatusProvider.notifier).state = false;
+    }
+    try {
+      final res = await http.post(
+        Uri.parse('http://127.0.0.1:8000/robot/command'),
+        headers: {'Content-Type': 'application/json'},
+        body: jsonEncode({'command': cmd}),
+      );
+      if (res.statusCode == 200 && mounted) {
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text('명령 전송: $cmd')));
+      }
+    } catch (e) {
+      debugPrint('Command err: $e');
+    }
+  }
+
   Future<void> _toggleQueryLabel(WidgetRef ref) async {
     final current = ref.read(_queryLabelProvider);
     final next = current == 'normal' ? 'abnormal' : 'normal';
@@ -120,6 +153,8 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
 
   @override
   Widget build(BuildContext context) {
+    final robotPose = ref.watch(robotPoseProvider);
+
     return Container(
       width: double.infinity,
       padding: const EdgeInsets.all(12), // 패널 안쪽 여백 줄임 (로그창 공간 확보)
@@ -128,220 +163,406 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
         borderRadius: BorderRadius.circular(16),
         border: Border.all(color: const Color(0xFF2D3041)),
       ),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          Row(
-            children: [
-              const Icon(
-                Icons.smart_toy_outlined,
-                size: 18,
-                color: Color(0xFFB5BAD3),
-              ),
-              const SizedBox(width: 6),
-              const Text(
-                'Robot Status',
-                style: TextStyle(
+      child: SingleChildScrollView(
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                const Icon(
+                  Icons.smart_toy_outlined,
+                  size: 18,
                   color: Color(0xFFB5BAD3),
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
                 ),
-              ),
-              const Spacer(),
-              //---------- 우상단 소형 배터리 인디케이터 ----------
-              Row(
-                children: [
-                  Container(
-                    width: 60, // 배터리 막대 가로 늘림
-                    height: 14, // 세로 늘림
-                    decoration: BoxDecoration(
-                      color: const Color(0xFF26293A),
-                      borderRadius: BorderRadius.circular(5),
-                    ),
-                    child: Align(
-                      alignment: Alignment.centerLeft,
-                      child: Container(
-                        width: 60 * 0.72,
-                        decoration: BoxDecoration(
-                          color: const Color(0xFF7F7CFF), // 포인트 컬러 연보라색
-                          borderRadius: BorderRadius.circular(5),
+                const SizedBox(width: 6),
+                const Text(
+                  'Robot Status',
+                  style: TextStyle(
+                    color: Color(0xFFB5BAD3),
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                const Spacer(),
+                //---------- 우상단 소형 배터리 인디케이터 ----------
+                Row(
+                  children: [
+                    Container(
+                      width: 60, // 배터리 막대 가로 늘림
+                      height: 14, // 세로 늘림
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF26293A),
+                        borderRadius: BorderRadius.circular(5),
+                      ),
+                      child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: Container(
+                          width: 60 * 0.72,
+                          decoration: BoxDecoration(
+                            color: const Color(0xFF7F7CFF), // 포인트 컬러 연보라색
+                            borderRadius: BorderRadius.circular(5),
+                          ),
                         ),
                       ),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  const Text(
-                    '72%',
-                    style: TextStyle(
-                      color: Color(0xFF7F7CFF), // 연보라색 텍스트
-                      fontSize: 11,
-                      fontWeight: FontWeight.bold,
+                    const SizedBox(width: 8),
+                    const Text(
+                      '72%',
+                      style: TextStyle(
+                        color: Color(0xFF7F7CFF), // 연보라색 텍스트
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: const [
-              _RobotMetric(
-                label: '연결 상태',
-                value: '온라인',
-                color: Color(0xFF4ADE80),
-              ),
-              _RobotMetric(
-                label: '현재 속도',
-                value: '1.2 m/s',
-                color: Color(0xFFB5BAD3),
-              ),
-              _RobotMetric(
-                label: '작업 모드',
-                value: '순찰 중',
-                color: Color(0xFFB5BAD3),
-              ),
-            ],
-          ),
-          const SizedBox(height: 14),
-          const Divider(height: 1, color: Color(0xFF2D3041)),
-          const SizedBox(height: 10),
-          //---------- 명령어 컨트롤러 헤더 및 스위치 ----------
-          Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
-            children: [
-              const Text(
-                '명령어 컨트롤러',
-                style: TextStyle(color: Color(0xFF9FA4B9), fontSize: 11),
-              ),
-              Switch(
-                value: isCliButtonsEnabled,
-                inactiveThumbColor: const Color(0xFF7F7CFF),
-                activeColor: const Color(0xFF7F7CFF),
-                onChanged: (value) {
-                  setState(() {
-                    isCliButtonsEnabled = value;
-                  });
-                },
-              ),
-            ],
-          ),
+                  ],
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const _RobotMetric(
+                  label: '연결 상태',
+                  value: '온라인',
+                  color: Color(0xFF4ADE80),
+                ),
+                const _RobotMetric(
+                  label: '현재 속도',
+                  value: '1.2 m/s',
+                  color: Color(0xFFB5BAD3),
+                ),
+                _RobotMetric(
+                  label: '작업 모드',
+                  value: robotPose?.status ?? '알 수 없음',
+                  color: const Color(0xFFB5BAD3),
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+            const Divider(height: 1, color: Color(0xFF2D3041)),
+            const SizedBox(height: 10),
+            //---------- 명령어 컨트롤러 헤더 및 스위치 (위치 이동됨) ----------
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  '명령어 컨트롤러',
+                  style: TextStyle(color: Color(0xFF9FA4B9), fontSize: 11),
+                ),
+                Switch(
+                  value: isCliButtonsEnabled,
+                  inactiveThumbColor: const Color(0xFF7F7CFF),
+                  activeColor: const Color(0xFF7F7CFF),
+                  onChanged: (value) {
+                    setState(() {
+                      isCliButtonsEnabled = value;
+                    });
+                  },
+                ),
+              ],
+            ),
 
-          if (isCliButtonsEnabled) ...[
-            const SizedBox(height: 6),
-            Builder(
-              builder: (context) {
-                final queryLabel = ref.watch(_queryLabelProvider);
-                final isCapturing = ref.watch(_isCapturingProvider);
+            if (isCliButtonsEnabled) ...[
+              const SizedBox(height: 8),
+              Builder(
+                builder: (context) {
+                  final queryLabel = ref.watch(_queryLabelProvider);
+                  final isCapturing = ref.watch(_isCapturingProvider);
 
-                return Column(
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                      children: [
-                        Expanded(
-                          child: TextButton.icon(
-                            onPressed: () => _toggleQueryLabel(ref),
-                            icon: Icon(
-                              queryLabel == 'normal'
-                                  ? Icons.shield_outlined
-                                  : Icons.warning_amber_rounded,
+                  return Row(
+                    children: [
+                      Expanded(
+                        child: TextButton.icon(
+                          onPressed: () => _toggleQueryLabel(ref),
+                          style: TextButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            minimumSize: Size.zero,
+                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                          ),
+                          icon: Icon(
+                            queryLabel == 'normal'
+                                ? Icons.shield_outlined
+                                : Icons.warning_amber_rounded,
+                            color: queryLabel == 'normal'
+                                ? Colors.greenAccent
+                                : Colors.redAccent,
+                            size: 13,
+                          ),
+                          label: Text(
+                            '라벨: $queryLabel',
+                            style: TextStyle(
                               color: queryLabel == 'normal'
                                   ? Colors.greenAccent
                                   : Colors.redAccent,
-                              size: 14,
-                            ),
-                            label: Text(
-                              '라벨: $queryLabel',
-                              style: TextStyle(
-                                color: queryLabel == 'normal'
-                                    ? Colors.greenAccent
-                                    : Colors.redAccent,
-                                fontSize: 11,
-                              ),
+                              fontSize: 10,
                             ),
                           ),
                         ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: isCapturing
-                                ? null
-                                : () =>
-                                      _triggerCapture(context, ref, 'capture'),
-                            icon: isCapturing
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white54,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.camera_alt_outlined,
-                                    size: 14,
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: isCapturing
+                              ? null
+                              : () => _triggerCapture(context, ref, 'capture'),
+                          icon: isCapturing
+                              ? const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white54,
                                   ),
-                            label: const Text(
-                              '현재캡처',
-                              style: TextStyle(fontSize: 11),
-                            ),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF26293A),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 8),
-                            ),
+                                )
+                              : const Icon(Icons.camera_alt_outlined, size: 12),
+                          label: const Text(
+                            '현재캡처',
+                            style: TextStyle(fontSize: 10),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF26293A),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            minimumSize: Size.zero,
                           ),
                         ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: isCapturing
-                                ? null
-                                : () => _triggerCapture(
-                                    context,
-                                    ref,
-                                    'place_and_capture',
+                      ),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: ElevatedButton.icon(
+                          onPressed: isCapturing
+                              ? null
+                              : () => _triggerCapture(
+                                  context,
+                                  ref,
+                                  'place_and_capture',
+                                ),
+                          icon: isCapturing
+                              ? const SizedBox(
+                                  width: 12,
+                                  height: 12,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                    color: Colors.white54,
                                   ),
-                            icon: isCapturing
-                                ? const SizedBox(
-                                    width: 14,
-                                    height: 14,
-                                    child: CircularProgressIndicator(
-                                      strokeWidth: 2,
-                                      color: Colors.white54,
-                                    ),
-                                  )
-                                : const Icon(
-                                    Icons.location_on_outlined,
-                                    size: 14,
-                                  ),
-                            label: const Text(
-                              '이동+캡처',
-                              style: TextStyle(fontSize: 11),
-                            ),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF1F8CEB),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 8),
-                            ),
+                                )
+                              : const Icon(
+                                  Icons.location_on_outlined,
+                                  size: 12,
+                                ),
+                          label: const Text(
+                            '이동+캡처',
+                            style: TextStyle(fontSize: 10),
+                          ),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(0xFF1F8CEB),
+                            foregroundColor: Colors.white,
+                            padding: const EdgeInsets.symmetric(vertical: 12),
+                            minimumSize: Size.zero,
                           ),
                         ),
-                      ],
-                    ),
-                  ],
-                );
-              },
+                      ),
+                    ],
+                  );
+                },
+              ),
+              const SizedBox(height: 10),
+            ],
+            const SizedBox(height: 10),
+            //---------- 순찰 글로벌 경로 및 제어 ----------
+            SizedBox(
+              width: double.infinity,
+              child: OutlinedButton.icon(
+                onPressed: () {
+                  showDialog(
+                    context: context,
+                    builder: (_) => const PatrolRouteDialog(),
+                  );
+                },
+                icon: const Icon(Icons.route_outlined, size: 18),
+                label: const Text(
+                  '순찰 루트 설정',
+                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
+                ),
+                style: OutlinedButton.styleFrom(
+                  side: const BorderSide(color: Color(0xFF7F7CFF), width: 1.5),
+                  foregroundColor: const Color(0xFF7F7CFF),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
             ),
-          ],
-        ],
-      ),
-    );
+            const SizedBox(height: 12),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+              children: [
+                Consumer(
+                  builder: (context, ref, _) {
+                    final isPatrolling = ref.watch(patrolStatusProvider);
+                    return _PatrolControlButton(
+                      icon: Icons.play_arrow_rounded,
+                      label: '순찰 재개',
+                      color: isPatrolling
+                          ? const Color(0xFF3D4060)
+                          : const Color(0xFF4ADE80),
+                      onPressed: isPatrolling
+                          ? () {}
+                          : () => _sendRobotCommand('start_patrol'),
+                      isEnabled: !isPatrolling,
+                    );
+                  },
+                ),
+                Consumer(
+                  builder: (context, ref, _) {
+                    final isPatrolling = ref.watch(patrolStatusProvider);
+                    return _PatrolControlButton(
+                      icon: Icons.pause_rounded,
+                      label: '일시 정지',
+                      color: isPatrolling
+                          ? const Color(0xFFFBBF24)
+                          : const Color(0xFF3D4060),
+                      onPressed: isPatrolling
+                          ? () => _sendRobotCommand('pause_patrol')
+                          : () {},
+                      isEnabled: isPatrolling,
+                    );
+                  },
+                ),
+                Consumer(
+                  builder: (context, ref, _) {
+                    final isPatrolling = ref.watch(patrolStatusProvider);
+                    return _PatrolControlButton(
+                      icon: Icons.battery_charging_full_rounded,
+                      label: '충전 복귀',
+                      color: isPatrolling
+                          ? const Color(0xFF38BDF8)
+                          : const Color(0xFF3D4060),
+                      onPressed: isPatrolling
+                          ? () => _sendRobotCommand('return_to_charge')
+                          : () {},
+                      isEnabled: isPatrolling,
+                    );
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 10),
+            //---------- 순찰 진행 현황 (순찰 시작 눌렀을 때만 표시) ----------
+            if (ref.watch(patrolStatusProvider)) ...[
+              const SizedBox(height: 10),
+              const Divider(height: 1, color: Color(0xFF2D3041)),
+              const SizedBox(height: 10),
+
+              Consumer(
+                builder: (context, ref, _) {
+                  final placesAsync = ref.watch(placesProvider);
+                  final patrolList = <Map<String, dynamic>>[];
+                  placesAsync.whenData((data) {
+                    final list = data['places'] as List<dynamic>? ?? [];
+                    patrolList.addAll(
+                      list
+                          .where(
+                            (p) =>
+                                p['patrol_enabled'] == 1 ||
+                                p['patrol_enabled'] == true,
+                          )
+                          .map((p) => Map<String, dynamic>.from(p)),
+                    );
+                  });
+
+                  // 첫 번째 노드를 현재 목표로 보여줌 (디자인 확인용)
+                  final firstId = patrolList.isNotEmpty
+                      ? patrolList.first['place_id'].toString()
+                      : null;
+                  final firstName = patrolList.isNotEmpty
+                      ? (patrolList.first['display_name']?.toString() ??
+                            firstId!)
+                      : '노드 없음';
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(
+                            Icons.location_on,
+                            size: 16,
+                            color: Color(0xFF7F7CFF),
+                          ),
+                          const SizedBox(width: 2),
+                          const Text(
+                            '순찰 진행중: ',
+                            style: TextStyle(
+                              color: Color(0xFF9FA4B9),
+                              fontSize: 14,
+                            ),
+                          ),
+                          Text(
+                            firstName,
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                        ],
+                      ),
+                      if (patrolList.isNotEmpty) ...[
+                        const SizedBox(height: 12),
+                        Wrap(
+                          spacing: 6,
+                          runSpacing: 6,
+                          children: patrolList.asMap().entries.map((entry) {
+                            final idx = entry.key;
+                            final p = entry.value;
+                            final pid = p['place_id'].toString();
+                            final name = p['display_name']?.toString() ?? pid;
+                            final isCurrent = pid == firstId;
+                            return Container(
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                                vertical: 5,
+                              ),
+                              decoration: BoxDecoration(
+                                color: isCurrent
+                                    ? const Color(0xFF7F7CFF)
+                                    : const Color(0xFF26293A),
+                                borderRadius: BorderRadius.circular(12),
+                                border: Border.all(
+                                  color: isCurrent
+                                      ? const Color(0xFF7F7CFF)
+                                      : const Color(0xFF3D4060),
+                                ),
+                              ),
+                              child: Text(
+                                '${idx + 1}. $name',
+                                style: TextStyle(
+                                  color: isCurrent
+                                      ? Colors.white
+                                      : const Color(0xFF9FA4B9),
+                                  fontSize: 13, // 글씨 크기 확대
+                                  fontWeight: isCurrent
+                                      ? FontWeight.w600
+                                      : FontWeight.normal,
+                                ),
+                              ),
+                            );
+                          }).toList(),
+                        ),
+                      ],
+                    ],
+                  );
+                },
+              ),
+            ], // if (_isPatrolling) ...[  닫는 ]
+          ], // Column children: [  닫는 ]
+        ), // Column 닫는 )
+      ), // SingleChildScrollView 닫는 )
+    ); // Container 닫는 ) 및 return 종결
   }
 }
 
@@ -371,6 +592,50 @@ class _RobotMetric extends StatelessWidget {
           ),
         ),
       ],
+    );
+  }
+}
+
+class _PatrolControlButton extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final Color color;
+  final VoidCallback onPressed;
+  final bool isEnabled;
+
+  const _PatrolControlButton({
+    required this.icon,
+    required this.label,
+    required this.color,
+    required this.onPressed,
+    this.isEnabled = true,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Opacity(
+      opacity: isEnabled ? 1.0 : 0.4,
+      child: InkWell(
+        onTap: isEnabled ? onPressed : null,
+        borderRadius: BorderRadius.circular(8),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16.0, vertical: 8.0),
+          child: Column(
+            children: [
+              Icon(icon, color: color, size: 28),
+              const SizedBox(height: 6),
+              Text(
+                label,
+                style: TextStyle(
+                  color: isEnabled ? Color(0xFF9FA4B9) : Colors.white38,
+                  fontSize: 13, // 11 -> 13으로 확대
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }

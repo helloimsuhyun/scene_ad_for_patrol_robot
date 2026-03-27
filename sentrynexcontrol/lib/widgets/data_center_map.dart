@@ -1,16 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'dart:math' show pi;
 import '../providers/event_provider.dart';
+import '../providers/map_provider.dart';
+import '../providers/robot_provider.dart';
+import '../models/robot_state.dart';
 import '../models/event_model.dart';
+import '../utils/map_transformer.dart';
 import 'event_detail_dialog.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
-
-// 수동 캡처 대기를 위한 로딩 상태
-final _isCapturingProvider = StateProvider<bool>((ref) => false);
-
-// 수동 캡처 테스트를 위한 현재 라벨 상태 (z 명령어 토글용)
-final _queryLabelProvider = StateProvider<String>((ref) => 'normal');
 
 // 맵 상에서 클릭된 이벤트를 추적하기 위한 로컬 상태
 final _selectedMapEventProvider = StateProvider<String?>((ref) => null);
@@ -18,83 +17,12 @@ final _selectedMapEventProvider = StateProvider<String?>((ref) => null);
 class DataCenterMap extends ConsumerWidget {
   const DataCenterMap({super.key});
 
-  Future<void> _triggerCapture(BuildContext context, WidgetRef ref, String endpoint) async {
-    final loadingNotifier = ref.read(_isCapturingProvider.notifier);
-    loadingNotifier.state = true;
-    try {
-      final response = await http.post(Uri.parse('http://192.168.0.88:8090/patrol/$endpoint'));
-      if (response.statusCode == 200) {
-        final data = jsonDecode(response.body);
-        if (data['image_b64'] != null && context.mounted) {
-          final bytes = base64Decode(data['image_b64']);
-          showDialog(
-            context: context,
-            builder: (ctx) => Dialog(
-              backgroundColor: const Color(0xFF1C1E2B),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-              child: Padding(
-                padding: const EdgeInsets.all(20),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    const Text('📸 캡처 완료!', style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-                    const SizedBox(height: 16),
-                    ClipRRect(
-                      borderRadius: BorderRadius.circular(8),
-                      child: Image.memory(bytes, height: 300, fit: BoxFit.cover),
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      width: double.infinity,
-                      child: ElevatedButton(
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: const Color(0xFF1F8CEB),
-                          foregroundColor: Colors.white,
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                        ),
-                        onPressed: () => Navigator.of(ctx).pop(),
-                        child: const Text('확인', style: TextStyle(fontWeight: FontWeight.bold)),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-            ),
-          );
-        }
-      } else {
-        if (context.mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('캡처 명령 실패')));
-        }
-      }
-    } catch (e) {
-      if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('에러 발생: $e')));
-      }
-    } finally {
-      loadingNotifier.state = false;
-    }
-  }
-
-  Future<void> _toggleQueryLabel(WidgetRef ref) async {
-    final current = ref.read(_queryLabelProvider);
-    final next = current == 'normal' ? 'abnormal' : 'normal';
-    try {
-      await http.post(
-        Uri.parse('http://192.168.0.88:8090/patrol/query_gt'),
-        headers: {'Content-Type': 'application/json'},
-        body: '{"label": "$next"}',
-      );
-      ref.read(_queryLabelProvider.notifier).state = next;
-    } catch (e) {
-      debugPrint('Error toggling label: $e');
-    }
-  }
-
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final alerts = ref.watch(eventListProvider);
-    final queryLabel = ref.watch(_queryLabelProvider);
+    final mapImagePathAsync = ref.watch(mapImagePathProvider);
+    final mapTransformerAsync = ref.watch(mapTransformerProvider);
+    final robotPose = ref.watch(robotPoseProvider);
 
     //---------- 맵에 표시할 고유한 장소별 최신 이벤트 필터링 ----------
     final Map<String, Event> latestEventsByPlace = {};
@@ -121,75 +49,38 @@ class DataCenterMap extends ConsumerWidget {
                 color: const Color(0xFF10121A),
                 borderRadius: BorderRadius.circular(18),
               ),
-              child: Stack(
-                clipBehavior: Clip.none,
-                children: [
-                  //---------- 맵 배경 격자(Grid) 무늬 레이어 ----------
-                  Positioned.fill(
-                    child: CustomPaint(
-                      painter: _MapGridPainter(),
-                    ),
-                  ),
-                  //---------- 각 장소별 최신 이벤트 마커 표시 ----------
-                  ...latestEventsByPlace.values.map((event) => _EventMarker(event: event)),
-                  
-                  //---------- 수동 제어 플로팅 패널 (로봇 캡처 및 테스트용) ----------
-                  if (false) Positioned(
-                    top: 16,
-                    right: 16,
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF1C1E2B).withOpacity(0.85),
-                        borderRadius: BorderRadius.circular(12),
-                        border: Border.all(color: const Color(0xFF2D3041)),
-                      ),
-                      child: Row(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          TextButton.icon(
-                            onPressed: () => _toggleQueryLabel(ref),
-                            icon: Icon(
-                              queryLabel == 'normal' ? Icons.shield_outlined : Icons.warning_amber_rounded,
-                              color: queryLabel == 'normal' ? Colors.greenAccent : Colors.redAccent,
-                              size: 16,
-                            ),
-                            label: Text(
-                              '라벨: $queryLabel (z)',
-                              style: TextStyle(color: queryLabel == 'normal' ? Colors.greenAccent : Colors.redAccent, fontSize: 12),
-                            ),
+              child: ClipRRect(
+                borderRadius: BorderRadius.circular(18),
+                child: mapImagePathAsync.when(
+                  data: (imagePath) => mapTransformerAsync.when(
+                    data: (transformer) => InteractiveViewer(
+                      minScale: 1.0,
+                      maxScale: 5.0,
+                      child: Center(
+                        child: FittedBox(
+                          fit: BoxFit.contain,
+                          alignment: Alignment.center,
+                          child: Stack(
+                            clipBehavior: Clip.none,
+                            children: [
+                              //---------- 맵 배경 이미지 렌더링 ----------
+                              Image.asset(imagePath),
+                              //---------- 각 장소별 최신 이벤트 마커 표시 ----------
+                              ...latestEventsByPlace.values.map((event) => _EventMarker(event: event, transformer: transformer)),
+                              //---------- 로봇 실시간 마커 렌더링 ----------
+                              if (robotPose != null && robotPose.x != null && robotPose.y != null)
+                                _RobotMarker(pose: robotPose, transformer: transformer),
+                            ],
                           ),
-                          const SizedBox(width: 8),
-                          ElevatedButton.icon(
-                            onPressed: ref.watch(_isCapturingProvider) ? null : () => _triggerCapture(context, ref, 'capture'),
-                            icon: ref.watch(_isCapturingProvider) 
-                              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
-                              : const Icon(Icons.camera_alt_outlined, size: 16),
-                            label: const Text('현재캡처 (c)', style: TextStyle(fontSize: 12)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF26293A),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                            ),
-                          ),
-                          const SizedBox(width: 8),
-                          ElevatedButton.icon(
-                            onPressed: ref.watch(_isCapturingProvider) ? null : () => _triggerCapture(context, ref, 'place_and_capture'),
-                            icon: ref.watch(_isCapturingProvider) 
-                              ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54))
-                              : const Icon(Icons.location_on_outlined, size: 16),
-                            label: const Text('이동+캡처 (v)', style: TextStyle(fontSize: 12)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF1F8CEB),
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
                     ),
+                    loading: () => const Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
+                    error: (err, stack) => Center(child: Text('Map Transform Error: $err', style: const TextStyle(color: Colors.red))),
                   ),
-                ],
+                  loading: () => const Center(child: CircularProgressIndicator(color: Color(0xFF38BDF8))),
+                  error: (err, stack) => Center(child: Text('Map Image Error: $err', style: const TextStyle(color: Colors.red))),
+                ),
               ),
             ),
           ),
@@ -199,29 +90,50 @@ class DataCenterMap extends ConsumerWidget {
   }
 }
 
+class _RobotMarker extends StatelessWidget {
+  final RobotPose pose;
+  final MapTransformer transformer;
+
+  const _RobotMarker({required this.pose, required this.transformer});
+
+  @override
+  Widget build(BuildContext context) {
+    if (pose.x == null || pose.y == null) return const SizedBox();
+    
+    final transformed = transformer.transform(pose.x!, pose.y!, pose.yaw ?? 0);
+    final px = transformed['px']!;
+    final py = transformed['py']!;
+    final guiYaw = transformed['yaw']!;
+
+    return Positioned(
+      left: px - 20, // size 40 / 2
+      top: py - 20,
+      child: Transform.rotate(
+        angle: guiYaw + (pi / 2),
+        child: Container(
+          width: 40,
+          height: 40,
+          decoration: BoxDecoration(
+            color: const Color(0xFF1F8CEB).withOpacity(0.3),
+            shape: BoxShape.circle,
+            border: Border.all(color: const Color(0xFF1F8CEB), width: 2),
+            boxShadow: const [
+              BoxShadow(color: Color(0x661F8CEB), blurRadius: 10, spreadRadius: 2)
+            ],
+          ),
+          child: const Center(
+            child: Icon(Icons.navigation_rounded, color: Colors.white, size: 24),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _EventMarker extends ConsumerWidget {
   final Event event;
-  const _EventMarker({required this.event});
-
-  //---------- 특정 장소 ID별로 고정된 지도 상의 위치 (원하는 위치로 수정 가능) ----------
-  static const Map<String, Alignment> _fixedPositions = {
-    '00': Alignment(-0.85, -0.65), // 00번 장소
-    '01': Alignment(0.75, 0.45),   // 01번 장소
-    '02': Alignment(0.0, 0.85),    // 02번 장소
-  };
-
-  Alignment _getAlignmentForPlace(String placeId) {
-    // 1. 먼저 고정된 위치값이 있는지 확인
-    if (_fixedPositions.containsKey(placeId)) {
-      return _fixedPositions[placeId]!;
-    }
-
-    // 2. 등록되지 않은 ID라면 장소 ID에 기반한 간단한 해시로 맵 상의 고정 좌표 생성
-    final hash = placeId.hashCode;
-    final x = (((hash % 100) / 50.0) - 1.0) * 0.9;
-    final y = ((((hash ~/ 100) % 100) / 50.0) - 1.0) * 0.9;
-    return Alignment(x, y);
-  }
+  final MapTransformer transformer;
+  const _EventMarker({required this.event, required this.transformer});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -229,22 +141,39 @@ class _EventMarker extends ConsumerWidget {
     final selectedId = ref.watch(_selectedMapEventProvider);
     final isSelected = selectedId == event.eventId;
 
-    //---------- 히트 테스트(터치 인식) 영역 문제 해결 ----------
-    // 히트 테스트 영역을 확보하면서 마커 위치가 튀지 않도록 전체 크기를 항상 일정하게(220x320) 고정합니다.
-    // (Align 위젯은 자식의 가로/세로 크기가 변하면 중심 좌표를 다시 계산하기 때문에 위치가 튀는 버그가 발생함)
-    return Align(
-      alignment: _getAlignmentForPlace(event.placeId),
+    //---------- 실제 DB 좌표 기반 맵 픽셀 매핑 ----------
+    double px = 0;
+    double py = 0;
+
+    if (event.x != null && event.y != null) {
+      final transformed = transformer.transform(event.x!, event.y!, event.yaw ?? 0);
+      px = transformed['px']!;
+      py = transformed['py']!;
+    } else {
+      // Fallback: 좌표가 없는 예전 데이터들의 경우 해시를 이용한 임의 배치
+      final hash = event.placeId.hashCode;
+      px = (hash % 1000) + 100.0;
+      py = ((hash ~/ 1000) % 1000) + 100.0;
+    }
+
+    // 마커 박스의 전체 가로세로 크기 고정
+    const markerWidth = 220.0;
+    const markerHeight = 320.0;
+
+    return Positioned(
+      left: px - (markerWidth / 2),
+      top: py - (markerHeight / 2),
       child: SizedBox(
-        width: 220, 
-        height: 320,
+        width: markerWidth, 
+        height: markerHeight,
         child: Stack(
           clipBehavior: Clip.none,
-          alignment: Alignment.center, // 마커를 박스 정중앙(중심점)에 배치
+          alignment: Alignment.center, // 마커(점)를 정중앙 배치
           children: [
             // 말풍선 (선택 시 마커 상단에 표시)
             if (isSelected)
               Positioned(
-                bottom: 160 + 15, // 박스 중앙(160) + 마커 높이 절반 이상 여유
+                bottom: (markerHeight / 2) + 15,
                 child: GestureDetector(
                   onTap: () => showEventDetailDialog(context, ref, event),
                   child: Container(
@@ -304,7 +233,7 @@ class _EventMarker extends ConsumerWidget {
                           ),
                         ),
                         const SizedBox(height: 6),
-                        // 모드 변경 (Control Provider 연동 직접 팝업)
+                        // 모드 변경
                         SizedBox(
                           width: double.infinity,
                           child: OutlinedButton(
@@ -313,7 +242,6 @@ class _EventMarker extends ConsumerWidget {
                               side: const BorderSide(color: Color(0xFF393C4B)),
                             ),
                             onPressed: () async {
-                              // 모드 강제 전환 로직 (모드 팝업 메뉴)
                               showMenu(
                                 context: context,
                                 position: const RelativeRect.fromLTRB(100, 100, 0, 0),
@@ -344,14 +272,14 @@ class _EventMarker extends ConsumerWidget {
                 ),
               ),
             
-            // 실제 표시되는 마커 본체 (중앙 유지)
+            // 마커 본체
             GestureDetector(
               onTap: () {
                 final notifier = ref.read(_selectedMapEventProvider.notifier);
                 notifier.state = (notifier.state == event.eventId) ? null : event.eventId;
               },
               child: isAnomaly
-                  ? const _PulsingDot(color: Color(0xFFFF4B5C), size: 24) // 비정상일 경우 펄스 마커
+                  ? const _PulsingDot(color: Color(0xFFFF4B5C), size: 24)
                   : Container(
                       width: 16,
                       height: 16,
@@ -360,11 +288,7 @@ class _EventMarker extends ConsumerWidget {
                         shape: BoxShape.circle,
                         border: Border.all(color: Colors.white, width: 2),
                         boxShadow: const [
-                          BoxShadow(
-                            color: Color(0x6638BDF8),
-                            blurRadius: 10,
-                            spreadRadius: 2,
-                          )
+                          BoxShadow(color: Color(0x6638BDF8), blurRadius: 10, spreadRadius: 2)
                         ],
                       ),
                     ),
@@ -374,28 +298,6 @@ class _EventMarker extends ConsumerWidget {
       ),
     );
   }
-}
-
-class _MapGridPainter extends CustomPainter {
-  @override
-  void paint(Canvas canvas, Size size) {
-    final paint = Paint()
-      ..color = const Color(0xFF26293A)
-      ..strokeWidth = 1.0
-      ..style = PaintingStyle.stroke;
-
-    const double step = 40;
-
-    for (double x = 0; x <= size.width; x += step) {
-      canvas.drawLine(Offset(x, 0), Offset(x, size.height), paint);
-    }
-    for (double y = 0; y <= size.height; y += step) {
-      canvas.drawLine(Offset(0, y), Offset(size.width, y), paint);
-    }
-  }
-
-  @override
-  bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
 
 // 비정상 마커용 펄스(Ripple) 애니메이션 마커

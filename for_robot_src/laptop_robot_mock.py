@@ -4,22 +4,34 @@ import time
 import uvicorn
 import requests
 import json
+import random
 from datetime import datetime
+from typing import Optional
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+
 from webrtc_sender import WebRTCSender
 
 # ==============================================================
-# 🚀 1. 핵심 통신 설정 (반드시 데스크탑 PC의 IP 주소로 수정하세요!)
+# 설정
 # ==============================================================
-DESKTOP_IP = "192.168.0.24" # <-- 여기에 데스크탑(관제서버)의 내부 IP를 넣으세요!
+DESKTOP_IP = "192.168.0.24"
 
 VISION_SERVER_URL = f"http://{DESKTOP_IP}:8000"
 SIGNALING_SERVER_URL = f"http://{DESKTOP_IP}:8001"
 
+POSE_UPDATE_PERIOD = 1.0
+GOAL_UPDATE_PERIOD = 15.0
+POSE_POST_PERIOD = 0.5
+GOAL_POST_PERIOD = 0.5
+COMMAND_POLL_PERIOD = 0.3
+
+PLACE_IDS = ["00", "01", "02", "03", "04"]
+
 # ==============================================================
-# 🎥 2. 웹캠 캡처용 프레임 버퍼 생성 (카메라에서 사진을 퍼나르는 역할)
+# FrameBuffer
 # ==============================================================
 class FrameBuffer:
     def __init__(self):
@@ -28,7 +40,7 @@ class FrameBuffer:
 
     def update(self, frame):
         with self.condition:
-            # OpenCV 기본 BGR 포맷을 WebRTC 호환을 위해 RGB로 변환
+            # OpenCV 캡처는 BGR, WebRTC용으로 RGB 저장
             self.frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             self.condition.notify_all()
 
@@ -37,30 +49,193 @@ class FrameBuffer:
             self.condition.wait(timeout)
             return self.frame
 
+
 frame_buffer = FrameBuffer()
 
+# ==============================================================
+# 로봇 상태 (mock)
+# status는 command polling 결과로만 바뀌도록 유지
+# x, y, yaw는 1초마다 랜덤 변경
+# goal_x, goal_y, goal_yaw, next_place_id는 15초마다 랜덤 변경
+# ==============================================================
+robot_state = {
+    "x": 0.0,
+    "y": 0.0,
+    "yaw": 0.0,
+    "status": "idle",
+    "goal_x": 0.0,
+    "goal_y": 0.0,
+    "goal_yaw": 0.0,
+    "next_place_id": "00",
+}
+state_lock = threading.Lock()
+
+last_command = None
+
+# ==============================================================
+# 카메라
+# ==============================================================
 def camera_thread():
-    print("[MOCK] 로컬 웹캠을 시작합니다...")
-    cap = cv2.VideoCapture(0) # 0번 메인웹캠 연결. 외부 캠이면 1을 시도해보세요.
+    print("[MOCK] local webcam start")
+    cap = cv2.VideoCapture(0)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
     cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     if not cap.isOpened():
-        print("[오류] 웹캠을 열 수 없습니다!")
+        print("❌ camera open failed")
         return
 
     while True:
         ret, frame = cap.read()
-        if not ret:
-            time.sleep(0.1)
-            continue
-        
-        # 웹캠 프레임을 버퍼에 밀어넣음 -> webrtc_sender가 낚아채서 데스크탑으로 전송
-        frame_buffer.update(frame)
-        time.sleep(1/30) # 30 FPS 제한
+        if ret:
+            frame_buffer.update(frame)
+        time.sleep(1 / 30)
+
 
 # ==============================================================
-# 📡 3. FastAPI 로컬 수신 서버 (플러터 GUI의 버튼 명령을 받는 역할)
+# mock pose 랜덤 업데이트 (1초)
+# ==============================================================
+def random_pose_update():
+    while True:
+        with state_lock:
+            robot_state["x"] += random.uniform(-0.3, 0.3)
+            robot_state["y"] += random.uniform(-0.3, 0.3)
+            robot_state["yaw"] += random.uniform(-0.2, 0.2)
+
+            # yaw 범위 정리
+            if robot_state["yaw"] > 3.141592:
+                robot_state["yaw"] -= 2 * 3.141592
+            elif robot_state["yaw"] < -3.141592:
+                robot_state["yaw"] += 2 * 3.141592
+
+        time.sleep(POSE_UPDATE_PERIOD)
+
+
+# ==============================================================
+# mock goal 랜덤 업데이트 (15초)
+# ==============================================================
+def random_goal_update():
+    while True:
+        with state_lock:
+            robot_state["goal_x"] = random.uniform(-5.0, 5.0)
+            robot_state["goal_y"] = random.uniform(-5.0, 5.0)
+            robot_state["goal_yaw"] = random.uniform(-3.141592, 3.141592)
+            robot_state["next_place_id"] = random.choice(PLACE_IDS)
+
+            goal_snapshot = {
+                "goal_x": robot_state["goal_x"],
+                "goal_y": robot_state["goal_y"],
+                "goal_yaw": robot_state["goal_yaw"],
+                "next_place_id": robot_state["next_place_id"],
+            }
+
+        print(f"[MOCK GOAL UPDATE] {goal_snapshot}")
+        time.sleep(GOAL_UPDATE_PERIOD)
+
+
+# ==============================================================
+# Vision Server로 pose 전송
+# ==============================================================
+def post_robot_pose():
+    while True:
+        try:
+            with state_lock:
+                payload = {
+                    "x": robot_state["x"],
+                    "y": robot_state["y"],
+                    "yaw": robot_state["yaw"],
+                    "status": robot_state["status"],
+                    "timestamp": datetime.now().isoformat(),
+                }
+
+            requests.post(
+                f"{VISION_SERVER_URL}/robot/pose",
+                json=payload,
+                timeout=2,
+            )
+
+        except Exception as e:
+            print(f"[POSE ERROR] {e}")
+
+        time.sleep(POSE_POST_PERIOD)
+
+
+# ==============================================================
+# Vision Server로 goal 전송
+# ==============================================================
+def post_robot_goal():
+    last_sent = None
+
+    while True:
+        try:
+            with state_lock:
+                payload = {
+                    "x": robot_state["goal_x"],
+                    "y": robot_state["goal_y"],
+                    "yaw": robot_state["goal_yaw"],
+                    "next_place_id": robot_state["next_place_id"],
+                    "timestamp": datetime.now().isoformat(),
+                }
+
+            if payload != last_sent:
+                requests.post(
+                    f"{VISION_SERVER_URL}/robot/goal",
+                    json=payload,
+                    timeout=2,
+                )
+                last_sent = payload.copy()
+
+        except Exception as e:
+            print(f"[GOAL ERROR] {e}")
+
+        time.sleep(GOAL_POST_PERIOD)
+
+
+# ==============================================================
+# 서버 -> 로봇 command polling
+# status만 여기서 반영
+# ==============================================================
+def poll_robot_command():
+    global last_command
+
+    while True:
+        try:
+            resp = requests.get(f"{VISION_SERVER_URL}/robot/command", timeout=2)
+            data = resp.json()
+            cmd = data.get("command")
+
+            if not cmd or cmd == last_command:
+                time.sleep(COMMAND_POLL_PERIOD)
+                continue
+
+            print(f"[COMMAND RECEIVED] {cmd}")
+            last_command = cmd
+
+            with state_lock:
+                if cmd == "start":
+                    robot_state["status"] = "patrol"
+                elif cmd == "pause":
+                    robot_state["status"] = "pause"
+                elif cmd == "resume":
+                    robot_state["status"] = "patrol"
+                elif cmd == "stop":
+                    robot_state["status"] = "idle"
+                elif cmd == "idle":
+                    robot_state["status"] = "idle"
+                elif cmd == "teach":
+                    robot_state["status"] = "teach"
+                else:
+                    # 알 수 없는 command는 로그만 남기고 상태 유지
+                    print(f"[COMMAND WARNING] unknown command: {cmd}")
+
+        except Exception as e:
+            print(f"[COMMAND POLL ERROR] {e}")
+
+        time.sleep(COMMAND_POLL_PERIOD)
+
+
+# ==============================================================
+# FastAPI
 # ==============================================================
 app = FastAPI()
 
@@ -74,20 +249,27 @@ app.add_middleware(
 
 webrtc_sender = None
 
-class QueryModel(BaseModel):
-    label: str
-
+# ==============================================================
+# Startup / Shutdown
+# ==============================================================
 @app.on_event("startup")
 def startup_event():
     global webrtc_sender
-    # 카메라 쓰레드 가동
-    t = threading.Thread(target=camera_thread, daemon=True)
-    t.start()
 
-    # WebRTC 영상 송출 가동 (목적지: 데스크탑 Signaling 서버)
-    print(f"[MOCK] 🌐 WebRTC 스트리밍 시작 (목적지: {SIGNALING_SERVER_URL})")
-    webrtc_sender = WebRTCSender(buffer=frame_buffer, signaling_base_url=SIGNALING_SERVER_URL)
+    threading.Thread(target=camera_thread, daemon=True).start()
+    threading.Thread(target=random_pose_update, daemon=True).start()
+    threading.Thread(target=random_goal_update, daemon=True).start()
+    threading.Thread(target=post_robot_pose, daemon=True).start()
+    threading.Thread(target=post_robot_goal, daemon=True).start()
+    threading.Thread(target=poll_robot_command, daemon=True).start()
+
+    print(f"[MOCK] WebRTC -> {SIGNALING_SERVER_URL}")
+    webrtc_sender = WebRTCSender(
+        buffer=frame_buffer,
+        signaling_base_url=SIGNALING_SERVER_URL,
+    )
     webrtc_sender.start()
+
 
 @app.on_event("shutdown")
 def shutdown_event():
@@ -95,68 +277,131 @@ def shutdown_event():
     if webrtc_sender:
         webrtc_sender.stop()
 
+
+# ==============================================================
+# Capture / Query label
+# ==============================================================
 current_label = "normal"
 current_place_id = "00"
 
+
+class QueryModel(BaseModel):
+    label: str
+
+
 @app.post("/patrol/capture")
 async def patrol_capture():
-    print("📸 [MOCK] 플러터에서 캡처 명령(c) 수신!")
-    img_bgr = frame_buffer.wait_new(1.0)
-    if img_bgr is None:
-        return {"status": "error", "message": "no camera frame"}
-    
-    # BGR -> RGB (frame_buffer.update가 RGB로 변환하므로 현재 img_bgr은 RGB임)
-    # 그러나 보통 cv2로 다시 저장할 때는 BGR이어야 하므로 색상 반전 처리
-    img_bgr = cv2.cvtColor(img_bgr, cv2.COLOR_RGB2BGR)
-    _, buffer = cv2.imencode(".jpg", img_bgr)
-    
-    meta_obj = {
+    print("📸 [MOCK] capture command received")
+
+    img_rgb = frame_buffer.wait_new(timeout=1.0)
+    if img_rgb is None:
+        return {"ok": False, "message": "no frame"}
+
+    # frame_buffer에는 RGB로 저장되어 있으므로 저장/인코딩용으로 BGR 재변환
+    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
+    ok, buffer = cv2.imencode(".jpg", img_bgr)
+    if not ok:
+        return {"ok": False, "message": "jpeg encode failed"}
+
+    meta = {
         "place_id": current_place_id,
         "timestamp": datetime.now().isoformat(),
         "n_frames": 1,
         "mode": "query",
-        "label": current_label  # 'normal' 또는 'abnormal'
+        "label": current_label,
     }
 
     try:
         resp = requests.post(
             f"{VISION_SERVER_URL}/place_imgs",
-            data={"meta": json.dumps(meta_obj)},
+            data={"meta": json.dumps(meta)},
             files=[("images", ("capture.jpg", buffer.tobytes(), "image/jpeg"))],
-            timeout=5.0
+            timeout=5.0,
         )
-        print(f"✅ 비전 서버 전송 완료: {resp.status_code}")
+        print(f"[CAPTURE -> VISION] status={resp.status_code}")
     except Exception as e:
-        print(f"❌ 비전 서버 전송 실패: {e}")
+        print(f"[CAPTURE ERROR] {e}")
+        return {"ok": False, "message": str(e)}
 
-    import base64
-    b64_img = base64.b64encode(buffer.tobytes()).decode('utf-8')
+    return {"ok": True}
 
-    return {"status": "Mock capture triggered", "image_b64": b64_img}
 
 @app.post("/patrol/place_and_capture")
 async def patrol_place_and_capture():
-    print("📍📸 [MOCK] 플러터에서 이동+캡처 명령(v) 수신!")
-    result = await patrol_capture()
-    return result
+    print("📍📸 [MOCK] place_and_capture command received")
+    return await patrol_capture()
+
 
 @app.post("/patrol/query_gt")
 async def patrol_query_gt(req: QueryModel):
     global current_label
     current_label = req.label
-    print(f"📝 [MOCK] 플러터에서 라벨 토글 (z) 수신: {req.label}")
-    return {"status": "Mock label toggled", "label": req.label}
+    print(f"[MOCK] current query label -> {current_label}")
+    return {"ok": True, "label": current_label}
+
 
 # ==============================================================
-# 실행 메인
+# Mock 상태 수동 수정 API
+# 랜덤 동작 중에도 테스트용으로 강제로 덮어쓸 수 있음
+# ==============================================================
+class MockPose(BaseModel):
+    x: float
+    y: float
+    yaw: float
+    status: Optional[str] = None
+
+
+@app.post("/mock/pose")
+async def set_pose(req: MockPose):
+    with state_lock:
+        robot_state["x"] = req.x
+        robot_state["y"] = req.y
+        robot_state["yaw"] = req.yaw
+        if req.status is not None:
+            robot_state["status"] = req.status
+
+        snapshot = dict(robot_state)
+
+    return {"ok": True, "state": snapshot}
+
+
+class MockGoal(BaseModel):
+    x: float
+    y: float
+    yaw: float
+    next_place_id: Optional[str] = "00"
+
+
+@app.post("/mock/goal")
+async def set_goal(req: MockGoal):
+    with state_lock:
+        robot_state["goal_x"] = req.x
+        robot_state["goal_y"] = req.y
+        robot_state["goal_yaw"] = req.yaw
+        robot_state["next_place_id"] = req.next_place_id or "00"
+
+        snapshot = dict(robot_state)
+
+    return {"ok": True, "state": snapshot}
+
+
+@app.get("/mock/state")
+async def get_mock_state():
+    with state_lock:
+        snapshot = dict(robot_state)
+    return {"ok": True, "state": snapshot}
+
+
+# ==============================================================
+# Main
 # ==============================================================
 if __name__ == "__main__":
-    print(f"============================================================")
-    print(f"🤖 패트롤 로봇 테스트 환경이 준비되었습니다! (웹캠 연동)")
-    print(f"1) 데스크탑에서 AI서버(8000) & 시그널링서버(8001)를 켭니다.")
-    print(f"2) Flutter 프론트를 켜고 `SENTRYNEX Control > 제어` 로 이동합니다.")
-    print(f"3) 연결이 안 될 경우 데스크탑의 내부망 IP({DESKTOP_IP})를 꼭 확인하세요.")
-    print(f"============================================================")
-    
-    # 8090 포트로 켜면 Flutter GUI가 버튼 클릭 시 이곳으로 명령(c, v, z)을 보냄
+    print("============================================================")
+    print("🤖 laptop_robot_mock start")
+    print(f"VISION_SERVER_URL    = {VISION_SERVER_URL}")
+    print(f"SIGNALING_SERVER_URL = {SIGNALING_SERVER_URL}")
+    print("pose(x,y,yaw): 1초마다 랜덤 변경")
+    print("goal: 15초마다 랜덤 변경")
+    print("status: /robot/command polling 결과만 반영")
+    print("============================================================")
     uvicorn.run(app, host="0.0.0.0", port=8090)
