@@ -66,3 +66,4 @@ build/
 .flutter-plugins-dependencies
 *.log
 chrome-device/
+SuperGluePretrainedNetwork/

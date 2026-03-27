@@ -67,8 +67,16 @@ def make_embed(model, device, x,
     if repr_mode == "patch":
         return {"patch": p}
 
-    if repr_mode in {"global_patch", "patch_global", "global_patch_pool"}:
+    if repr_mode in {
+        "global_patch",
+        "patch_global",
+        "global_patch_pool",
+        "global_patch_with_aligned",
+    }:
         return {"global": gvec, "patch": p}
 
-    raise ValueError(f"unknown repr_mode={repr_mode} (use global|patch|global_patch)")
+    raise ValueError(
+        f"unknown repr_mode={repr_mode} "
+        f"(use global|patch|global_patch|global_patch_pool|global_patch_with_aligned)"
+    )
 

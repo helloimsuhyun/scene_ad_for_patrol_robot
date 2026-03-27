@@ -15,6 +15,23 @@ DEFAULT_CFG = {
         "top_p": 0.1,
         "preselect_m": 10
     },
+    "superglue": {  
+        "resize_long_side": 640,
+        "weights": "indoor",
+        "max_keypoints": 1024,
+        "keypoint_threshold": 0.003,
+        "match_threshold": 0.2,
+        "sinkhorn_iterations": 20,
+
+        "min_matches": 10,
+        "min_inliers": 15,
+        "min_inlier_ratio": 0.2,
+        "max_reproj_error": 5.0,
+
+        "valid_patch_thr": 0.6,
+        "mask_erode_kernel": 3,
+        "mask_erode_iter": 1
+    },
     "calib": {
         "k": 3, 
         "method": "robust", 

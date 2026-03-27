@@ -21,6 +21,7 @@ from . import place_manager
 from . import dino_emb
 from .distance import infer_event, calibrate_place
 from .config import load_cfg
+from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
 from . import vis
 
 
@@ -445,7 +446,7 @@ def safe_ts_to_iso(safe_ts: str) -> str:
     return f"{date_part}T{time_part}"
 
 
-def main():
+def main(target_places: Optional[List[str]] = None):
     if not RECV_ROOT.exists():
         raise FileNotFoundError(f"RECV_ROOT not found: {RECV_ROOT.resolve()}")
 
@@ -478,14 +479,38 @@ def main():
     # -------------------------
     # model load
     # -------------------------
+
     model, device = dino_emb.load_model()
-    engine = {"model": model, "device": device, "bank_root": RECV_ROOT}
+
+    sg_raw = cfg["superglue"]
+    sg_cfg = SuperGlueMatchConfig(
+        resize_long_side=sg_raw["resize_long_side"],
+        weights=sg_raw["weights"],
+        max_keypoints=sg_raw["max_keypoints"],
+        keypoint_threshold=sg_raw["keypoint_threshold"],
+        match_threshold=sg_raw["match_threshold"],
+        sinkhorn_iterations=sg_raw["sinkhorn_iterations"],
+    )
+    sg_matcher = SuperGlueMatcher(sg_cfg, device=device)
+
+    engine = {
+        "model": model,
+        "device": device,
+        "bank_root": RECV_ROOT,
+        "sg_matcher": sg_matcher,
+    }
 
     place_dirs = sorted([p for p in RECV_ROOT.iterdir() if p.is_dir()])
     place_dirs = [
         p for p in place_dirs
         if (p / "bank").exists() or (p / "query").exists() or (p / "th_calib").exists()
     ]
+
+    if target_places is not None and len(target_places) > 0:
+        target_set = set(target_places)
+        place_dirs = [p for p in place_dirs if p.name in target_set]
+
+    print(f"[INFO] filtered places: {target_places}")
     print(f"[INFO] places: {[p.name for p in place_dirs]}")
 
     try:
@@ -506,7 +531,11 @@ def main():
 
             # 1) threshold 계산
             thr, calib_scores, _ = calibrate_place(
-                str(RECV_ROOT), plc, model, device
+                str(RECV_ROOT),
+                plc,
+                model,
+                device,
+                sg_matcher=engine.get("sg_matcher"),
             )
             print("[CALIB] thr =", thr, " (#scores=", len(calib_scores), ")")
 
@@ -571,6 +600,7 @@ def main():
                     engine["bank_root"],
                     engine["model"],
                     engine["device"],
+                    sg_matcher=engine.get("sg_matcher"),
                 )
 
                 pred_flag = int(out["anomaly_flag"])
@@ -745,5 +775,11 @@ def main():
     print("\nDONE.")
 
 
+import argparse
+
 if __name__ == "__main__":
-    main()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--places", nargs="*", default=None, help="target place ids (e.g., 00 01)")
+    args = parser.parse_args()
+
+    main(target_places=args.places)

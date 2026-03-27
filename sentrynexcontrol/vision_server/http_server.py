@@ -92,6 +92,8 @@ from . import sqlite_db
 from . import dino_emb
 from . import place_manager
 from .distance import infer_event, calibrate_place
+from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
+from .config import load_cfg
 
 # path 
 SAVE_ROOT = Path("./recv")  # 이미지저장 root
@@ -161,10 +163,26 @@ async def lifespan(app: FastAPI):
 
     #model load
     model, device = dino_emb.load_model()
+
+    cfg = load_cfg(SAVE_ROOT)
+    sg_raw = cfg["superglue"]
+
+    sg_cfg = SuperGlueMatchConfig(
+        resize_long_side=sg_raw["resize_long_side"],
+        weights=sg_raw["weights"],
+        max_keypoints=sg_raw["max_keypoints"],
+        keypoint_threshold=sg_raw["keypoint_threshold"],
+        match_threshold=sg_raw["match_threshold"],
+        sinkhorn_iterations=sg_raw["sinkhorn_iterations"],
+    )
+
+    sg_matcher = SuperGlueMatcher(sg_cfg, device=device)
+
     app.state.engine = {
         "model": model,
         "device": device,
-        "bank_root":SAVE_ROOT,
+        "bank_root": SAVE_ROOT,
+        "sg_matcher": sg_matcher,   
     }
 
     print(" ------------Server startup complete")
@@ -201,6 +219,7 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         engine["bank_root"],
         engine["model"],
         engine["device"],
+        sg_matcher = engine.get("sg_matcher"),
     )
 
 #임계치 업데이트 함수 호출----------------------------------
@@ -210,6 +229,7 @@ def run_threshold_calibration(place_id, engine):
         place_id,
         engine["model"],
         engine["device"],
+        sg_matcher = engine.get("sg_matcher"),
     )
     return thr
 
