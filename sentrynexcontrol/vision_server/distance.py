@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 import os
 
 from .banker import load_bank_by_place, BGR_to_RGB, rebuild_bank
-from .dino_emb import make_embed, make_transform, extract_patch_two_layers
+from .dino_emb import make_embed, make_transform, extract_patch_layers
 from .config import load_cfg
 
 import cv2
@@ -29,8 +29,7 @@ from .warp_utils import (
 )
 
 LOCAL_PATCH_RADIUS = 1
-USE_LOCAL_PATCH_SEARCH = True
-
+ALPHA = 0.6
 
 # vis helper
 def get_top_p_patch_info(repr_mode: str, debug: dict):
@@ -235,7 +234,7 @@ def _dist_patchcore_masked_local(
     q_patch: torch.Tensor,      # (P,D)
     ref_patch: torch.Tensor,    # (N,P,D)
     valid_mask_1d,              # (P,) bool
-    top_p: float = 0.1,         # debug용으로만 유지
+    top_p: float = 0.1,         
     k: int = 1,                 # 유지
     radius: int = 0,
 ):
@@ -293,10 +292,9 @@ def _dist_patchcore_masked_local(
     valid_orig_idx_t = torch.tensor(valid_orig_idx, device=q.device, dtype=torch.long)
 
     # --------------------------------------------------
-    # 2) ref별 peak + connected component score 계산
+    # 2) ref별 top-p + peak-relative threshold score 계산
     # --------------------------------------------------
-    alpha = 0.75
-    min_area = 5
+    alpha = ALPHA
 
     score_per_img = []
     per_img_peak = []
@@ -313,61 +311,52 @@ def _dist_patchcore_masked_local(
         full_patch_dist[valid_orig_idx_t] = patch_dist_valid
         patch_dist_2d = full_patch_dist.view(Hp, Wp)
 
-        # invalid는 component 후보에서 제외
+        # invalid 제외
         candidate_map = patch_dist_2d.clone()
         candidate_map[~valid2] = 0.0
 
         peak_val = float(candidate_map.max().item())
-        if peak_val <= 0.0:
+
+        # debug용 full map 저장
+        per_img_best_patch_dist_full.append(full_patch_dist)
+
+        # top-p
+        k_top = max(1, int(np.ceil(Pv * top_p)))
+        top_vals, top_local_idx = torch.topk(
+            patch_dist_valid,
+            k=min(k_top, patch_dist_valid.numel())
+        )
+        top_idx = valid_orig_idx_t[top_local_idx]
+
+        if top_vals.numel() == 0:
             score_one = 0.0
-            comp_area = 0
-            comp_mask = torch.zeros((Hp, Wp), dtype=torch.bool, device=q.device)
+            kept_vals = top_vals
+            kept_idx = top_idx
+            selected_area = 0
+            peak_val = 0.0
         else:
-            peak_flat_idx = int(torch.argmax(candidate_map).item())
-            peak_y = peak_flat_idx // Wp
-            peak_x = peak_flat_idx % Wp
+            peak_val = float(top_vals.max().item())
 
             # peak-relative threshold
-            comp_seed_mask = (candidate_map >= (alpha * peak_val)) & valid2
+            keep = top_vals >= (alpha * peak_val)
 
-            # peak가 속한 connected component만 선택
-            comp_seed_mask_np = comp_seed_mask.detach().cpu().numpy()
-            labeled, num_labels = ndimage.label(comp_seed_mask_np)
+            kept_vals = top_vals[keep]
+            kept_idx = top_idx[keep]
 
-            peak_label = labeled[peak_y, peak_x]
-            if peak_label == 0:
-                comp_mask_np = np.zeros_like(comp_seed_mask_np, dtype=bool)
-            else:
-                comp_mask_np = (labeled == peak_label)
+            if kept_vals.numel() == 0:
+                kept_vals = top_vals[:1]
+                kept_idx = top_idx[:1]
 
-            comp_area = int(comp_mask_np.sum())
-
-            # 작은 blob 제거: peak 하나짜리 noise 억제
-            if comp_area < min_area:
-                comp_mask_np = np.zeros_like(comp_mask_np, dtype=bool)
-                comp_mask_np[peak_y, peak_x] = True
-                comp_area = 1
-
-            comp_mask = torch.from_numpy(comp_mask_np).to(q.device)
-
-            comp_vals = candidate_map[comp_mask]
-            comp_mean = float(comp_vals.mean().item()) if comp_vals.numel() > 0 else 0.0
-
-            # peak를 더 많이 반영
-            score_one = 0.7 * peak_val + 0.3 * comp_mean
+            score_one = float(kept_vals.mean().item())
+            selected_area = int(kept_vals.numel())
 
         score_per_img.append(score_one)
         per_img_peak.append(peak_val)
-        per_img_area.append(comp_area)
-        per_img_best_patch_dist_full.append(full_patch_dist)
+        per_img_area.append(selected_area)
 
-        # debug용 top patch 저장
-        k_top = max(1, int(np.ceil(Pv * top_p)))
-        top_vals, top_local_idx = torch.topk(patch_dist_valid, k=min(k_top, patch_dist_valid.numel()))
-        top_idx = valid_orig_idx_t[top_local_idx]
-
-        per_img_top_patch_idx.append(top_idx)
-        per_img_top_patch_vals.append(top_vals)
+        # debug용 저장: threshold 후 남은 patch만 넣기
+        per_img_top_patch_idx.append(kept_idx)
+        per_img_top_patch_vals.append(kept_vals)
 
     score_per_img = torch.tensor(score_per_img, device=q.device, dtype=torch.float32)
 
@@ -391,7 +380,6 @@ def _dist_patchcore_masked_local(
         "local_radius": radius,
         "top_p": top_p,
         "alpha": alpha,
-        "min_area": min_area,
         "selected_patch_count": int(len(top_patch_vals)),
         "score_mean": float(top_patch_vals.mean().item()) if top_patch_vals.numel() > 0 else 0.0,
         "score_peak": float(top_patch_vals.max().item()) if top_patch_vals.numel() > 0 else 0.0,
@@ -796,7 +784,7 @@ def compute_knn_dist(
             # 5) crop된 query / ref를 patch 임베딩
             x_q_crop = tfm(BGR_to_RGB(warped_q_crop))
 
-            qp_crop = extract_patch_two_layers(model,device,x_q_crop)
+            qp_crop = extract_patch_layers(model,device,x_q_crop)
 
             """
             q_crop_out = make_embed(
@@ -816,7 +804,7 @@ def compute_knn_dist(
                 cv2.imwrite(f"{dbg_dir}/06_dino_input.jpg", dbg)
 
             x_ref_crop = tfm(BGR_to_RGB(ref_crop))
-            refp_crop = extract_patch_two_layers(model,device,x_ref_crop)
+            refp_crop = extract_patch_layers(model,device,x_ref_crop)
 
             """
             ref_crop_out = make_embed(
@@ -1226,10 +1214,10 @@ def compute_and_save_threshold(
                     refp_crop = ref_crop_out["patch"].unsqueeze(0)
                     """
                     x_q_crop = tfm(BGR_to_RGB(warped_q_crop))
-                    qp_crop = extract_patch_two_layers(model, device, x_q_crop)   # (P2, D)
+                    qp_crop = extract_patch_layers(model, device, x_q_crop)   # (P2, D)
 
                     x_ref_crop = tfm(BGR_to_RGB(ref_crop))
-                    refp_crop = extract_patch_two_layers(model, device, x_ref_crop).unsqueeze(0)  # (1, P2, D)
+                    refp_crop = extract_patch_layers(model, device, x_ref_crop).unsqueeze(0)  # (1, P2, D)
 
                     P2 = qp_crop.shape[0]
                     grid_h2, grid_w2 = _infer_patch_grid(P2)

@@ -39,22 +39,20 @@ def extract_feats(model, device, x):
     patch = feats["x_norm_patchtokens"]     # [1,P,D]
     return cls, patch
 
+#레이어를 선택하여 patch feature를 추출
 @torch.no_grad()
-def extract_patch_two_layers(model, device, x, layer_a=8, layer_b=11):
+def extract_patch_layers(model, device, x, layer_a=9, layer_b=11):
     x = x.unsqueeze(0).to(device)
 
     outs = model.get_intermediate_layers(
         x,
-        n=[layer_a, layer_b],
+        n=[layer_a],
         reshape=False,
         return_class_token=False,
         norm=True,
     )
 
-    pa = outs[0][:, 1:, :]   # [1,P,D]
-    pb = outs[1][:, 1:, :]   # [1,P,D]
-
-    p = torch.cat([pa, pb], dim=-1)   # [1,P,2D]
+    p = outs[0]
     p = F.normalize(p, dim=-1)
     return p
 
