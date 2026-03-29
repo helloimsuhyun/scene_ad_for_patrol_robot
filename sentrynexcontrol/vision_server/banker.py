@@ -69,8 +69,6 @@ def load_bank_by_place(save_root, plc_idx, mode="bank"):
 #해당 장소의 npz 초기화
 def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
     
-
-
     #임베딩 추출 cfg ----
     cfg = cfg or {}
 
@@ -78,7 +76,7 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
     global_mode = str(cfg.get("embed", {}).get("global_mode", "patch_mean"))
     img_size    = int(cfg.get("embed", {}).get("img_size", 560))
 
-    if repr_mode not in {"global", "patch", "global_patch", "global_patch_pool", "global_patch_with_aligned"}:
+    if repr_mode not in {"global", "patch", "global_patch", "global_patch_pool", "global_patch_with_aligned", "global_patch_with_aligned_loss_bank"}:
         raise ValueError(f"repr_mode must be global|patch|global_patch|global_patch_pool|global_patch_with_aligned, got {repr_mode}")
     effective_mode = "global_patch" if repr_mode == "patch" else repr_mode
 

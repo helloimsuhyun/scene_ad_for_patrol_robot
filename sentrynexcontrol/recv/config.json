@@ -1,11 +1,11 @@
-    {
+{
   "embed": {
     "model_name": "dinov2_vits14",
     "img_size": 560,
     "global_mode": "patch_mean"
   },
   "repr": {
-    "repr_mode": "global_patch"
+    "repr_mode": "global_patch_with_aligned"
   },
   "patchcore": {
     "top_p": 0.05,
@@ -17,18 +17,17 @@
     "k": 3,
     "method": "robust",
     "gaussian_k": 2.5,
-    "robust_k": 2.5,
+    "robust_k": 2.0,
     "percentile": 97
   },
   "infer": {
     "event_rule": "median",
     "use_two_stage_vlm": false
   },
-
   "superglue": {
     "resize_long_side": 640,
     "weights": "indoor",
-    "max_keypoints": 512,
+    "max_keypoints": 1024,
     "keypoint_threshold": 0.003,
     "match_threshold": 0.2,
     "sinkhorn_iterations": 20,

@@ -3,7 +3,7 @@
 import cv2
 import numpy as np
 
-# warp 함수
+# query -> bank
 def warp_query_to_bank(query_bgr, H, bank_hw):
     h, w = bank_hw
 
@@ -20,6 +20,22 @@ def warp_query_to_bank(query_bgr, H, bank_hw):
     warped_mask = cv2.erode(warped_mask, kernel, iterations=1)
 
     return warped, warped_mask
+
+# bank -> query
+def warp_bank_to_query(bank_bgr, H_inv, query_hw):
+    h, w = query_hw
+
+    mask = np.ones(bank_bgr.shape[:2], dtype=np.uint8) * 255
+
+    warped = cv2.warpPerspective(bank_bgr, H_inv, (w, h))
+    warped_mask = cv2.warpPerspective(mask, H_inv, (w, h))
+
+    warped_mask = np.where(warped_mask > 127, 255, 0).astype(np.uint8)
+    kernel = np.ones((3, 3), np.uint8)
+    warped_mask = cv2.erode(warped_mask, kernel, iterations=1)
+
+    return warped, warped_mask
+
 
 # warped_mask와 dino patch gird 사이즈를 받아서 각 patch의 사용여부를 thr기준으로 계산
 def make_patch_valid_mask(mask_hw, grid_h, grid_w, thr=0.8):

@@ -41,7 +41,7 @@ def extract_feats(model, device, x):
 
 #레이어를 선택하여 patch feature를 추출
 @torch.no_grad()
-def extract_patch_layers(model, device, x, layer_a=7, layer_b=11):
+def extract_patch_layers(model, device, x, layer_a=10, layer_b=11):
     x = x.unsqueeze(0).to(device)
 
     outs = model.get_intermediate_layers(
@@ -88,6 +88,7 @@ def make_embed(model, device, x,
         "patch_global",
         "global_patch_pool",
         "global_patch_with_aligned",
+        "global_patch_with_aligned_loss_bank",
     }:
         return {"global": gvec, "patch": p}
 

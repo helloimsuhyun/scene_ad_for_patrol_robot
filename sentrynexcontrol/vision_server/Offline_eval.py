@@ -20,6 +20,9 @@ from torchvision import transforms
 from . import sqlite_db
 from . import place_manager
 from . import dino_emb
+from . import cnn_emb
+
+
 from .distance import infer_event, calibrate_place
 from .config import load_cfg
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
@@ -93,6 +96,77 @@ def load_bgr_for_model_view(img_path: Path, img_size: int) -> np.ndarray:
     img_rgb = np.array(img_pil)
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
     return img_bgr
+
+
+def save_loss_map_vis(
+    query_path: Path,
+    loss_vis: Dict[str, Any],
+    out_path: Path,
+    img_size: int = 560,
+):
+    aggr_loss = loss_vis.get("aggr_loss_map", None)
+    aggr_valid = loss_vis.get("aggr_valid_map", None)
+
+    if aggr_loss is None:
+        return
+
+    # query image 로드
+    q_img = load_bgr_for_model_view(query_path, img_size=img_size)
+
+    # 크기 맞추기
+    if aggr_loss.shape[:2] != q_img.shape[:2]:
+        aggr_loss = cv2.resize(
+            aggr_loss,
+            (q_img.shape[1], q_img.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
+
+    if aggr_valid is not None and aggr_valid.shape[:2] != q_img.shape[:2]:
+        aggr_valid = cv2.resize(
+            aggr_valid,
+            (q_img.shape[1], q_img.shape[0]),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+    # uint8 보장
+    if aggr_loss.dtype != np.uint8:
+        aggr_loss = np.clip(aggr_loss, 0, 255).astype(np.uint8)
+
+    # loss map 단독 시각화
+    loss_color = cv2.applyColorMap(aggr_loss, cv2.COLORMAP_JET)
+
+    # valid mask 밖은 검정 처리
+    if aggr_valid is not None:
+        vm = (aggr_valid > 0)
+        loss_color = loss_color.copy()
+        loss_color[~vm] = 0
+
+    # 제목 바
+    bar_h = 36
+    H, W = q_img.shape[:2]
+
+    def add_title(img, title):
+        canvas = np.full((H + bar_h, W, 3), 255, dtype=np.uint8)
+        canvas[bar_h:] = img
+        cv2.putText(
+            canvas,
+            title,
+            (12, 24),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 0, 0),
+            2,
+            cv2.LINE_AA,
+        )
+        return canvas
+
+    panel_loss = add_title(loss_color, "loss map")
+    panel_query = add_title(q_img, "query")
+
+    vis = np.concatenate([panel_loss, panel_query], axis=1)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cv2.imwrite(str(out_path), vis)
 
 
 def parse_server_filename(
@@ -422,7 +496,12 @@ def main(target_places: Optional[List[str]] = None):
     sync_places_from_fs(db, RECV_ROOT)
     print(f"[DB] connected: {db_path.resolve()}")
 
-    model, device = dino_emb.load_model()
+    global_model, device = dino_emb.load_model()
+    local_model, device = cnn_emb.load_model(
+        model_name="resnet18",
+        out_layer="layer3",
+        device=device,
+    )
 
     sg_raw = cfg["superglue"]
     sg_cfg = SuperGlueMatchConfig(
@@ -436,7 +515,8 @@ def main(target_places: Optional[List[str]] = None):
     sg_matcher = SuperGlueMatcher(sg_cfg, device=device)
 
     engine = {
-        "model": model,
+        "global_model": global_model,
+        "local_model": local_model,
         "device": device,
         "bank_root": RECV_ROOT,
         "sg_matcher": sg_matcher,
@@ -472,8 +552,9 @@ def main(target_places: Optional[List[str]] = None):
             thr, calib_scores, _ = calibrate_place(
                 str(RECV_ROOT),
                 plc,
-                model,
-                device,
+                engine["global_model"],
+                engine["local_model"],
+                engine["device"],
                 sg_matcher=engine.get("sg_matcher"),
             )
             print("[CALIB] thr =", thr, " (#scores=", len(calib_scores), ")")
@@ -525,11 +606,12 @@ def main(target_places: Optional[List[str]] = None):
                 )
 
                 out = infer_event(
-                    imgs_bgr,
-                    plc,
-                    engine["bank_root"],
-                    engine["model"],
-                    engine["device"],
+                    imgs_bgr=imgs_bgr,
+                    bank_root=engine["bank_root"],
+                    plc_idx=plc,
+                    global_model=engine["global_model"],
+                    local_model=engine["local_model"],
+                    device=engine["device"],
                     sg_matcher=engine.get("sg_matcher"),
                 )
 
@@ -605,10 +687,9 @@ def main(target_places: Optional[List[str]] = None):
                         align_vis=align_vis,
                         out_prefix=out_align_prefix,
                         img_size=img_size_cfg,
-                        patch_size=14,
+                        patch_size=None,
                     )
 
-                    # 추가: 정합 성공 케이스도 patch match line 저장
                     best_ref_img_path = patch_vis.get("best_ref_img_path", None)
                     if best_ref_img_path:
                         out_match = pair_dir / (
@@ -644,6 +725,23 @@ def main(target_places: Optional[List[str]] = None):
                     f"[EVAL] ts={b.safe_ts} gt={gt} pred={pred_flag} "
                     f"score={event_score:.4f} thr={threshold_used:.4f} event_id={event_id}"
                 )
+
+                loss_vis = out.get("loss_vis")
+
+                if loss_vis:
+                    rep_idx_loss = int(loss_vis.get("frame_idx", rep_idx_patch))
+                    rep_idx_loss = max(0, min(rep_idx_loss, len(b.paths) - 1))
+                    rep_q_loss = b.paths[rep_idx_loss]
+
+                    out_loss = pair_dir / (
+                        f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_lossmap.png"
+                    )
+                    save_loss_map_vis(
+                        query_path=rep_q_loss,
+                        loss_vis=loss_vis,
+                        out_path=out_loss,
+                        img_size=img_size_cfg,
+                    )
 
                 per_place_results.append({
                     "event_id": event_id,
