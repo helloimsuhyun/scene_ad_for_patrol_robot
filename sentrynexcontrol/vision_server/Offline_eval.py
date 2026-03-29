@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import re
 import json
+import argparse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple, Any
@@ -22,23 +23,17 @@ from . import dino_emb
 from .distance import infer_event, calibrate_place
 from .config import load_cfg
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
-from . import vis
-
+from .vis import draw_top_p_heatmap, save_aligned_debug_vis, save_patch_match_vis
 
 # =========================
 # 설정
 # =========================
-
-from pathlib import Path
-
 THIS_DIR = Path(__file__).resolve().parent
 RECV_ROOT = THIS_DIR.parent / "recv"
-DB_PATH = RECV_ROOT / "events.db"          # 서버와 동일 DB
-OUT_ROOTNAME = "_offline_out"              # place_dir 하위 출력 폴더명
+DB_PATH = RECV_ROOT / "events.db"
+OUT_ROOTNAME = "_offline_out"
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-# True면 기존 DB(events.db)에 그대로 기록
-# False면 offline_eval 전용 DB를 별도로 쓰고 싶을 때 사용
 USE_SAME_DB = True
 OFFLINE_DB_PATH = RECV_ROOT / "offline_eval.db"
 
@@ -50,7 +45,7 @@ OFFLINE_DB_PATH = RECV_ROOT / "offline_eval.db"
 class Batch:
     place_id: str
     safe_ts: str
-    label: Optional[str]     # normal/abnormal or None
+    label: Optional[str]
     paths: List[Path]
 
 
@@ -77,9 +72,6 @@ def get_db_path() -> Path:
 
 
 def sync_places_from_fs(db, save_root: Path):
-    """
-    recv 아래 폴더를 순회하면서 place table에 없는 place를 보장.
-    """
     for p in save_root.iterdir():
         if not p.is_dir():
             continue
@@ -90,11 +82,6 @@ def sync_places_from_fs(db, save_root: Path):
 # model-view helper
 # =========================
 def load_pil_for_model_view(img_path: Path, img_size: int) -> Image.Image:
-    """
-    dino_emb.make_transform()와 같은 공간 기준:
-      Resize(img_size) -> CenterCrop(img_size)
-    단, Normalize/ToTensor는 하지 않고 PIL 이미지만 반환.
-    """
     img_pil = Image.open(img_path).convert("RGB")
     img_pil = transforms.Resize(img_size)(img_pil)
     img_pil = transforms.CenterCrop(img_size)(img_pil)
@@ -102,9 +89,6 @@ def load_pil_for_model_view(img_path: Path, img_size: int) -> Image.Image:
 
 
 def load_bgr_for_model_view(img_path: Path, img_size: int) -> np.ndarray:
-    """
-    model input과 동일한 공간 기준의 BGR 이미지 반환
-    """
     img_pil = load_pil_for_model_view(img_path, img_size=img_size)
     img_rgb = np.array(img_pil)
     img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
@@ -114,13 +98,8 @@ def load_bgr_for_model_view(img_path: Path, img_size: int) -> np.ndarray:
 def parse_server_filename(
     p: Path
 ) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[int]]:
-    """
-    서버 저장 파일명에서 meta 추출.
-    return (label, place_id, mode, safe_ts, idx)
-    """
     stem = p.stem
 
-    # label 있는 케이스: "{label}_{place_id}_{mode}_{safe_ts}_{i:03d}"
     m = re.match(
         r"^(?P<label>[^_]+)_(?P<place>[^_]+)_(?P<mode>bank|th_calib|query)_(?P<ts>.+)_(?P<idx>\d+)$",
         stem
@@ -134,7 +113,6 @@ def parse_server_filename(
             int(m.group("idx")),
         )
 
-    # label 없는 케이스: "{place_id}_{mode}_{safe_ts}_{i:03d}"
     m = re.match(
         r"^(?P<place>[^_]+)_(?P<mode>bank|th_calib|query)_(?P<ts>.+)_(?P<idx>\d+)$",
         stem
@@ -152,9 +130,6 @@ def parse_server_filename(
 
 
 def collect_batches_for_place(place_dir: Path, mode: str) -> List[Batch]:
-    """
-    place_dir/<mode> 에서 (safe_ts, label)로 묶어서 배치 생성.
-    """
     assert mode in {"query", "th_calib", "bank"}
 
     target_dir = place_dir / mode
@@ -193,7 +168,7 @@ def collect_batches_for_place(place_dir: Path, mode: str) -> List[Batch]:
 def load_imgs_bgr(paths: List[Path]) -> List[np.ndarray]:
     imgs: List[np.ndarray] = []
     for p in paths:
-        img = cv2.imread(str(p), cv2.IMREAD_COLOR)  # BGR
+        img = cv2.imread(str(p), cv2.IMREAD_COLOR)
         if img is None:
             raise RuntimeError(f"Failed to read image: {p}")
         imgs.append(img)
@@ -237,9 +212,6 @@ def save_pair_vis_k(
     vis_size: int = 384,
     model_view_img_size: int = 560,
 ):
-    """
-    ref/query 모두 model-view(Resize+CenterCrop) 기준으로 맞춰서 저장
-    """
     k = len(topk_paths)
 
     ref_imgs = [
@@ -281,9 +253,6 @@ def save_top_p_patch_vis(
     patch_vis: Dict[str, Any],
     out_path: Path,
 ):
-    """
-    patch heatmap은 반드시 model-view 공간 위에 overlay 해야 좌표가 맞음
-    """
     if not patch_vis:
         return
 
@@ -304,7 +273,7 @@ def save_top_p_patch_vis(
         float(np.max(top_patch_vals)),
     )
 
-    vis_img = vis.draw_top_p_heatmap(
+    vis_img = draw_top_p_heatmap(
         img_bgr=img,
         top_patch_idx=top_patch_idx,
         top_patch_vals=top_patch_vals,
@@ -322,15 +291,6 @@ def save_top_p_patch_vis(
 
 
 def _resolve_path(p: str, bank_root: Path) -> Path:
-    """
-    p가
-      - 절대경로면 그대로
-      - 상대경로면 다음 우선순위로 해석:
-        1) bank_root / p
-        2) CWD 기준 resolve
-        3) "recv/00/..." 처럼 bank_root 이름이 중복 prefix면 제거 후 bank_root에 붙임
-        4) fallback: bank_root / p
-    """
     p = str(p)
     pp = Path(p)
 
@@ -361,17 +321,6 @@ def extract_topk_from_out(
     rep_idx_fallback: int = 0,
     k: int = 3,
 ) -> Tuple[List[Path], List[float], int]:
-    """
-    infer_event 결과(ref_topk_json) 구조 지원:
-      ref_topk_json = {
-        "topk_paths": [[...], [...], ...],
-        "topk_sims":  [[...], [...], ...],
-        "rep": {"frame_idx": i, "ref_img_path": "..."} or None
-      }
-
-    return:
-      (rep_frame_topk_paths, rep_frame_topk_sims, rep_idx)
-    """
     rj: Any = out.get("ref_topk_json")
     if rj is None:
         return [], [], rep_idx_fallback
@@ -438,19 +387,10 @@ def plot_curve(
 
 
 def safe_ts_to_iso(safe_ts: str) -> str:
-    """
-    서버 파일명에 저장된 safe_ts(':' -> '-')를
-    DB 저장용 ISO 비슷한 형태로 복원.
-    예:
-      2026-03-05T19-39-36.572313
-    """
-    # 첫 2개의 '-'는 날짜 구분이므로 유지하고,
-    # T 뒤 시간부의 '-'만 ':'로 복원
     if "T" not in safe_ts:
         return safe_ts
 
     date_part, time_part = safe_ts.split("T", 1)
-    # microsecond가 포함된 경우도 처리
     time_part = time_part.replace("-", ":")
     return f"{date_part}T{time_part}"
 
@@ -476,18 +416,11 @@ def main(target_places: Optional[List[str]] = None):
     print("[CFG] infer :", {"event_rule": event_rule_cfg, "use_two_stage_vlm": use_vlm_cfg})
     print("[CFG] embed :", {"img_size": img_size_cfg})
 
-    # -------------------------
-    # DB init
-    # -------------------------
     db_path = get_db_path()
     db = sqlite_db.connect_db(db_path)
     sqlite_db.init_db(db)
     sync_places_from_fs(db, RECV_ROOT)
     print(f"[DB] connected: {db_path.resolve()}")
-
-    # -------------------------
-    # model load
-    # -------------------------
 
     model, device = dino_emb.load_model()
 
@@ -531,14 +464,11 @@ def main(target_places: Optional[List[str]] = None):
 
             sqlite_db.ensure_place(db, plc)
 
-            # offline eval 시점의 mode는 사실 중요하진 않지만,
-            # place table 상태를 맞추고 싶으면 query로 둬도 됨
             try:
                 place_manager.set_place_mode(db, plc, "query")
             except Exception:
                 pass
 
-            # 1) threshold 계산
             thr, calib_scores, _ = calibrate_place(
                 str(RECV_ROOT),
                 plc,
@@ -548,13 +478,11 @@ def main(target_places: Optional[List[str]] = None):
             )
             print("[CALIB] thr =", thr, " (#scores=", len(calib_scores), ")")
 
-            # calibration 성공했으니 need_calibration=False 반영
             try:
                 place_manager.set_need_calibration(db, plc, False)
             except Exception:
                 pass
 
-            # 2) th_calib curve
             calib_scores_arr = np.array(calib_scores, dtype=np.float32)
             plot_curve(
                 xs=np.arange(len(calib_scores_arr)),
@@ -565,7 +493,6 @@ def main(target_places: Optional[List[str]] = None):
             )
             print("[OK] saved:", out_dir / "calib_score_curve.png")
 
-            # 3) query batches
             query_batches = collect_batches_for_place(place_dir, mode="query")
             print(f"[INFO] query batches: {len(query_batches)}")
 
@@ -581,9 +508,6 @@ def main(target_places: Optional[List[str]] = None):
                 gt = normalize_label(b.label)
                 imgs_bgr = load_imgs_bgr(b.paths)
 
-                # -------------------------
-                # 서버와 동일하게 event / frames 먼저 기록
-                # -------------------------
                 captured_at = safe_ts_to_iso(b.safe_ts)
 
                 event_id = sqlite_db.insert_event(
@@ -600,9 +524,6 @@ def main(target_places: Optional[List[str]] = None):
                     capture_times=captured_at,
                 )
 
-                # -------------------------
-                # inference
-                # -------------------------
                 out = infer_event(
                     imgs_bgr,
                     plc,
@@ -616,9 +537,6 @@ def main(target_places: Optional[List[str]] = None):
                 event_score = float(out["event_score"])
                 threshold_used = float(out["threshold"])
 
-                # -------------------------
-                # 서버와 동일하게 frame/event 결과 update
-                # -------------------------
                 sqlite_db.update_frame_scores(
                     db,
                     event_id,
@@ -635,9 +553,6 @@ def main(target_places: Optional[List[str]] = None):
                     summary_text=out.get("summary"),
                 )
 
-                # -------------------------
-                # eval metric은 label 있는 batch만 사용
-                # -------------------------
                 if gt in {"normal", "abnormal"}:
                     true_flag = 0 if gt == "normal" else 1
                     y_true.append(true_flag)
@@ -649,12 +564,10 @@ def main(target_places: Optional[List[str]] = None):
                         f"(place={plc}, ts={b.safe_ts}, label={b.label})"
                     )
 
-                # patch_vis 기준 대표 프레임 우선 사용
                 patch_vis = out.get("patch_vis") or {}
                 rep_idx_patch = int(patch_vis.get("frame_idx", 0))
                 rep_idx_patch = max(0, min(rep_idx_patch, len(b.paths) - 1))
 
-                # topk도 같은 대표 프레임 기준으로 복원
                 topk_paths, topk_sims, rep_idx = extract_topk_from_out(
                     out,
                     engine["bank_root"],
@@ -677,7 +590,38 @@ def main(target_places: Optional[List[str]] = None):
                         model_view_img_size=img_size_cfg,
                     )
 
-                if patch_vis:
+                align_vis = out.get("align_vis")
+
+                if align_vis:
+                    rep_idx_align = int(align_vis.get("frame_idx", rep_idx_patch))
+                    rep_idx_align = max(0, min(rep_idx_align, len(b.paths) - 1))
+                    rep_q_align = b.paths[rep_idx_align]
+
+                    out_align_prefix = pair_dir / (
+                        f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_aligned"
+                    )
+                    save_aligned_debug_vis(
+                        query_path=rep_q_align,
+                        align_vis=align_vis,
+                        out_prefix=out_align_prefix,
+                        img_size=img_size_cfg,
+                        patch_size=14,
+                    )
+
+                    # 추가: 정합 성공 케이스도 patch match line 저장
+                    best_ref_img_path = patch_vis.get("best_ref_img_path", None)
+                    if best_ref_img_path:
+                        out_match = pair_dir / (
+                            f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_aligned_matchlines.png"
+                        )
+                        save_patch_match_vis(
+                            query_path=rep_q_align,
+                            ref_path=best_ref_img_path,
+                            patch_vis=patch_vis,
+                            out_path=out_match,
+                        )
+
+                elif patch_vis:
                     rep_q_patch = b.paths[rep_idx_patch]
                     out_patch = pair_dir / f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_heatmap.png"
                     save_top_p_patch_vis(
@@ -685,6 +629,16 @@ def main(target_places: Optional[List[str]] = None):
                         patch_vis=patch_vis,
                         out_path=out_patch,
                     )
+
+                    best_ref_img_path = patch_vis.get("best_ref_img_path", None)
+                    if best_ref_img_path:
+                        out_match = pair_dir / f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_matchlines.png"
+                        save_patch_match_vis(
+                            query_path=rep_q_patch,
+                            ref_path=best_ref_img_path,
+                            patch_vis=patch_vis,
+                            out_path=out_match,
+                        )
 
                 print(
                     f"[EVAL] ts={b.safe_ts} gt={gt} pred={pred_flag} "
@@ -704,7 +658,6 @@ def main(target_places: Optional[List[str]] = None):
                     "rep_idx": int(rep_idx),
                 })
 
-            # 4) query event_score curve
             if event_scores:
                 scores_arr = np.array(event_scores, dtype=np.float32)
                 plot_curve(
@@ -716,7 +669,6 @@ def main(target_places: Optional[List[str]] = None):
                 )
                 print("[OK] saved:", out_dir / "query_event_score_curve.png")
 
-            # 5) metrics + FP/FN
             metrics = compute_metrics(y_true, y_pred) if y_true else {}
             fps = [
                 r for r, t, p in zip(per_place_results, y_true, y_pred)
@@ -783,8 +735,6 @@ def main(target_places: Optional[List[str]] = None):
 
     print("\nDONE.")
 
-
-import argparse
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()

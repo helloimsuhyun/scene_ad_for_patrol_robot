@@ -41,7 +41,7 @@ def extract_feats(model, device, x):
 
 #레이어를 선택하여 patch feature를 추출
 @torch.no_grad()
-def extract_patch_layers(model, device, x, layer_a=9, layer_b=11):
+def extract_patch_layers(model, device, x, layer_a=7, layer_b=11):
     x = x.unsqueeze(0).to(device)
 
     outs = model.get_intermediate_layers(
@@ -52,7 +52,7 @@ def extract_patch_layers(model, device, x, layer_a=9, layer_b=11):
         norm=True,
     )
 
-    p = outs[0]
+    p = outs[0].squeeze(0) # [P, D]
     p = F.normalize(p, dim=-1)
     return p
 
