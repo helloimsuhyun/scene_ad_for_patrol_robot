@@ -1,0 +1,45 @@
+{
+  "embed": {
+    "model_name": "dinov2_vits14",
+    "img_size": 560,
+    "global_mode": "patch_mean"
+  },
+  "repr": {
+    "repr_mode": "global_patch_with_aligned"
+  },
+  "patchcore": {
+    "top_p": 0.03,
+    "preselect_m": 3,
+    "radius": 1,
+    "alpha": 0.5,
+    "min_cut": 0.25,
+    "singleton_weight": 0.25,
+    "component_min_area": 2
+  },
+  "calib": {
+    "k": 3,
+    "method": "robust",
+    "gaussian_k": 2.5,
+    "robust_k": 2.0,
+    "percentile": 97
+  },
+  "infer": {
+    "event_rule": "median",
+    "use_two_stage_vlm": false
+  },
+  "superglue": {
+    "resize_long_side": 640,
+    "weights": "indoor",
+    "max_keypoints": 1024,
+    "keypoint_threshold": 0.003,
+    "match_threshold": 0.2,
+    "sinkhorn_iterations": 20,
+    "min_matches": 10,
+    "min_inliers": 15,
+    "min_inlier_ratio": 0.2,
+    "max_reproj_error": 5.0,
+    "valid_patch_thr": 1.0,
+    "mask_erode_kernel": 3,
+    "mask_erode_iter": 1
+  }
+}

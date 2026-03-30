@@ -33,6 +33,7 @@ from .vis import draw_top_p_heatmap, save_aligned_debug_vis, save_patch_match_vi
 # =========================
 THIS_DIR = Path(__file__).resolve().parent
 RECV_ROOT = THIS_DIR.parent / "recv"
+
 DB_PATH = RECV_ROOT / "events.db"
 OUT_ROOTNAME = "_offline_out"
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -275,6 +276,15 @@ def compute_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
         "N_neg": float(len(y_true) - sum(y_true)),
     }
 
+def load_bgr_for_cnn_view(img_bgr, img_size=560):
+    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+    img_pil = Image.fromarray(img_rgb)
+
+    img_pil = transforms.Resize((img_size, img_size))(img_pil)
+
+    img = np.array(img_pil)
+    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
+
 
 def save_pair_vis_k(
     topk_paths: List[Path],
@@ -470,10 +480,37 @@ def safe_ts_to_iso(safe_ts: str) -> str:
 
 
 def main(target_places: Optional[List[str]] = None):
-    if not RECV_ROOT.exists():
-        raise FileNotFoundError(f"RECV_ROOT not found: {RECV_ROOT.resolve()}")
+    recv_root = Path(args.bank_root) if args.bank_root is not None else recv_root
 
-    cfg = load_cfg(RECV_ROOT)
+    if not recv_root.exists():
+        raise FileNotFoundError(f"RECV_ROOT not found: {recv_root.resolve()}")
+
+    cfg = load_cfg(recv_root)
+    override_cfg = {}
+    if args.config is not None:
+        with open(args.config, "r") as f:
+            override_cfg = json.load(f)
+
+    def merge(d, u):
+        for k, v in u.items():
+            if isinstance(v, dict):
+                d[k] = merge(d.get(k, {}), v)
+            else:
+                d[k] = v
+        return d
+
+    cfg = merge(cfg, override_cfg)
+
+    # override merge
+    def merge(d, u):
+        for k, v in u.items():
+            if isinstance(v, dict):
+                d[k] = merge(d.get(k, {}), v)
+            else:
+                d[k] = v
+        return d
+
+    cfg = merge(cfg, override_cfg)
 
     calib_cfg = cfg.get("calib", {})
     infer_cfg = cfg.get("infer", {})
@@ -493,7 +530,7 @@ def main(target_places: Optional[List[str]] = None):
     db_path = get_db_path()
     db = sqlite_db.connect_db(db_path)
     sqlite_db.init_db(db)
-    sync_places_from_fs(db, RECV_ROOT)
+    sync_places_from_fs(db, recv_root)
     print(f"[DB] connected: {db_path.resolve()}")
 
     global_model, device = dino_emb.load_model()
@@ -518,11 +555,11 @@ def main(target_places: Optional[List[str]] = None):
         "global_model": global_model,
         "local_model": local_model,
         "device": device,
-        "bank_root": RECV_ROOT,
+        "bank_root": recv_root,
         "sg_matcher": sg_matcher,
     }
 
-    place_dirs = sorted([p for p in RECV_ROOT.iterdir() if p.is_dir()])
+    place_dirs = sorted([p for p in recv_root.iterdir() if p.is_dir()])
     place_dirs = [
         p for p in place_dirs
         if (p / "bank").exists() or (p / "query").exists() or (p / "th_calib").exists()
@@ -538,7 +575,10 @@ def main(target_places: Optional[List[str]] = None):
     try:
         for place_dir in place_dirs:
             plc = place_dir.name
-            out_dir = place_dir / OUT_ROOTNAME
+            if args.output_dir:
+                out_dir = Path(args.output_dir) / plc
+            else:
+                out_dir = place_dir / OUT_ROOTNAME
             out_dir.mkdir(parents=True, exist_ok=True)
             print(f"\n===== PLACE {plc} =====")
 
@@ -550,7 +590,7 @@ def main(target_places: Optional[List[str]] = None):
                 pass
 
             thr, calib_scores, _ = calibrate_place(
-                str(RECV_ROOT),
+                str(recv_root),
                 plc,
                 engine["global_model"],
                 engine["local_model"],
@@ -609,6 +649,7 @@ def main(target_places: Optional[List[str]] = None):
                     imgs_bgr=imgs_bgr,
                     bank_root=engine["bank_root"],
                     plc_idx=plc,
+                    cfg=cfg,
                     global_model=engine["global_model"],
                     local_model=engine["local_model"],
                     device=engine["device"],
@@ -836,7 +877,10 @@ def main(target_places: Optional[List[str]] = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--places", nargs="*", default=None, help="target place ids (e.g., 00 01)")
+    parser.add_argument("--places", nargs="*", default=None)
+    parser.add_argument("--config", type=str, default=None)
+    parser.add_argument("--bank_root", type=str, default=None)
+    parser.add_argument("--output_dir", type=str, default=None)
     args = parser.parse_args()
 
     main(target_places=args.places)

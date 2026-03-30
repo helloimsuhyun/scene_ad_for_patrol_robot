@@ -12,10 +12,13 @@ DEFAULT_CFG = {
         "repr_mode": "global"
     },
     "patchcore": {
-        "top_p": 0.05,
-        "preselect_m": 3,
-        "radius": 1,
-        "alpha": 0.6
+    "top_p": 0.05,
+    "preselect_m": 3,
+    "radius": 1,
+    "alpha": 0.6,
+    "min_cut": 0.2,
+    "singleton_weight": 0.25,
+    "component_min_area": 2
     },
     "superglue": {  
         "resize_long_side": 640,

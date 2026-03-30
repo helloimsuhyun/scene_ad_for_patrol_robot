@@ -21,4 +21,5 @@ flutter run -d linux # 네트워크 있는 경우
 flutter run -d web-server # 없는 경우 
 
 #OFFLine 추론
-python -m sentrynexcontrol.vision_server.Offline_eval
+python -m sentrynexcontrol.vision_server.Offline_eval \
+  --bank_root /home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/recv

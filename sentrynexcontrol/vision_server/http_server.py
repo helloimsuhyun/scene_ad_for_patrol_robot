@@ -90,6 +90,8 @@ from fastapi.responses import JSONResponse
 
 from . import sqlite_db
 from . import dino_emb
+from . import cnn_emb
+
 from . import place_manager
 from .distance import infer_event, calibrate_place
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
@@ -163,6 +165,11 @@ async def lifespan(app: FastAPI):
 
     #model load
     model, device = dino_emb.load_model()
+    local_model, device = cnn_emb.load_model(
+        model_name="resnet18",
+        out_layer="layer3",
+        device=device,
+    )
 
     cfg = load_cfg(SAVE_ROOT)
     sg_raw = cfg["superglue"]
@@ -179,10 +186,11 @@ async def lifespan(app: FastAPI):
     sg_matcher = SuperGlueMatcher(sg_cfg, device=device)
 
     app.state.engine = {
-        "model": model,
+        "global_model": model,
+        "local_model": local_model,
         "device": device,
         "bank_root": SAVE_ROOT,
-        "sg_matcher": sg_matcher,   
+        "sg_matcher": sg_matcher,
     }
 
     print(" ------------Server startup complete")
@@ -214,22 +222,24 @@ app.mount("/audio", StaticFiles(directory=str(AUDIO_ROOT)), name="audio")
 def run_inference_event(imgs_bgr, meta_obj, engine):
     place_id = str(meta_obj.get("place_id", "unknown"))
     return infer_event(
-        imgs_bgr,
-        place_id,
-        engine["bank_root"],
-        engine["model"],
-        engine["device"],
-        sg_matcher = engine.get("sg_matcher"),
+        imgs_bgr=imgs_bgr,
+        bank_root=engine["bank_root"],
+        plc_idx=place_id,
+        global_model=engine["global_model"],
+        local_model=engine["local_model"],
+        device=engine["device"],
+        sg_matcher=engine.get("sg_matcher"),
     )
 
 #임계치 업데이트 함수 호출----------------------------------
 def run_threshold_calibration(place_id, engine):
     thr, scores, _ = calibrate_place(
-        engine["bank_root"],
-        place_id,
-        engine["model"],
-        engine["device"],
-        sg_matcher = engine.get("sg_matcher"),
+        bank_root=engine["bank_root"],
+        plc_idx=place_id,
+        global_model=engine["global_model"],
+        local_model=engine["local_model"],
+        device=engine["device"],
+        sg_matcher=engine.get("sg_matcher"),
     )
     return thr
 

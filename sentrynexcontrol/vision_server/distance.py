@@ -18,7 +18,7 @@ import os
 
 from .banker import load_bank_by_place, BGR_to_RGB, rebuild_bank
 from .dino_emb import make_embed, make_transform
-from .cnn_emb import extract_grid_layers
+from .cnn_emb import extract_grid_layers, make_aligned_local_transform
 from .config import load_cfg
 
 import cv2
@@ -28,6 +28,7 @@ from .warp_utils import (
     make_patch_valid_mask,
     crop_common_valid_region,
     warp_bank_to_query,
+    crop_common_safe_region
 )
 
 # ----------------------------------------------------for debug
@@ -97,6 +98,23 @@ def _merge_timing(dst: dict, src: Optional[dict]):
             pass
 # ------------------------------------------------
 
+def _to_vis_bgr_from_rgb_tensor(x: torch.Tensor) -> np.ndarray:
+    """
+    x: [3,H,W], normalized tensor
+    return: uint8 BGR image
+    """
+    if x.dim() != 3 or x.shape[0] != 3:
+        raise ValueError(f"expected [3,H,W], got {tuple(x.shape)}")
+
+    mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(3, 1, 1)
+    std = torch.tensor([0.229, 0.224, 0.225], device=x.device).view(3, 1, 1)
+
+    y = x.detach().float() * std + mean
+    y = y.clamp(0.0, 1.0)
+    y = (y * 255.0).byte().permute(1, 2, 0).cpu().numpy()  # HWC RGB
+    y = cv2.cvtColor(y, cv2.COLOR_RGB2BGR)
+    return y
+
 # =========================================================================================== dist 계산 함수
 
 def _infer_patch_grid(P: int):
@@ -146,7 +164,7 @@ def _dist_patchcore(
     # --------------------------------------------------
     # ref image별:
     # 1) top-p patch 선택
-    # 2) 그 안에서 peak-relative thresholding
+    # 2) cut = max(alpha * peak, 0.2) thresholding
     # 3) 남은 patch 평균을 score로 사용
     # --------------------------------------------------
     score_per_img = []
@@ -160,9 +178,11 @@ def _dist_patchcore(
         # top-p
         top_vals, top_idx = torch.topk(patch_dist, k=m)   # (m,), (m,)
 
-        # peak-relative threshold
+        # peak-relative + absolute lower bound threshold
         peak_val = top_vals.max()
-        keep = top_vals >= (alpha * peak_val)             # (m,)
+        cut = max(alpha * float(peak_val.item()), 0.2)
+
+        keep = top_vals >= cut
 
         # 혹시 전부 제거되는 상황 방지
         if keep.sum() == 0:
@@ -181,6 +201,7 @@ def _dist_patchcore(
 
     score_per_img = torch.stack(score_per_img, dim=0)  # (N,)
 
+    # score가 작을수록 정상에 가까움
     k2 = min(k, score_per_img.shape[0])
     best_val, best_idx = torch.topk(-score_per_img, k=k2)
     topk_score = -best_val                             # (k,)
@@ -210,6 +231,175 @@ def _dist_patchcore(
     }
     return score, debug
 
+import numpy as np
+import torch
+import torch.nn.functional as F
+
+
+def _build_filtered_map_from_topk(
+    patch_dist_valid: torch.Tensor,   # (Pv,)
+    patch_match_valid: torch.Tensor,  # (Pv,)
+    valid_orig_idx_t: torch.Tensor,   # (Pv,)
+    P: int,
+    Hp: int,
+    Wp: int,
+    top_p: float = 0.05,
+    alpha: float = 0.6,
+    min_cut = 0.2,
+):
+    """
+    patch_dist_valid에서 top-p를 고른 뒤,
+    cut = max(alpha * peak, 0.2) 이상만 남겨 2D filtered map으로 복원.
+    """
+    device = patch_dist_valid.device
+
+    k_top = max(1, int(np.ceil(patch_dist_valid.numel() * top_p)))
+    top_vals, top_local_idx = torch.topk(
+        patch_dist_valid,
+        k=min(k_top, patch_dist_valid.numel())
+    )
+
+    top_idx = valid_orig_idx_t[top_local_idx]
+    top_match_idx = patch_match_valid[top_local_idx]
+
+    full_patch_dist = torch.zeros(P, device=device, dtype=patch_dist_valid.dtype)
+    full_patch_match = torch.full(
+        (P,), fill_value=-1, device=device, dtype=torch.long
+    )
+
+    if top_vals.numel() == 0:
+        filtered_map = full_patch_dist.view(Hp, Wp)
+        return {
+            "filtered_map": filtered_map,
+            "kept_vals": top_vals,
+            "kept_idx": top_idx,
+            "kept_match_idx": top_match_idx,
+            "cut": torch.tensor(min_cut, device=device, dtype=patch_dist_valid.dtype),
+            "peak_val": 0.0,
+            "full_patch_dist": full_patch_dist,
+            "full_patch_match": full_patch_match,
+        }
+
+    peak = top_vals.max()
+    cut = torch.maximum(
+        alpha * peak,
+        torch.tensor(min_cut, device=device, dtype=patch_dist_valid.dtype)
+    )
+
+    keep = top_vals >= cut
+    kept_vals = top_vals[keep]
+    kept_idx = top_idx[keep]
+    kept_match_idx = top_match_idx[keep]
+
+    # 아무 것도 안 남으면 최고값 1개는 남긴다
+    if kept_vals.numel() == 0:
+        kept_vals = top_vals[:1]
+        kept_idx = top_idx[:1]
+        kept_match_idx = top_match_idx[:1]
+
+    full_patch_dist[kept_idx] = kept_vals
+    full_patch_match[kept_idx] = kept_match_idx
+    filtered_map = full_patch_dist.view(Hp, Wp)
+
+    return {
+        "filtered_map": filtered_map,
+        "kept_vals": kept_vals,
+        "kept_idx": kept_idx,
+        "kept_match_idx": kept_match_idx,
+        "cut": cut,
+        "peak_val": float(peak.item()),
+        "full_patch_dist": full_patch_dist,
+        "full_patch_match": full_patch_match,
+    }
+
+
+def _score_connected_excess(
+    filtered_map: torch.Tensor,       # (Hp, Wp)
+    tau: float,
+    singleton_weight: float = 0.25,
+    component_min_area: int = 2,
+):
+    """
+    filtered heatmap에서 connected component를 찾고
+    area >= 2 : sum(H - tau)
+    area == 1 : singleton_weight * max(H - tau)
+
+    반환:
+        {
+            "score": best_score (tensor),
+            "mask": best component mask (Hp, Wp) bool,
+            "area": best area,
+            "peak": best component peak,
+            "mean": best component mean,
+        }
+    """
+    H = filtered_map
+    device = H.device
+    Hp, Wp = H.shape
+
+    bin_map = (H > tau)
+    visited = torch.zeros((Hp, Wp), device=device, dtype=torch.bool)
+
+    dirs = [
+        (-1, -1), (-1, 0), (-1, 1),
+        ( 0, -1),          ( 0, 1),
+        ( 1, -1), ( 1, 0), ( 1, 1),
+    ]
+
+    best_score = torch.tensor(0.0, device=device, dtype=H.dtype)
+    best_mask = torch.zeros((Hp, Wp), device=device, dtype=torch.bool)
+    best_area = 0
+    best_peak = 0.0
+    best_mean = 0.0
+
+    for y in range(Hp):
+        for x in range(Wp):
+            if (not bin_map[y, x]) or visited[y, x]:
+                continue
+
+            stack = [(y, x)]
+            visited[y, x] = True
+            coords = []
+
+            while stack:
+                cy, cx = stack.pop()
+                coords.append((cy, cx))
+
+                for dy, dx in dirs:
+                    ny, nx = cy + dy, cx + dx
+                    if 0 <= ny < Hp and 0 <= nx < Wp:
+                        if bin_map[ny, nx] and (not visited[ny, nx]):
+                            visited[ny, nx] = True
+                            stack.append((ny, nx))
+
+            ys = torch.tensor([p[0] for p in coords], device=device, dtype=torch.long)
+            xs = torch.tensor([p[1] for p in coords], device=device, dtype=torch.long)
+            vals = H[ys, xs]
+
+            excess = torch.clamp(vals - tau, min=0.0)
+            area = len(coords)
+
+            if area >= component_min_area:
+                score = excess.sum()
+            else:
+                score = singleton_weight * excess.max()
+
+            if score > best_score:
+                best_score = score
+                best_area = area
+                best_peak = float(vals.max().item())
+                best_mean = float(vals.mean().item())
+                best_mask = torch.zeros((Hp, Wp), device=device, dtype=torch.bool)
+                best_mask[ys, xs] = True
+
+    return {
+        "score": best_score,
+        "mask": best_mask,
+        "area": best_area,
+        "peak": best_peak,
+        "mean": best_mean,
+    }
+
 
 def _dist_patchcore_masked_local(
     q_patch: torch.Tensor,      # (P,D)
@@ -219,6 +409,9 @@ def _dist_patchcore_masked_local(
     k: int = 1,
     alpha: float = 0.6,
     radius: int = 1,
+    singleton_weight = 0.25,
+    min_cut = 0.2,
+    component_min_area = 2,
     grid_hw=None,
 ):
     q = F.normalize(q_patch, dim=1)
@@ -250,6 +443,12 @@ def _dist_patchcore_masked_local(
     best_match_idx_list = []
     valid_orig_idx = []
 
+    # --------------------------------------------------
+    # 1) valid patch마다 local window에서 best match 찾기
+    # --------------------------------------------------
+
+    edge_margin = 1 # 테두리 바로 옆은
+
     for y in range(Hp):
         for x in range(Wp):
             if not valid2[y, x]:
@@ -280,27 +479,32 @@ def _dist_patchcore_masked_local(
     if len(best_dist_list) < 4:
         return None, {"ok": False, "reason": "too_few_valid_patches_after_local"}
 
-    dist_map = torch.stack(best_dist_list, dim=1)   # (N, Pv)
-    match_idx_map = torch.stack(best_match_idx_list, dim=1)  # (N, Pv)
+    dist_map = torch.stack(best_dist_list, dim=1)              # (N, Pv)
+    match_idx_map = torch.stack(best_match_idx_list, dim=1)    # (N, Pv)
     Pv = dist_map.shape[1]
     valid_orig_idx_t = torch.tensor(valid_orig_idx, device=q.device, dtype=torch.long)
 
     score_per_img = []
     per_img_peak = []
     per_img_area = []
+    per_img_mean = []
     per_img_top_patch_idx = []
     per_img_top_patch_vals = []
     per_img_top_patch_match_idx = []
     per_img_best_patch_dist_full = []
     per_img_best_patch_match_full = []
+    per_img_best_component_mask = []
 
+    # --------------------------------------------------
+    # 2) ref image별 filtered heatmap + connected component score
+    # --------------------------------------------------
     for n in range(N):
-        patch_dist_valid = dist_map[n]
-        patch_match_valid = match_idx_map[n]
+        patch_dist_valid = dist_map[n]         # (Pv,)
+        patch_match_valid = match_idx_map[n]   # (Pv,)
 
+        # full map (디버그 / 시각화용)
         full_patch_dist = torch.zeros(P, device=q.device, dtype=patch_dist_valid.dtype)
         full_patch_dist[valid_orig_idx_t] = patch_dist_valid
-        patch_dist_2d = full_patch_dist.view(Hp, Wp)
 
         full_patch_match = torch.full(
             (P,),
@@ -310,66 +514,92 @@ def _dist_patchcore_masked_local(
         )
         full_patch_match[valid_orig_idx_t] = patch_match_valid
 
-        candidate_map = patch_dist_2d.clone()
-        candidate_map[~valid2] = 0.0
-
-        peak_val = float(candidate_map.max().item())
-
         per_img_best_patch_dist_full.append(full_patch_dist)
         per_img_best_patch_match_full.append(full_patch_match)
 
-        k_top = max(1, int(np.ceil(Pv * top_p)))
-        top_vals, top_local_idx = torch.topk(
-            patch_dist_valid,
-            k=min(k_top, patch_dist_valid.numel())
+        # (a) 네가 원한 heatmap 필터 유지
+        filt = _build_filtered_map_from_topk(
+            patch_dist_valid=patch_dist_valid,
+            patch_match_valid=patch_match_valid,
+            valid_orig_idx_t=valid_orig_idx_t,
+            P=P,
+            Hp=Hp,
+            Wp=Wp,
+            top_p=top_p,
+            alpha=alpha,
+            min_cut=min_cut
         )
-        top_idx = valid_orig_idx_t[top_local_idx]
-        top_match_idx = patch_match_valid[top_local_idx]
 
-        if top_vals.numel() == 0:
-            score_one = 0.0
-            kept_vals = top_vals
-            kept_idx = top_idx
-            kept_match_idx = top_match_idx
-            selected_area = 0
-            peak_val = 0.0
+        filtered_map = filt["filtered_map"]
+        cut = float(filt["cut"].item())
+        peak_val = float(filt["peak_val"])
+
+        # valid 영역 밖은 제거
+        filtered_map = filtered_map.clone()
+        filtered_map[~valid2] = 0.0
+
+        # (b) filtered heatmap을 connected component로 점수화
+        cc = _score_connected_excess(
+            filtered_map=filtered_map,
+            tau=cut,
+            singleton_weight=singleton_weight,
+            component_min_area=component_min_area,
+        )
+
+        score_one = cc["score"]         # tensor
+        selected_area = int(cc["area"])
+        mean_val = float(cc["mean"])
+        best_comp_mask_2d = cc["mask"]
+
+        # best component에 속한 patch만 시각화용 top_patch로 저장
+        comp_idx = torch.where(best_comp_mask_2d.view(-1))[0]
+        if comp_idx.numel() > 0:
+            kept_vals = full_patch_dist[comp_idx]
+            kept_match_idx = full_patch_match[comp_idx]
+            kept_idx = comp_idx
         else:
-            peak_val = float(top_vals.max().item())
-            keep = top_vals >= (alpha * peak_val)
-
-            kept_vals = top_vals[keep]
-            kept_idx = top_idx[keep]
-            kept_match_idx = top_match_idx[keep]
-
-            if kept_vals.numel() == 0:
-                kept_vals = top_vals[:1]
-                kept_idx = top_idx[:1]
-                kept_match_idx = top_match_idx[:1]
-
-            score_one = float(kept_vals.mean().item())
-            selected_area = int(kept_vals.numel())
+            kept_vals = torch.empty(0, device=q.device, dtype=full_patch_dist.dtype)
+            kept_match_idx = torch.empty(0, device=q.device, dtype=torch.long)
+            kept_idx = torch.empty(0, device=q.device, dtype=torch.long)
 
         score_per_img.append(score_one)
         per_img_peak.append(peak_val)
         per_img_area.append(selected_area)
+        per_img_mean.append(mean_val)
         per_img_top_patch_idx.append(kept_idx)
         per_img_top_patch_vals.append(kept_vals)
         per_img_top_patch_match_idx.append(kept_match_idx)
+        per_img_best_component_mask.append(best_comp_mask_2d)
 
-    score_per_img = torch.tensor(score_per_img, device=q.device, dtype=torch.float32)
+    score_per_img = torch.stack([
+        s if torch.is_tensor(s) else torch.tensor(s, device=q.device, dtype=torch.float32)
+        for s in score_per_img
+    ])
 
-    best_img_idx = torch.argmin(score_per_img)
-    score = float(score_per_img[best_img_idx].item())
+    # --------------------------------------------------
+    # 3) 이제 score는 "클수록 이상" 이므로 그대로 topk
+    # --------------------------------------------------
+    k_ref = min(2, score_per_img.numel())
+    best_vals, best_idxs = torch.topk(score_per_img, k=k_ref)
+
+    score = float(best_vals.mean().item())
+    best_img_idx = best_idxs[0]
 
     best_patch_dist_full = per_img_best_patch_dist_full[int(best_img_idx.item())]
     best_patch_match_full = per_img_best_patch_match_full[int(best_img_idx.item())]
     top_patch_idx = per_img_top_patch_idx[int(best_img_idx.item())]
     top_patch_vals = per_img_top_patch_vals[int(best_img_idx.item())]
     top_patch_match_idx = per_img_top_patch_match_idx[int(best_img_idx.item())]
+    best_component_mask = per_img_best_component_mask[int(best_img_idx.item())]
+
+    print("score =", score)
+    print("selected_patch_count =", int(len(top_patch_vals)))
+    print("score_mean =", float(top_patch_vals.mean().item()) if top_patch_vals.numel() > 0 else 0.0)
+    print("score_peak =", float(top_patch_vals.max().item()) if top_patch_vals.numel() > 0 else 0.0)
 
     debug = {
         "ok": True,
-        "reason": "peak",
+        "reason": "cc_excess_after_topk_filter",
         "best_img_idx": best_img_idx,
         "score_per_img": score_per_img,
         "best_patch_dist": best_patch_dist_full,
@@ -377,15 +607,18 @@ def _dist_patchcore_masked_local(
         "top_patch_idx": top_patch_idx,
         "top_patch_vals": top_patch_vals,
         "top_patch_match_idx": top_patch_match_idx,
+        "best_component_mask": best_component_mask,
         "valid_patch_count": valid_count,
         "local_radius": radius,
         "top_p": top_p,
         "alpha": alpha,
+        "singleton_weight": singleton_weight,
         "selected_patch_count": int(len(top_patch_vals)),
         "score_mean": float(top_patch_vals.mean().item()) if top_patch_vals.numel() > 0 else 0.0,
         "score_peak": float(top_patch_vals.max().item()) if top_patch_vals.numel() > 0 else 0.0,
         "best_component_peak": float(per_img_peak[int(best_img_idx.item())]),
         "best_component_area": int(per_img_area[int(best_img_idx.item())]),
+        "best_component_mean": float(per_img_mean[int(best_img_idx.item())]),
         "grid_hw": (Hp, Wp),
     }
     return score, debug
@@ -407,6 +640,7 @@ def compute_knn_dist(
     local_model=None,      # CNN model
     device=None,           # 하나만 사용
     tfm=None,
+    local_tfm = None,
     global_mode="patch_mean",
     sg_matcher=None,
     cfg=None,
@@ -414,6 +648,9 @@ def compute_knn_dist(
     timing = {}
     pcfg = cfg.get("patchcore", {})
     alpha = float(pcfg.get("alpha", 0.6))
+    min_cut = float(pcfg.get("min_cut", 0.2))
+    singleton_weight = float(pcfg.get("singleton_weight", 0.25))
+    component_min_area = int(pcfg.get("component_min_area", 2))
 
     # ---------------------------------------------------
     # global
@@ -531,9 +768,13 @@ def compute_knn_dist(
 
         sg_raw = cfg["superglue"]
 
-        lp_cfg = cfg.get("patchcore", {})
-        local_radius = int(lp_cfg.get("radius", 1))
-        alpha = float(lp_cfg.get("alpha", 0.6))
+        pcfg = cfg.get("patchcore", {})
+
+        local_radius = int(pcfg.get("radius", 1))
+        alpha = float(pcfg.get("alpha", 0.6))
+        min_cut = float(pcfg.get("min_cut", 0.2))
+        singleton_weight = float(pcfg.get("singleton_weight", 0.25))
+        component_min_area = int(pcfg.get("component_min_area", 2))
 
         refg_np, ref_paths = ref_bank["global"]
         qg = q_out["global"]
@@ -569,21 +810,23 @@ def compute_knn_dist(
                 bank_hw=ref_img_bgr.shape[:2],
             )
 
-            warped_q_crop, ref_crop, mask_crop, crop_bbox = crop_common_valid_region(
+            warped_q_crop, ref_crop, mask_crop, crop_bbox = crop_common_safe_region(
                 warped_q_bgr,
                 ref_img_bgr,
                 warped_mask,
+                erode_kernel=11,
+                erode_iter=2,
                 margin=8,
                 min_size=64,
             )
             if warped_q_crop is None:
                 print("[DEBUG] crop fail:", ref_i)
                 continue
-
-            x_q_crop = tfm(BGR_to_RGB(warped_q_crop))
+            
+            x_q_crop = local_tfm(BGR_to_RGB(warped_q_crop))
             qp_crop, q_hw = extract_grid_layers(local_model, device, x_q_crop)
 
-            x_ref_crop = tfm(BGR_to_RGB(ref_crop))
+            x_ref_crop = local_tfm(BGR_to_RGB(ref_crop))
             refp_crop, ref_hw = extract_grid_layers(local_model, device, x_ref_crop)
 
             if q_hw != ref_hw:
@@ -614,11 +857,22 @@ def compute_knn_dist(
                 k=1,
                 radius=local_radius,
                 alpha=alpha,
+                singleton_weight=singleton_weight,
+                min_cut=min_cut,
+                component_min_area=component_min_area,
                 grid_hw=q_hw,
             )
             if score_one is None or not dbg_one.get("ok", True):
                 print("[DEBUG] local masked dist fail:", ref_i, dbg_one.get("reason", None))
                 continue
+
+            if DEBUG_VIS:
+                vis_query_bgr = _to_vis_bgr_from_rgb_tensor(x_q_crop)
+                vis_ref_bgr = _to_vis_bgr_from_rgb_tensor(x_ref_crop)
+            else:
+                vis_query_bgr = None
+                vis_ref_bgr = None
+
 
             candidates.append({
                 "ref_i": ref_i,
@@ -629,6 +883,8 @@ def compute_knn_dist(
                 "crop_bbox": crop_bbox,
                 "valid_patch_count": valid_patch_count,
                 "crop_shape": warped_q_crop.shape[:2],
+                "vis_query_bgr": vis_query_bgr,
+                "vis_ref_bgr": vis_ref_bgr,
             })
 
         # fallback: 기존 global_patch
@@ -718,6 +974,8 @@ def compute_knn_dist(
                 "top_patch_idx": best_patch_debug["top_patch_idx"],
                 "top_patch_vals": best_patch_debug["top_patch_vals"],
                 "top_patch_match_idx": best_patch_debug["top_patch_match_idx"],
+                "vis_query_bgr": best["vis_query_bgr"].tolist(),
+                "vis_ref_bgr": best["vis_ref_bgr"].tolist(),
             }
 
         _print_timing(f"compute_knn_dist[{repr_mode}]", timing)
@@ -738,12 +996,13 @@ def th_robust(scores, k=3.0):
     return float(med + k * mad * 1.4826)
 
 
-def calibrate_place(bank_root, plc_idx, global_model, local_model, device, sg_matcher=None):
+def calibrate_place(bank_root, plc_idx, global_model, local_model, device, sg_matcher=None, cfg=None):
     bank_root = Path(bank_root)
     plc_idx = str(plc_idx)
 
     timing = {}
-    cfg = load_cfg(bank_root)
+    if cfg is None:
+        cfg = load_cfg(bank_root)
 
     # bank rebuild → DINO 기준
     with _timer(timing, "calibrate.rebuild_bank_bank", device):
@@ -765,6 +1024,15 @@ def calibrate_place(bank_root, plc_idx, global_model, local_model, device, sg_ma
         )
 
     _print_timing(f"calibrate_place[{plc_idx}]", timing)
+    print("[CALIB-RAW] n =", len(scores))
+    print("[CALIB-RAW] min/max =", float(np.min(scores)), float(np.max(scores)))
+    print("[CALIB-RAW] median =", float(np.median(scores)))
+    mad = float(np.median(np.abs(scores - np.median(scores))))
+    print("[CALIB-RAW] mad =", mad)
+    print("[CALIB-RAW] thr =", float(thr))
+    print("[CALIB-RAW] top5 =", sorted([float(x) for x in scores])[-5:])
+
+    
     return thr, scores, thr_path
 
 @torch.inference_mode()
@@ -790,6 +1058,9 @@ def compute_and_save_threshold(
     preselect_m = int(pcfg.get("preselect_m", 10))
     local_radius = int(pcfg.get("radius", 1))
     alpha = float(pcfg.get("alpha", 0.6))
+    min_cut = float(pcfg.get("min_cut", 0.2))
+    singleton_weight = float(pcfg.get("singleton_weight", 0.25))
+    component_min_area = int(pcfg.get("component_min_area", 2))
 
     repr_mode = str(r.get("repr_mode", "global"))
 
@@ -897,6 +1168,7 @@ def compute_and_save_threshold(
             img_size = int(e.get("img_size", 560))
             global_mode = str(e.get("global_mode", "patch_mean"))
             tfm = make_transform(img_size=img_size)
+            local_tfm = make_aligned_local_transform(img_size=img_size)
 
             sg_raw = cfg["superglue"]
 
@@ -959,20 +1231,22 @@ def compute_and_save_threshold(
                         bank_hw=ref_img_bgr.shape[:2],
                     )
 
-                    warped_q_crop, ref_crop, mask_crop, crop_bbox = crop_common_valid_region(
+                    warped_q_crop, ref_crop, mask_crop, crop_bbox = crop_common_safe_region(
                         warped_q_bgr,
                         ref_img_bgr,
                         warped_mask,
+                        erode_kernel=9,
+                        erode_iter=2,
                         margin=8,
                         min_size=64,
                     )
                     if warped_q_crop is None:
                         continue
 
-                    x_q_crop = tfm(BGR_to_RGB(warped_q_crop))
+                    x_q_crop = local_tfm(BGR_to_RGB(warped_q_crop))
                     qp_crop, q_hw = extract_grid_layers(local_model, device, x_q_crop)
 
-                    x_ref_crop = tfm(BGR_to_RGB(ref_crop))
+                    x_ref_crop = local_tfm(BGR_to_RGB(ref_crop))
                     refp_crop, ref_hw = extract_grid_layers(local_model, device, x_ref_crop)
 
                     if q_hw != ref_hw:
@@ -1001,6 +1275,9 @@ def compute_and_save_threshold(
                         k=1,
                         radius=local_radius,
                         alpha=alpha,
+                        singleton_weight=singleton_weight,
+                        min_cut=min_cut,
+                        component_min_area=component_min_area,
                         grid_hw=q_hw,
                     )
                     if score_one is None or not dbg_one.get("ok", True):
@@ -1009,25 +1286,8 @@ def compute_and_save_threshold(
                     cand_scores.append(float(score_one))
 
             if len(cand_scores) == 0:
-                with _timer(loop_timing, "fallback_global_patch", device):
-                    s, _, _ = compute_knn_dist(
-                        q_out,
-                        ref_bank,
-                        k=k,
-                        repr_mode="global_patch",
-                        top_p=top_p,
-                        preselect_m=preselect_m,
-                        q_img_bgr=img_bgr,
-                        global_model=global_model,
-                        local_model=local_model,
-                        device=device,
-                        tfm=tfm,
-                        global_mode=global_mode,
-                        sg_matcher=sg_matcher,
-                        cfg=cfg,
-                    )
+                continue
             else:
-                # best ref 1개 기준으로 calibration score 생성
                 s = float(np.min(cand_scores))
 
             scores.append(float(s))
@@ -1106,7 +1366,8 @@ def infer_event(
     # cfg
     # -------------------------
     with _timer(total_timing, "infer.load_cfg", device):
-        cfg = load_cfg(bank_root)
+        if cfg is None:
+            cfg = load_cfg(bank_root)
 
     infer_cfg = cfg.get("infer", {})
     event_rule = str(infer_cfg.get("event_rule", "max"))
@@ -1116,6 +1377,7 @@ def infer_event(
     img_size = int(e.get("img_size", 560))
     global_mode = str(e.get("global_mode", "patch_mean"))
     tfm = make_transform(img_size=img_size)
+    local_tfm = make_aligned_local_transform(img_size=img_size)
 
     pcfg = cfg.get("patchcore", {})
     top_p = float(pcfg.get("top_p", 0.1))
@@ -1191,6 +1453,7 @@ def infer_event(
                 local_model=local_model,
                 device=device,
                 tfm=tfm,
+                local_tfm=local_tfm,
                 sg_matcher=sg_matcher,
                 cfg=cfg,
             )
@@ -1248,7 +1511,7 @@ def infer_event(
 
         if top_patch_idx is not None and top_patch_vals is not None:
             align_debug = debug.get("align_debug", None) if isinstance(debug, dict) else None
-            align_data = align_debug.get("data", {}) if isinstance(align_debug, dict) else {}
+            align_data = align_debug if isinstance(align_debug, dict) else {}
 
             patch_vis_all.append({
                 "top_patch_idx": top_patch_idx.detach().cpu().tolist()
@@ -1279,6 +1542,8 @@ def infer_event(
                 "crop_bbox": align_data.get("crop_bbox", None),
                 "grid_hw": align_data.get("grid_hw", None),
                 "crop_shape": align_data.get("crop_shape", None),
+                "vis_query_bgr": align_data.get("vis_query_bgr", None),
+                "vis_ref_bgr": align_data.get("vis_ref_bgr", None),
             })
         else:
             patch_vis_all.append(None)
@@ -1409,6 +1674,18 @@ def infer_event(
                 and len(align_vis_all) > rep_idx
                 and align_vis_all[rep_idx] is not None
                 and "crop_shape" in align_vis_all[rep_idx]
+                else None
+            ),
+            "vis_query_bgr": (
+                patch_vis_all[rep_idx]["vis_query_bgr"]
+                if len(patch_vis_all) > rep_idx and patch_vis_all[rep_idx] is not None
+                and "vis_query_bgr" in patch_vis_all[rep_idx]
+                else None
+            ),
+            "vis_ref_bgr": (
+                patch_vis_all[rep_idx]["vis_ref_bgr"]
+                if len(patch_vis_all) > rep_idx and patch_vis_all[rep_idx] is not None
+                and "vis_ref_bgr" in patch_vis_all[rep_idx]
                 else None
             ),
         },

@@ -340,11 +340,11 @@ def _dist_patchcore_masked_local(
             peak_val = float(top_vals.max().item())
 
             # peak-relative threshold
-            keep = top_vals >= (alpha * peak_val)
+            cut = max(alpha * peak_val, 0.2)
 
-            kept_vals = top_vals[keep]
-            kept_idx = top_idx[keep]
-            kept_match_idx = top_match_idx[keep]
+            kept_vals = top_vals[top_vals >= cut]
+            kept_idx = top_idx[top_vals >= cut]
+            kept_match_idx = top_match_idx[top_vals >= cut]
 
             if kept_vals.numel() == 0:
                 kept_vals = top_vals[:1]

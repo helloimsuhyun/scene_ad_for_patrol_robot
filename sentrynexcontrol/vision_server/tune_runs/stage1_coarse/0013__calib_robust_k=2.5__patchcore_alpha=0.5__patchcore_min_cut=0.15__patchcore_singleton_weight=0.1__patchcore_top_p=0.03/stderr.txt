@@ -1,0 +1,29 @@
+Using cache found in /home/choisuhyun/.cache/torch/hub/facebookresearch_dinov2_main
+/home/choisuhyun/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/swiglu_ffn.py:51: UserWarning: xFormers is not available (SwiGLU)
+  warnings.warn("xFormers is not available (SwiGLU)")
+/home/choisuhyun/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/attention.py:33: UserWarning: xFormers is not available (Attention)
+  warnings.warn("xFormers is not available (Attention)")
+/home/choisuhyun/.cache/torch/hub/facebookresearch_dinov2_main/dinov2/layers/block.py:40: UserWarning: xFormers is not available (Block)
+  warnings.warn("xFormers is not available (Block)")
+/home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/vision_server/superglue/models/superpoint.py:137: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  self.load_state_dict(torch.load(str(path)))
+/home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/vision_server/superglue/models/superglue.py:226: FutureWarning: You are using `torch.load` with `weights_only=False` (the current default value), which uses the default pickle module implicitly. It is possible to construct malicious pickle data which will execute arbitrary code during unpickling (See https://github.com/pytorch/pytorch/blob/main/SECURITY.md#untrusted-models for more details). In a future release, the default value for `weights_only` will be flipped to `True`. This limits the functions that could be executed during unpickling. Arbitrary objects will no longer be allowed to be loaded via this mode unless they are explicitly allowlisted by the user via `torch.serialization.add_safe_globals`. We recommend you start setting `weights_only=True` for any use case where you don't have full control of the loaded file. Please open an issue on GitHub for any issues related to this experimental feature.
+  self.load_state_dict(torch.load(str(path)))
+Traceback (most recent call last):
+  File "/home/choisuhyun/miniconda3/envs/dl/lib/python3.10/runpy.py", line 196, in _run_module_as_main
+    return _run_code(code, main_globals, None,
+  File "/home/choisuhyun/miniconda3/envs/dl/lib/python3.10/runpy.py", line 86, in _run_code
+    exec(code, run_globals)
+  File "/home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/vision_server/Offline_eval.py", line 876, in <module>
+    main(target_places=args.places)
+  File "/home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/vision_server/Offline_eval.py", line 582, in main
+    thr, calib_scores, _ = calibrate_place(
+  File "/home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/vision_server/distance.py", line 973, in calibrate_place
+    rebuild_bank(bank_root, plc_idx, global_model, device, mode="bank", cfg=cfg)
+  File "/home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/vision_server/banker.py", line 107, in rebuild_bank
+    img = Image.open(p).convert("RGB")
+  File "/home/choisuhyun/.local/lib/python3.10/site-packages/PIL/Image.py", line 967, in convert
+    self.load()
+  File "/home/choisuhyun/.local/lib/python3.10/site-packages/PIL/ImageFile.py", line 406, in load
+    n, err_code = decoder.decode(b)
+KeyboardInterrupt

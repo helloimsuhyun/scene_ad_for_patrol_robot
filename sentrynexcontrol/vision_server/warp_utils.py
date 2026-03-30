@@ -44,7 +44,7 @@ def make_patch_valid_mask(mask_hw, grid_h, grid_w, thr=0.8):
     return mask >= thr
 
 
-def crop_common_valid_region(warped_q_bgr, ref_bgr, warped_mask, margin=8, min_size=64):
+def crop_common_valid_region(warped_q_bgr, ref_bgr, warped_mask, margin=16, min_size=64):
     """
     warped_mask 기준으로 공통 valid bbox ROI 를 잡아서
     warped query / ref / mask를 동일하게 crop.
@@ -73,6 +73,51 @@ def crop_common_valid_region(warped_q_bgr, ref_bgr, warped_mask, margin=8, min_s
     warped_q_crop = warped_q_bgr[y0:y1, x0:x1]
     ref_crop = ref_bgr[y0:y1, x0:x1]
     mask_crop = warped_mask[y0:y1, x0:x1]
+
+    bbox = (y0, y1, x0, x1)
+    return warped_q_crop, ref_crop, mask_crop, bbox
+
+def crop_common_safe_region(
+    warped_q_bgr,
+    ref_bgr,
+    warped_mask,
+    erode_kernel=9,
+    erode_iter=2,
+    margin=8,
+    min_size=64,
+):
+    """
+    warped_mask에서 border를 충분히 깎은 safe_mask를 만든 뒤,
+    그 안전영역 bbox만 crop해서 반환.
+    """
+    safe_mask = warped_mask.copy()
+
+    kernel = np.ones((erode_kernel, erode_kernel), np.uint8)
+    safe_mask = cv2.erode(safe_mask, kernel, iterations=erode_iter)
+
+    ys, xs = np.where(safe_mask > 0)
+    if len(ys) == 0 or len(xs) == 0:
+        return None, None, None, None
+
+    y0, y1 = ys.min(), ys.max() + 1
+    x0, x1 = xs.min(), xs.max() + 1
+
+    y0 = min(max(y0 + margin, 0), warped_q_bgr.shape[0] - 1)
+    x0 = min(max(x0 + margin, 0), warped_q_bgr.shape[1] - 1)
+    y1 = max(min(y1 - margin, warped_q_bgr.shape[0]), y0 + 1)
+    x1 = max(min(x1 - margin, warped_q_bgr.shape[1]), x0 + 1)
+
+    crop_h = y1 - y0
+    crop_w = x1 - x0
+    if crop_h < min_size or crop_w < min_size:
+        return None, None, None, None
+
+    warped_q_crop = warped_q_bgr[y0:y1, x0:x1]
+    ref_crop = ref_bgr[y0:y1, x0:x1]
+    mask_crop = safe_mask[y0:y1, x0:x1]
+
+    warped_q_crop[mask_crop == 0] = 0
+    ref_crop[mask_crop == 0] = 0
 
     bbox = (y0, y1, x0, x1)
     return warped_q_crop, ref_crop, mask_crop, bbox

@@ -6,7 +6,7 @@ cd "$SCRIPT_DIR/sentrynexcontrol"
 
 CONDA_PY="$HOME/miniconda3/envs/dl/bin/python"
 
-lsof -t -i:8000 | xargs -r kill -9 2>/dev/null || true
+lsof -t -i:8000 | xargs -r kill -9 2>/dev/null || truem
 lsof -t -i:8001 | xargs -r kill -9 2>/dev/null || true
 
 export PYTHONNOUSERSITE=1

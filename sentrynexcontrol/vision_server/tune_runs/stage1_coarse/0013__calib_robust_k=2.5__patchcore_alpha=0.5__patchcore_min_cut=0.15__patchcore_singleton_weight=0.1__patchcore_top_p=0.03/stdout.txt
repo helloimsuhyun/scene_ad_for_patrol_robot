@@ -1,0 +1,11 @@
+[CFG] calib: {'k': 3, 'percentile': 97, 'method': 'robust'}
+[CFG] infer : {'event_rule': 'median', 'use_two_stage_vlm': False}
+[CFG] embed : {'img_size': 560}
+[DB] connected: /home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/recv/events.db
+Loaded SuperPoint model
+Loaded SuperGlue model ("indoor" weights)
+[INFO] filtered places: ['00', '06', '07', '08']
+[INFO] places: ['00', '06', '07', '08']
+
+===== PLACE 00 =====
+[DB] closed
