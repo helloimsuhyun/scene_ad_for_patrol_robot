@@ -315,47 +315,54 @@ def compute_compound_score(
 # =============================================================================
 
 def calibrate_threshold(
-    scores: np.ndarray,      # 정상 추론 compound score 배열
-    method: str = "robust",  # "robust"(MAD 기반) | "gaussian" | "percentile"
-    k: float = 3.0,          # sigma 배율 (3-sigma)
-    percentile: float = 99.0 # percentile 방식 사용 시
+    scores: np.ndarray,
+    method: str = "robust",
+    k: float = 3.0,
+    percentile: float = 99.0,
+    trim_outliers: bool = True,
+    trim_k: float = 3.5,
 ) -> dict:
-    """
-    정상 추론 score 분포를 모델링하여 threshold를 계산.
-
-    [이론적 근거]
-    - robust (MAD):  median + k * MAD * 1.4826
-      정규성을 가정하지 않아도 이상치에 강건. 권장.
-    - gaussian :     mean + k * std
-      분포가 충분히 정규분포에 가까울 때 사용.
-    - percentile:    np.percentile(scores, p)
-      단순하지만 샘플 수에 민감.
-
-    반환: {
-        "threshold": float,
-        "method": str,
-        "k": float,
-        "n": int,
-        "median": float,
-        "mad": float,
-        "mean": float,
-        "std": float,
-        "min": float,
-        "max": float,
-        "top5": List[float]
-    }
-    """
     if len(scores) == 0:
         raise ValueError("calibrate_threshold: scores가 비어있습니다.")
 
     scores = np.array(scores, dtype=np.float32)
+    scores_raw = scores.copy()
+
+    # -----------------------------
+    # 1) raw 기준 robust 통계
+    # -----------------------------
+    raw_median = float(np.median(scores_raw))
+    raw_mad = float(np.median(np.abs(scores_raw - raw_median)))
+    raw_sigma = float(raw_mad * 1.4826)
+
+    removed_scores = []
+    upper_bound = None
+
+    # -----------------------------
+    # 2) optional trimming
+    # -----------------------------
+    if trim_outliers and len(scores_raw) >= 10 and raw_mad > 1e-12:
+        upper_bound = float(raw_median + trim_k * raw_sigma)
+        keep_mask = scores_raw <= upper_bound
+        removed_scores = scores_raw[~keep_mask].tolist()
+
+        # 전부 날아가는 거 방지
+        if int(keep_mask.sum()) >= max(5, int(0.8 * len(scores_raw))):
+            scores = scores_raw[keep_mask]
+        else:
+            scores = scores_raw.copy()
+    else:
+        scores = scores_raw.copy()
+
+    # -----------------------------
+    # 3) trimmed(or raw) 기준 threshold 계산
+    # -----------------------------
     median = float(np.median(scores))
     mad    = float(np.median(np.abs(scores - median)))
     mean   = float(scores.mean())
     std    = float(scores.std())
 
     if method == "robust":
-        # MAD 기반: robust_k * MAD * 1.4826 (정규 분포 환산 상수)
         thr = median + k * mad * 1.4826
     elif method == "gaussian":
         thr = mean + k * std
@@ -366,27 +373,42 @@ def calibrate_threshold(
 
     thr = float(thr)
     top5 = sorted(scores.tolist())[-5:]
+    raw_top5 = sorted(scores_raw.tolist())[-5:]
 
-    print(f"\n[CALIB] n={len(scores)}, method={method}, k={k}")
+    print(f"\n[CALIB] raw_n={len(scores_raw)}, used_n={len(scores)}, method={method}, k={k}")
+    print(f"[CALIB] raw_median={raw_median:.4f}, raw_mad={raw_mad:.4f}, raw_sigma={raw_sigma:.4f}")
+    if upper_bound is not None:
+        print(f"[CALIB] trim_upper_bound={upper_bound:.4f}, removed={len(removed_scores)}")
+        print(f"[CALIB] removed_top={ [round(v,4) for v in sorted(removed_scores)[-5:]] }")
+
     print(f"[CALIB] median={median:.4f}, mad={mad:.4f}")
     print(f"[CALIB] mean={mean:.4f}, std={std:.4f}")
     print(f"[CALIB] min={scores.min():.4f}, max={scores.max():.4f}")
+    print(f"[CALIB] raw_top5={[round(v,4) for v in raw_top5]}")
     print(f"[CALIB] top5={[round(v,4) for v in top5]}")
     print(f"[CALIB] threshold={thr:.4f}")
 
     return {
-        "threshold" : thr,
-        "method"    : method,
-        "k"         : float(k),
-        "n"         : int(len(scores)),
-        "median"    : median,
-        "mad"       : mad,
-        "mean"      : mean,
-        "std"       : std,
-        "min"       : float(scores.min()),
-        "max"       : float(scores.max()),
-        "top5"      : [round(v, 5) for v in top5],
+        "threshold": thr,
+        "method": method,
+        "k": float(k),
+        "n": int(len(scores)),
+        "raw_n": int(len(scores_raw)),
+        "median": median,
+        "mad": mad,
+        "mean": mean,
+        "std": std,
+        "min": float(scores.min()),
+        "max": float(scores.max()),
+        "top5": [round(v, 5) for v in top5],
         "percentile": float(percentile),
+
+        "trim_used": bool(trim_outliers),
+        "trim_k": float(trim_k),
+        "trim_upper_bound": None if upper_bound is None else round(upper_bound, 6),
+        "trim_removed_n": int(len(removed_scores)),
+        "trim_removed_scores": [round(float(v), 6) for v in sorted(removed_scores)],
+        "raw_top5": [round(v, 5) for v in raw_top5],
     }
 
 
@@ -717,8 +739,9 @@ def run_calibration(
         scores_arr,
         method=calib_method,
         k=calib_k,
+        trim_outliers=True,
+        trim_k=3.5,
     )
-
     # --- threshold.json 키 형식을 distance.py 형식과 통일 ---
     from datetime import datetime
     created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -983,6 +1006,19 @@ def topk_mean_score(dist_map: np.ndarray, top_p: float = 0.10):
     vals = np.sort(flat)[-k:]
     return float(vals.mean())
 
+def make_top_p_mask(dist_map: np.ndarray, top_p: float = 0.10):
+    """
+    dist_map에서 상위 top_p 비율 위치만 True인 mask 반환
+    """
+    flat = dist_map.reshape(-1)
+    if flat.size == 0:
+        return np.zeros_like(dist_map, dtype=bool), 0.0, 0
+
+    k = max(1, int(np.ceil(flat.size * top_p)))
+    thr_top = float(np.sort(flat)[-k])
+    top_mask = dist_map >= thr_top
+    return top_mask, thr_top, k
+
 def to_gray_clahe_3ch(img_bgr, clip_limit=2.0, tile_grid_size=(8, 8)):
     gray = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2GRAY)
     clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=tile_grid_size)
@@ -1006,6 +1042,10 @@ def verify_bbox_with_local_search(
         "score": float,
         "dist_map": np.ndarray,
         "feat_hw": (Hf, Wf),
+        "top_p_mask": np.ndarray(bool),
+        "top_p_thr": float,
+        "top_k": int,
+        "top_p": float,
     }
     """
     q_region = to_gray_clahe_3ch(q_region)
@@ -1014,10 +1054,10 @@ def verify_bbox_with_local_search(
     q_pil = bgr_to_pil_rgb(q_region)
     r_pil = bgr_to_pil_rgb(r_region)
 
-    q_x = transform(q_pil)   # [3,H,W]
+    q_x = transform(q_pil)
     r_x = transform(r_pil)
 
-    q_feat, (Hf, Wf) = extract_grid_layers(model, device, q_x)  # [C,Hf,Wf]
+    q_feat, (Hf, Wf) = extract_grid_layers(model, device, q_x)
     r_feat, _ = extract_grid_layers(model, device, r_x)
 
     dist_map_t = compute_local_search_dist_map_from_feats(
@@ -1028,11 +1068,16 @@ def verify_bbox_with_local_search(
     dist_map = dist_map_t.detach().cpu().numpy()
 
     score = topk_mean_score(dist_map, top_p=top_p)
+    top_p_mask, top_p_thr, top_k = make_top_p_mask(dist_map, top_p=top_p)
 
     return {
         "score": score,
         "dist_map": dist_map,
         "feat_hw": (Hf, Wf),
+        "top_p_mask": top_p_mask,
+        "top_p_thr": top_p_thr,
+        "top_k": top_k,
+        "top_p": top_p,
     }
 
 def draw_text_box(img, lines, org=(10, 20), line_h=18):
@@ -1149,7 +1194,7 @@ def make_dist_overlay(base_bgr, dist_map, color_map=cv2.COLORMAP_JET, alpha=0.45
 
 def save_flagged_region_visuals(case_dir, verifier_results):
     """
-    bbox별 q/r/verifier heatmap 저장
+    bbox별 q/r/verifier heatmap + top-p mask 저장
     """
     for i, reg in enumerate(verifier_results):
         sub_dir = case_dir / f"bbox_{i:02d}"
@@ -1161,19 +1206,24 @@ def save_flagged_region_visuals(case_dir, verifier_results):
         vscore = reg["verifier_score"]
         dist_map = reg["verifier_dist_map"]
 
+        top_p_mask = reg.get("verifier_top_p_mask", None)
+        top_p_thr  = reg.get("verifier_top_p_thr", None)
+        top_k      = reg.get("verifier_top_k", None)
+        top_p      = reg.get("verifier_top_p", None)
+
         cv2.imwrite(str(sub_dir / "q_region.png"), q_region)
         cv2.imwrite(str(sub_dir / "r_region.png"), r_region)
         cv2.imwrite(str(sub_dir / "mask_region.png"), (mask_region.astype(np.uint8) * 255))
 
+        # 절대 기준 verifier heat overlay
         q_overlay = make_dist_overlay(q_region, dist_map)
         r_overlay = make_dist_overlay(r_region, dist_map)
 
         q_overlay = draw_text_box(
             q_overlay,
             [f"bbox verifier score = {vscore:.4f}",
-            f"dist min/max = {dist_map.min():.4f}/{dist_map.max():.4f}",
-            f"img_bbox = {reg['img_bbox']}",
-            f"patch_bbox = {reg['patch_bbox']}"],
+             f"img_bbox = {reg['img_bbox']}",
+             f"patch_bbox = {reg['patch_bbox']}"],
             org=(8, 18),
         )
         r_overlay = draw_text_box(
@@ -1187,16 +1237,53 @@ def save_flagged_region_visuals(case_dir, verifier_results):
         pair = np.hstack([q_overlay, r_overlay])
         cv2.imwrite(str(sub_dir / "verifier_pair.png"), pair)
 
-        # raw verifier heatmap도 저장
+        # raw abs heat
         d = dist_map.astype(np.float32)
-
-        # 절대 기준 clip
         d_vis = np.clip(d, 0.0, 1.0)
-
         heat = (d_vis * 255).astype(np.uint8)
         heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
         cv2.imwrite(str(sub_dir / "verifier_heat.png"), heat)
         np.save(sub_dir / "verifier_dist_map.npy", dist_map)
+
+        # -----------------------------
+        # top-p mask 저장
+        # -----------------------------
+        if top_p_mask is not None:
+            h, w = q_region.shape[:2]
+
+            top_mask_rs = cv2.resize(
+                top_p_mask.astype(np.uint8),
+                (w, h),
+                interpolation=cv2.INTER_NEAREST
+            ).astype(bool)
+
+            cv2.imwrite(
+                str(sub_dir / "verifier_top_p_mask.png"),
+                (top_mask_rs.astype(np.uint8) * 255)
+            )
+
+            cyan = np.zeros_like(q_region)
+            cyan[:] = (255, 255, 0)  # BGR cyan
+
+            q_top = q_region.copy()
+            r_top = r_region.copy()
+
+            q_blend = cv2.addWeighted(q_region, 0.35, cyan, 0.65, 0)
+            r_blend = cv2.addWeighted(r_region, 0.35, cyan, 0.65, 0)
+
+            q_top[top_mask_rs] = q_blend[top_mask_rs]
+            r_top[top_mask_rs] = r_blend[top_mask_rs]
+
+            q_top = draw_text_box(
+                q_top,
+                [f"top_p = {top_p}",
+                 f"top_k = {top_k}",
+                 f"top_thr = {top_p_thr:.4f}" if top_p_thr is not None else "top_thr = NA"],
+                org=(8, 18),
+            )
+
+            top_pair = np.hstack([q_top, r_top])
+            cv2.imwrite(str(sub_dir / "verifier_top_p_pair.png"), top_pair)
 
 
 def save_verifier_summary(case_dir, q_crop, verifier_results):
@@ -1212,6 +1299,130 @@ def save_verifier_summary(case_dir, q_crop, verifier_results):
                     cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 0), 1, cv2.LINE_AA)
 
     cv2.imwrite(str(case_dir / "stage5_verifier_summary.png"), vis)
+
+# local heatmap > 원본
+def save_verified_bbox_overlay(
+    case_dir,
+    q_crop,
+    verified_regions,
+    alpha=0.5,
+    vis_thr=0.5   # 🔥 중요: 이 값 이상만 보이게
+):
+    """
+    상대 기준(min-max) 히트맵 + low 값 투명 처리
+    bbox 테두리 없음
+    """
+    vis = q_crop.copy()
+
+    for i, reg in enumerate(verified_regions):
+        y0, x0, y1, x1 = reg["img_bbox"]
+        dist_map = reg["verifier_dist_map"].astype(np.float32)
+
+        if dist_map.size == 0 or (y1 - y0) <= 0 or (x1 - x0) <= 0:
+            continue
+
+        # -----------------------------
+        # 1. 상대 기준 normalization
+        # -----------------------------
+        d_min, d_max = float(dist_map.min()), float(dist_map.max())
+        if d_max - d_min < 1e-8:
+            continue
+
+        d_norm = (dist_map - d_min) / (d_max - d_min)
+
+        # -----------------------------
+        # 2. threshold 이하 제거 (투명)
+        # -----------------------------
+        mask = d_norm >= vis_thr   # 🔥 핵심
+
+        if mask.sum() == 0:
+            continue
+
+        # -----------------------------
+        # 3. heatmap 생성
+        # -----------------------------
+        heat = (d_norm * 255).astype(np.uint8)
+        heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+        heat = cv2.resize(heat, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
+
+        mask_rs = cv2.resize(
+            mask.astype(np.uint8),
+            (x1 - x0, y1 - y0),
+            interpolation=cv2.INTER_NEAREST
+        ).astype(bool)
+
+        # -----------------------------
+        # 4. overlay (mask 부분만)
+        # -----------------------------
+        roi = vis[y0:y1, x0:x1].copy()
+        blended = cv2.addWeighted(roi, 1 - alpha, heat, alpha, 0)
+
+        roi[mask_rs] = blended[mask_rs]
+        vis[y0:y1, x0:x1] = roi
+
+        # -----------------------------
+        # 5. 텍스트만 표시 (bbox 없음)
+        # -----------------------------
+        cv2.putText(
+            vis,
+            f"{reg['verifier_score']:.3f}",
+            (x0, max(15, y0 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(case_dir / "stage6_verified_bbox_overlay_rel.png"), vis)
+
+
+def save_verified_bbox_top_p_overlay(case_dir, q_crop, verified_regions, alpha=0.65):
+    """
+    최종 anomaly로 승인된 bbox들의 top-p patch mask를
+    원래 q_crop 위에 오버레이해서 저장
+    """
+    vis = q_crop.copy()
+
+    for i, reg in enumerate(verified_regions):
+        y0, x0, y1, x1 = reg["img_bbox"]
+        top_p_mask = reg.get("verifier_top_p_mask", None)
+
+        if top_p_mask is None:
+            continue
+        if (y1 - y0) <= 0 or (x1 - x0) <= 0:
+            continue
+
+        # patch mask -> bbox image 크기로 resize
+        mask_rs = cv2.resize(
+            top_p_mask.astype(np.uint8),
+            (x1 - x0, y1 - y0),
+            interpolation=cv2.INTER_NEAREST
+        ).astype(bool)
+
+        roi = vis[y0:y1, x0:x1].copy()
+
+        # cyan overlay
+        color = np.zeros_like(roi)
+        color[:] = (255, 255, 0)  # BGR cyan
+
+        blended = cv2.addWeighted(roi, 1 - alpha, color, alpha, 0)
+        roi[mask_rs] = blended[mask_rs]
+        vis[y0:y1, x0:x1] = roi
+
+        cv2.rectangle(vis, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 2)
+        cv2.putText(
+            vis,
+            f"#{i} ver={reg['verifier_score']:.3f}",
+            (x0, max(15, y0 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.42,
+            (255, 255, 0),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(case_dir / "stage6_verified_bbox_top_p_overlay.png"), vis)
 
 # =============================================================================
 # ⑤ 추론 모드: query 이미지를 bank와 비교, threshold와 비교하여 판정
@@ -1251,6 +1462,7 @@ def run_inference(
       → [sam_predictor 있으면] ANOMALY 후보만 SAM IoU 검증 → 최종 판정
     """
     random.seed(seed)
+    all_infer_results = []
 
     # threshold.json 로드
     thr_path = out_dir / "threshold.json"
@@ -1377,6 +1589,10 @@ def run_inference(
                 "verifier_score": out["score"],
                 "verifier_dist_map": out["dist_map"],
                 "verifier_feat_hw": out["feat_hw"],
+                "verifier_top_p_mask": out["top_p_mask"],
+                "verifier_top_p_thr": out["top_p_thr"],
+                "verifier_top_k": out["top_k"],
+                "verifier_top_p": out["top_p"],
             })
         
         # -----------------------------
@@ -1406,11 +1622,37 @@ def run_inference(
 
         save_flagged_region_visuals(case_dir, verifier_results)
         save_verifier_summary(case_dir, best_debug["q_crop"], verifier_results)
+        save_verified_bbox_top_p_overlay(
+            case_dir,
+            best_debug["q_crop"],
+            verifier_results,
+            alpha=0.65,
+        )
 
-        # 지금 단계에서는 "모델 넣기 전"이므로 region 존재 여부만 anomaly 후보 기준으로 씀
-        is_anomaly = len(flagged_regions) > 0
+        # -----------------------------
+        # bbox verifier 기준 최종 판정
+        # -----------------------------
+        verifier_thr = 0.49   # 일단 임시값, 나중에 calib 권장
+
+        verified_regions = [
+            r for r in verifier_results
+            if r["verifier_score"] > verifier_thr
+        ]
+        save_verified_bbox_overlay(
+            case_dir,
+            best_debug["q_crop"],
+            verified_regions,
+            alpha=0.45,
+        )
+
+        best_verifier_score = max(
+            [r["verifier_score"] for r in verifier_results],
+            default=0.0
+        )
+
+        is_anomaly = len(verified_regions) > 0
         label_str = "ANOMALY" if is_anomaly else "NORMAL"
-        n_flagged = len(flagged_regions)
+        n_flagged = len(verified_regions)
 
         print(f"  [RESULT] best_score={best_score:.5f}, thr={thr:.5f} → {label_str} "
               f"(flagged comps: {n_flagged}/{len(all_comps)})")
@@ -1520,23 +1762,43 @@ def run_inference(
             "all_cand_scores": [round(s, 5) for s in cand_scores],
             
         }
+        result_meta["verifier_threshold"] = round(verifier_thr, 6)
+        result_meta["best_verifier_score"] = round(best_verifier_score, 6)
+
         result_meta["flagged_regions"] = [
             {
                 "idx": i,
                 "component_score": round(r["score"], 6),
                 "verifier_score": round(r["verifier_score"], 6),
+                "final_bbox_score": round(r["verifier_score"], 6),   # 지금은 verifier_score를 최종 bbox 점수로 사용
+                "is_verified": bool(r["verifier_score"] > verifier_thr),
                 "area": int(r["area"]),
                 "peak": round(r["peak"], 6),
                 "mean": round(r["mean"], 6),
                 "patch_bbox": list(r["patch_bbox"]),
                 "img_bbox": list(r["img_bbox"]),
+                "verifier_top_p": r.get("verifier_top_p", None),
+                "verifier_top_k": int(r.get("verifier_top_k", 0)),
+                "verifier_top_p_thr": round(float(r.get("verifier_top_p_thr", 0.0)), 6),
             }
             for i, r in enumerate(verifier_results)
+        ]
+        result_meta["verified_regions"] = [
+            {
+                "idx": i,
+                "final_bbox_score": round(r["verifier_score"], 6),
+                "component_score": round(r["score"], 6),
+                "verifier_score": round(r["verifier_score"], 6),
+                "img_bbox": list(r["img_bbox"]),
+                "patch_bbox": list(r["patch_bbox"]),
+            }
+            for i, r in enumerate(verified_regions)
         ]
         result_meta.update(sam_meta)  # SAM 필드 병합
         (case_dir / "result.json").write_text(
             json.dumps(result_meta, indent=2, ensure_ascii=False), encoding="utf-8"
         )
+        all_infer_results.append(result_meta)
 
         # 평가 집계 (파일명 기반 GT)
         eval_y_true.append(1 if q_path.name.startswith("abnormal_") else 0)
@@ -1546,7 +1808,12 @@ def run_inference(
     if len(eval_y_true) > 0:
         _print_eval_report(eval_y_true, eval_y_pred, out_dir)
 
-    # --- 모음 폴더: 쿼리 + 최종 마스크 오버레이 이미지 한 곳에 모음 ---
+        # infer 전체 결과 통합 저장
+    (out_dir / "infer_all_results.json").write_text(
+        json.dumps(all_infer_results, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
     _save_summary_gallery(out_dir)
 
 

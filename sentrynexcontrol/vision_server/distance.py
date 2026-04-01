@@ -96,6 +96,7 @@ def _merge_timing(dst: dict, src: Optional[dict]):
             dst[k] = dst.get(k, 0.0) + float(v)
         except Exception:
             pass
+
 # ------------------------------------------------
 
 def _to_vis_bgr_from_rgb_tensor(x: torch.Tensor) -> np.ndarray:
@@ -231,11 +232,8 @@ def _dist_patchcore(
     }
     return score, debug
 
-import numpy as np
-import torch
-import torch.nn.functional as F
 
-
+# patch dist map 필터링 함수 ( top k + max alpha * peak cut )
 def _build_filtered_map_from_topk(
     patch_dist_valid: torch.Tensor,   # (Pv,)
     patch_match_valid: torch.Tensor,  # (Pv,)
@@ -312,7 +310,9 @@ def _build_filtered_map_from_topk(
         "full_patch_match": full_patch_match,
     }
 
-
+# heatmap에서 CC를 찾고 점수화
+# 각 컴파운드에 대해 component_min_area보다 작으면 singleton_weight * 해당 peak
+# 아니면 sum
 def _score_connected_excess(
     filtered_map: torch.Tensor,       # (Hp, Wp)
     tau: float,
@@ -321,7 +321,7 @@ def _score_connected_excess(
 ):
     """
     filtered heatmap에서 connected component를 찾고
-    area >= 2 : sum(H - tau)
+    area >= component_min_area : sum(H - tau)
     area == 1 : singleton_weight * max(H - tau)
 
     반환:
@@ -400,10 +400,35 @@ def _score_connected_excess(
         "mean": best_mean,
     }
 
+def local_patch_pool(feat: torch.Tensor, hw: tuple, kernel: int = 3):
+    """
+    feat: (N, C)
+    hw: (H, W)
+    return: (N, C)
+    """
+    H, W = hw
+    C = feat.shape[1]
+
+    # (N, C) -> (1, C, H, W)
+    x = feat.view(H, W, C).permute(2, 0, 1).unsqueeze(0)
+
+    # avg pooling
+    x = F.avg_pool2d(
+        x,
+        kernel_size=kernel,
+        stride=1,
+        padding=kernel // 2
+    )
+
+    # back to (N, C)
+    x = x.squeeze(0).permute(1, 2, 0).reshape(-1, C)
+
+    return x
+
 
 def _dist_patchcore_masked_local(
     q_patch: torch.Tensor,      # (P,D)
-    ref_patch: torch.Tensor,    # (N,P,D)
+    ref_patch: torch.Tensor,    # (1,P,D)
     valid_mask_1d,              # (P,) bool
     top_p: float = 0.05,
     k: int = 1,
@@ -413,10 +438,11 @@ def _dist_patchcore_masked_local(
     min_cut = 0.2,
     component_min_area = 2,
     grid_hw=None,
-):
-    q = F.normalize(q_patch, dim=1)
+):  
+    # 이미 emb 추출하고 정규화해서 줌
+    q = q_patch
     ref = ref_patch
-
+    
     valid_mask_1d = torch.as_tensor(valid_mask_1d, device=q.device, dtype=torch.bool)
 
     if valid_mask_1d.numel() != q.shape[0]:
@@ -443,11 +469,7 @@ def _dist_patchcore_masked_local(
     best_match_idx_list = []
     valid_orig_idx = []
 
-    # --------------------------------------------------
-    # 1) valid patch마다 local window에서 best match 찾기
-    # --------------------------------------------------
-
-    edge_margin = 1 # 테두리 바로 옆은
+    # 1) valid patch에 대해서 local window에서 best match 찾아서 dist map 만들기
 
     for y in range(Hp):
         for x in range(Wp):
@@ -472,7 +494,8 @@ def _dist_patchcore_masked_local(
             dx = best_local_idx % win_w
             best_global_idx = (y0 + dy) * Wp + (x0 + dx)
 
-            best_dist_list.append(dist)
+            # dist append
+            best_dist_list.append(dist) 
             best_match_idx_list.append(best_global_idx)
             valid_orig_idx.append(y * Wp + x)
 
@@ -828,7 +851,7 @@ def compute_knn_dist(
 
             x_ref_crop = local_tfm(BGR_to_RGB(ref_crop))
             refp_crop, ref_hw = extract_grid_layers(local_model, device, x_ref_crop)
-
+    
             if q_hw != ref_hw:
                 print("[DEBUG] grid_hw mismatch:", ref_i, q_hw, ref_hw)
                 continue

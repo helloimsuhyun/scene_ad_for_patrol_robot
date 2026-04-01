@@ -90,6 +90,6 @@ def extract_grid_layers(model, device, x):
 
     C, H, W = feat.shape
     p = feat.permute(1, 2, 0).reshape(H * W, C)   # [P,D]
-    p = F.normalize(p, dim=-1)
+    p = F.normalize(p, dim=-1) # 정규화
 
     return p, (H, W)
