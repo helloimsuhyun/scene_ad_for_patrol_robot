@@ -132,6 +132,9 @@ async def lifespan(app: FastAPI):
     app.state.global_calibrating = False
     app.state.calib_task = None
 
+    # GT
+    app.state.query_capture_label = None
+
     #robot 현재 / 목표 position
     app.state.robot_pose = {
         "x": None,
@@ -243,6 +246,33 @@ def run_threshold_calibration(place_id, engine):
     )
     return thr
 
+
+
+# ======== label 관련 gui 함수
+class UpdateQueryCaptureLabelReq(BaseModel):
+    label: str
+
+@app.post("/query_capture_label")
+async def update_query_capture_label(req: UpdateQueryCaptureLabelReq):
+    label = str(req.label).strip().lower()
+
+    if label not in ("normal", "abnormal"):
+        raise HTTPException(status_code=400, detail="label must be normal or abnormal")
+
+    app.state.query_capture_label = label
+
+    return {
+        "ok": True,
+        "query_capture_label": app.state.query_capture_label,
+    }
+
+@app.get("/query_capture_label")
+async def get_query_capture_label():
+    return {
+        "ok": True,
+        "query_capture_label": app.state.query_capture_label,
+    }
+
 # ----------------------------------------------------------
 # 이미지를 받은 경우 endpoint
 
@@ -269,7 +299,6 @@ async def place_imgs(
         )
 
     place_id = str(meta_obj.get("place_id", "unknown")).strip()
-    label = meta_obj.get("label", None)
     ts = meta_obj.get("timestamp") or datetime.now().isoformat()
 
     if not place_id:
@@ -301,6 +330,13 @@ async def place_imgs(
             status_code=400,
             detail=f"invalid server-side mode for place {place_id}: {mode}"
         )
+
+    if mode in ("bank", "th_calib"):
+        label = "normal"
+    elif mode == "query":
+        label = app.state.query_capture_label
+    else:
+        label = None
 
     # 저장 디렉토리: root / place / mode
     safe_ts = ts.replace(":", "-")

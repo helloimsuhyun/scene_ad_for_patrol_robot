@@ -90,31 +90,21 @@ def get_robot_pose():
     resp.raise_for_status()
     return resp.json()
 
-
 def get_robot_goal():
     resp = requests.get(f"{SERVER_URL}/robot/goal", timeout=TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
-
-# =========================
-# ROS2 Patrol bridge API
-# =========================
-def set_patrol_place(place_id: str):
-    resp = requests.post(
-        f"{BRIDGE_URL}/patrol/place",
-        json={"place_id": place_id},
-        timeout=TIMEOUT,
-    )
+def get_query_capture_label():
+    resp = requests.get(f"{SERVER_URL}/query_capture_label", timeout=TIMEOUT)
     resp.raise_for_status()
     return resp.json()
 
 
-def set_query_gt(label: str):
+def set_query_capture_label(label: str):
     label = normalize_label(label)
-
     resp = requests.post(
-        f"{BRIDGE_URL}/patrol/query_gt",
+        f"{SERVER_URL}/query_capture_label",
         json={"label": label},
         timeout=TIMEOUT,
     )
@@ -122,9 +112,13 @@ def set_query_gt(label: str):
     return resp.json()
 
 
-def trigger_capture():
+# =========================
+# ROS2 Patrol bridge API
+# =========================
+def trigger_capture(place_id: str):
     resp = requests.post(
         f"{BRIDGE_URL}/patrol/capture",
+        json={"place_id": place_id},
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
@@ -174,9 +168,9 @@ def print_help():
     print("  exit                           -> 종료")
     print("")
     print("note:")
-    print("  - capture 시 mode는 서버의 place.mode 기준으로 결정됨")
-    print("  - z 는 query일 때 사용할 GT 라벨(normal/abnormal)만 토글")
-    print("  - bank / th_calib 에서는 서버가 저장만 하고, query면 서버가 추론함")
+    print("  - capture 시 place_id는 브리지로 보내고, mode는 서버의 place.mode 기준으로 결정됨")
+    print("  - z 는 서버의 query_capture_label(normal/abnormal)만 토글")
+    print("  - bank / th_calib 는 서버가 normal로 처리하고, query만 서버 라벨을 사용함")
 
 
 def print_calibration_status(data: dict):
@@ -412,7 +406,10 @@ def show_current_place(current_place: str):
 
 def main():
     current_place = "00"
-    current_label = "normal"
+    try:
+        current_label = get_query_capture_label().get("query_capture_label") or "normal"
+    except Exception:
+        current_label = "normal"
 
     print_help()
     print(f"\ncurrent_selected_place: {current_place}")
@@ -473,28 +470,22 @@ def main():
 
             elif op == "z":
                 current_label = toggle_label(current_label)
-                data = set_query_gt(current_label)
-                print(f"[label toggle] query_label -> {current_label}")
+                data = set_query_capture_label(current_label)
+                print(f"[label toggle] query_capture_label -> {current_label}")
                 pprint(data)
 
             elif op == "c":
                 current_place = ensure_current_place(current_place)
-
-                set_patrol_place(current_place)
-                set_query_gt(current_label)
-
-                data = trigger_capture()
-                print(f"[capture] place_id={current_place} gt={current_label} (server decides mode)")
+                data = trigger_capture(current_place)
+                print(f"[capture] place_id={current_place} (server decides mode/label)")
                 pprint(data)
 
             elif op == "v":
                 current_place = ensure_current_place(current_place)
-
-                set_query_gt(current_label)
-
                 data = place_and_capture(current_place)
-                print(f"[place_and_capture] place_id={current_place} gt={current_label} (server decides mode)")
+                print(f"[place_and_capture] place_id={current_place} (server decides mode/label)")
                 pprint(data)
+
 
             elif op == "l":
                 current_place = ensure_current_place(current_place)
