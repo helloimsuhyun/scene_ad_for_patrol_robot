@@ -268,16 +268,39 @@ async def place_imgs(
             status_code=409,
         )
 
-    place_id = str(meta_obj.get("place_id", "unknown"))
-    mode = str(meta_obj.get("mode", "unknown"))
-    label = meta_obj.get("label", None)  
+    place_id = str(meta_obj.get("place_id", "unknown")).strip()
+    label = meta_obj.get("label", None)
     ts = meta_obj.get("timestamp") or datetime.now().isoformat()
+
+    if not place_id:
+        raise HTTPException(status_code=400, detail="place_id is required")
 
     async with app.state.db_lock:
         sqlite_db.ensure_place(app.state.db, place_id)
+        place = sqlite_db.get_place(app.state.db, place_id)
+
+    if place is None:
+        raise HTTPException(status_code=404, detail="place not found")
+
+    mode = str(place.get("mode", "idle")).strip()
+
+    if mode == "idle":
+        return JSONResponse(
+            {
+                "ok": False,
+                "status": "place_idle",
+                "place_id": place_id,
+                "applied_mode": mode,
+                "meta": meta_obj,
+            },
+            status_code=409,
+        )
 
     if mode not in ("bank", "th_calib", "query"):
-        raise HTTPException(status_code=400, detail="mode must be one of bank/th_calib/query")
+        raise HTTPException(
+            status_code=400,
+            detail=f"invalid server-side mode for place {place_id}: {mode}"
+        )
 
     # 저장 디렉토리: root / place / mode
     safe_ts = ts.replace(":", "-")
@@ -372,6 +395,8 @@ async def place_imgs(
         {
             "ok": True,
             "status": resp_status,
+            "place_id": place_id,
+            "applied_mode": mode,
             "n_images": len(saved),
             "saved_dir": str(out_dir),
             "meta": meta_obj,
