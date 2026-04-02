@@ -174,8 +174,9 @@ def print_help():
     print("  exit                           -> 종료")
     print("")
     print("note:")
-    print("  - bank / th_calib 는 항상 normal")
-    print("  - z 는 query 라벨(normal/abnormal)만 토글")
+    print("  - capture 시 mode는 서버의 place.mode 기준으로 결정됨")
+    print("  - z 는 query일 때 사용할 GT 라벨(normal/abnormal)만 토글")
+    print("  - bank / th_calib 에서는 서버가 저장만 하고, query면 서버가 추론함")
 
 
 def print_calibration_status(data: dict):
@@ -478,38 +479,21 @@ def main():
 
             elif op == "c":
                 current_place = ensure_current_place(current_place)
+
                 set_patrol_place(current_place)
+                set_query_gt(current_label)
 
-                mode = get_mode_of_place(current_place)
-
-                if mode == "query":
-                    set_query_gt(current_label)
-                    data = trigger_capture()
-                    print(f"[capture] place_id={current_place} mode=query query_label={current_label}")
-                elif mode in ["bank", "th_calib"]:
-                    data = trigger_capture()
-                    print(f"[capture] place_id={current_place} mode={mode} label=normal (fixed)")
-                else:
-                    data = trigger_capture()
-                    print(f"[capture] place_id={current_place} mode={mode}")
-
+                data = trigger_capture()
+                print(f"[capture] place_id={current_place} gt={current_label} (server decides mode)")
                 pprint(data)
 
             elif op == "v":
                 current_place = ensure_current_place(current_place)
-                mode = get_mode_of_place(current_place)
 
-                if mode == "query":
-                    set_query_gt(current_label)
-                    data = place_and_capture(current_place)
-                    print(f"[place_and_capture] place_id={current_place} mode=query query_label={current_label}")
-                elif mode in ["bank", "th_calib"]:
-                    data = place_and_capture(current_place)
-                    print(f"[place_and_capture] place_id={current_place} mode={mode} label=normal (fixed)")
-                else:
-                    data = place_and_capture(current_place)
-                    print(f"[place_and_capture] place_id={current_place} mode={mode}")
+                set_query_gt(current_label)
 
+                data = place_and_capture(current_place)
+                print(f"[place_and_capture] place_id={current_place} gt={current_label} (server decides mode)")
                 pprint(data)
 
             elif op == "l":
