@@ -6,7 +6,7 @@ import requests
 from pprint import pprint
 
 SERVER_URL = "http://127.0.0.1:8000"      # vision server
-BRIDGE_URL = "http://192.168.0.88"   # ROS2 patrol_http_bridge device IP
+BRIDGE_URL = "http://192.168.0.24:8090"   # ROS2 patrol_http_bridge device IP
 TIMEOUT = 5
 
 MODE_CYCLE = ["idle", "bank", "th_calib", "query"]

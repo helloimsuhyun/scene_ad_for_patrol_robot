@@ -65,6 +65,7 @@ flutter:
   assets:
     - assets/fonts/
     - assets/map_metadata/
+    - assets/maps/
 
   fonts:
     - family: Pretendard
