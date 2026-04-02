@@ -392,7 +392,7 @@ def compute_compound_score(
     if flat_valid.size == 0:
         return {"score": 0.0, "area": 0, "peak": 0.0, "mean": 0.0,
                 "cut": min_cut, "n_top": 0,
-                "bin_map": empty_masks[0], "best_comp_mask": empty_masks[1],"valid_count": 0,"all_comp_scores": [],}
+                "bin_map": empty_masks[0], "best_comp_mask": empty_masks[1]}
 
     n_top = max(1, int(np.ceil(flat_valid.size * top_p)))
     # 상위 n_top 값의 최솟값을 top_threshold로 삼아 binary map 생성
@@ -406,18 +406,9 @@ def compute_compound_score(
     bin_map = (masked >= cut).astype(np.uint8)  # (Hp, Wp)
 
     if bin_map.sum() == 0:
-        return {
-            "score": 0.0,
-            "area": 0,
-            "peak": peak,
-            "mean": 0.0,
-            "cut": cut,
-            "n_top": n_top,
-            "valid_count": int(flat_valid.size),
-            "bin_map": bin_map,
-            "best_comp_mask": empty_masks[1],
-            "all_comp_scores": [],
-        }
+        return {"score": 0.0, "area": 0, "peak": peak, "mean": 0.0,
+                "cut": cut, "n_top": n_top,
+                "bin_map": bin_map, "best_comp_mask": empty_masks[1]}
 
     # --- 8-connected component 라벨링 ---
     struct = np.ones((3, 3), dtype=np.int32)  # 8-방향 연결
@@ -479,7 +470,6 @@ def compute_compound_score(
         "valid_count"    : valid_count,     # 디버그용
         "bin_map"        : bin_map,         # cut 이상 전체 hot-zone
         "best_comp_mask" : best_comp_mask,  # 최고 score 1개 component
-        "valid_count": int(flat_valid.size),
         "all_comp_scores": all_comp_scores, # [component-level] 전체 component 목록
     }
 
@@ -2323,6 +2313,8 @@ def save_outputs(save_dir, q_crop, r_crop, dist_map, valid_mask):
 
 
 
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--place",  required=True, help="실험 장소명 (recv/{place}/bank, query 구조)")
@@ -2406,7 +2398,7 @@ def main():
 
     cc_backbone = build_local_backbone(backbone_name="resnet18_layer3",img_size=img_size,)
     verifier_backbone = build_local_backbone(
-    backbone_name="resnet18_layer2",   #
+    backbone_name="dinov2_vits14",   #
             img_size=224,
         )
 

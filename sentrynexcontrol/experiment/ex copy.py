@@ -392,7 +392,7 @@ def compute_compound_score(
     if flat_valid.size == 0:
         return {"score": 0.0, "area": 0, "peak": 0.0, "mean": 0.0,
                 "cut": min_cut, "n_top": 0,
-                "bin_map": empty_masks[0], "best_comp_mask": empty_masks[1],"valid_count": 0,"all_comp_scores": [],}
+                "bin_map": empty_masks[0], "best_comp_mask": empty_masks[1]}
 
     n_top = max(1, int(np.ceil(flat_valid.size * top_p)))
     # 상위 n_top 값의 최솟값을 top_threshold로 삼아 binary map 생성
@@ -406,18 +406,9 @@ def compute_compound_score(
     bin_map = (masked >= cut).astype(np.uint8)  # (Hp, Wp)
 
     if bin_map.sum() == 0:
-        return {
-            "score": 0.0,
-            "area": 0,
-            "peak": peak,
-            "mean": 0.0,
-            "cut": cut,
-            "n_top": n_top,
-            "valid_count": int(flat_valid.size),
-            "bin_map": bin_map,
-            "best_comp_mask": empty_masks[1],
-            "all_comp_scores": [],
-        }
+        return {"score": 0.0, "area": 0, "peak": peak, "mean": 0.0,
+                "cut": cut, "n_top": n_top,
+                "bin_map": bin_map, "best_comp_mask": empty_masks[1]}
 
     # --- 8-connected component 라벨링 ---
     struct = np.ones((3, 3), dtype=np.int32)  # 8-방향 연결
@@ -479,7 +470,6 @@ def compute_compound_score(
         "valid_count"    : valid_count,     # 디버그용
         "bin_map"        : bin_map,         # cut 이상 전체 hot-zone
         "best_comp_mask" : best_comp_mask,  # 최고 score 1개 component
-        "valid_count": int(flat_valid.size),
         "all_comp_scores": all_comp_scores, # [component-level] 전체 component 목록
     }
 
@@ -687,8 +677,9 @@ def score_one_pair(
     q_bgr: np.ndarray,   # 쿼리 이미지 (BGR)
     r_bgr: np.ndarray,   # 레퍼런스 이미지 (BGR)
     sg,                  # SuperGlueMatcher 인스턴스
-    backbone,         # CNN (layer3)
+    local_model,         # CNN (layer3)
     device: str,
+    local_tfm,           # CNN 전처리 transform
     radius: int = 1,
     top_p: float = 0.05,
     alpha: float = 0.6,
@@ -720,8 +711,10 @@ def score_one_pair(
         return None, {"reason": "crop_fail"}
 
     # 3) CNN feature 추출
-    q_feat, _ = backbone.extract_grid(q_crop, device)
-    r_feat, _ = backbone.extract_grid(r_crop, device)
+    q_t = local_tfm(BGR_to_RGB(q_crop))
+    r_t = local_tfm(BGR_to_RGB(r_crop))
+    q_feat, _ = extract_grid_layers(local_model, device, q_t)
+    r_feat, _ = extract_grid_layers(local_model, device, r_t)
 
     grid_h, grid_w = q_feat.shape[1], q_feat.shape[2]
     valid_mask = make_patch_valid_mask(mask_crop, grid_h, grid_w)  # (H, W) bool
@@ -775,9 +768,9 @@ def run_calibration(
     th_calib_dir: Path,
     out_dir: Path,
     sg,
-    cc_backbone,
-    verifier_backbone,
+    local_model,
     device: str,
+    local_tfm,
     cfg: dict,
     plc_idx: str = "",
     radius: int = 1,
@@ -860,7 +853,7 @@ def run_calibration(
                 continue
 
             score, debug = score_one_pair(
-                q_bgr, r_bgr, sg, cc_backbone, device,
+                q_bgr, r_bgr, sg, local_model, device, local_tfm,
                 radius=radius,
                 top_p=top_p,
                 alpha=alpha,
@@ -961,7 +954,7 @@ def run_calibration(
                 continue
 
             score, debug = score_one_pair(
-                q_bgr, r_bgr, sg, cc_backbone, device,
+                q_bgr, r_bgr, sg, local_model, device, local_tfm,
                 radius=radius,
                 top_p=top_p,
                 alpha=alpha,
@@ -992,21 +985,16 @@ def run_calibration(
         if len(all_comps) == 0:
             continue
 
-        roi_floor = 0.3 * compound_thr
-        roi_top_k = 5
+        alphas = [1.0, 0.95, 0.90]
+        flagged_comps = []
 
-        roi_comps = [
-            c for c in all_comps
-            if float(c.get("score", 0.0)) > roi_floor and int(c.get("area", 0)) >= 1
-        ]
-
-        roi_comps = sorted(
-            roi_comps,
-            key=lambda x: float(x.get("score", 0.0)),
-            reverse=True
-        )[:roi_top_k]
-
-        flagged_comps = roi_comps
+        for a in alphas:
+            thr_try = compound_thr * a
+            cur = [c for c in all_comps if float(c.get("score", 0.0)) > thr_try]
+            cur = sorted(cur, key=lambda x: float(x.get("score", 0.0)), reverse=True)
+            if len(cur) > 0:
+                flagged_comps = cur
+                break
 
         if len(flagged_comps) == 0:
             continue
@@ -1030,8 +1018,9 @@ def run_calibration(
             out = verify_bbox_with_local_search(
                 q_region=reg["q_region"],
                 r_region=reg["r_region"],
-                backbone=verifier_backbone,
+                model=local_model,
                 device=device,
+                transform=make_aligned_local_transform(img_size=224),
                 radius=1,
                 top_p=0.10,
             )
@@ -1335,8 +1324,9 @@ def make_top_p_mask(dist_map: np.ndarray, top_p: float = 0.10):
 def verify_bbox_with_local_search(
     q_region: np.ndarray,
     r_region: np.ndarray,
-    backbone,
+    model,
     device,
+    transform,
     radius: int = 1,
     top_p: float = 0.10,
 ):
@@ -1353,9 +1343,14 @@ def verify_bbox_with_local_search(
         "top_p": float,
     }
     """
+    q_pil = bgr_to_pil_rgb(q_region)
+    r_pil = bgr_to_pil_rgb(r_region)
 
-    q_feat, (Hf, Wf) = backbone.extract_grid(q_region, device)
-    r_feat, _ = backbone.extract_grid(r_region, device)
+    q_x = transform(q_pil)
+    r_x = transform(r_pil)
+
+    q_feat, (Hf, Wf) = extract_grid_layers(model, device, q_x)
+    r_feat, _ = extract_grid_layers(model, device, r_x)
 
     dist_map_t = compute_local_search_dist_map_from_feats(
         q_feat=q_feat,
@@ -1730,9 +1725,9 @@ def run_inference(
     query_dir: Path,
     out_dir: Path,
     sg,
-    cc_backbone,
-    verifier_backbone,
+    local_model,
     device: str,
+    local_tfm,
     cfg: dict,
     radius: int = 1,
     n_ref_candidates: int = 5,  # bank 중 몇 장과 매칭 시도할지 (min score 채택)
@@ -1829,7 +1824,7 @@ def run_inference(
                 continue
 
             score, debug = score_one_pair(
-                q_bgr, r_bgr, sg, cc_backbone, device,
+                q_bgr, r_bgr, sg, local_model, device, local_tfm,
                 radius=radius, top_p=top_p, alpha=alpha,
                 min_cut=min_cut, singleton_weight=sw,
                 component_min_area=cma,
@@ -1857,22 +1852,7 @@ def run_inference(
         # --- [component-level] 각 component를 threshold와 개별 비교 ---
         # 하나라도 threshold를 초과하는 component가 있으면 ANOMALY 후보
         all_comps = best_debug.get("all_comp_scores", [])
-
-        roi_floor = 0.3 * thr
-        roi_top_k = 5
-
-        roi_comps = [
-            c for c in all_comps
-            if float(c.get("score", 0.0)) > roi_floor and int(c.get("area", 0)) >= 1
-        ]
-
-        roi_comps = sorted(
-            roi_comps,
-            key=lambda x: float(x.get("score", 0.0)),
-            reverse=True
-        )[:roi_top_k]
-
-        flagged_comps = roi_comps
+        flagged_comps = [c for c in all_comps if c["score"] > thr]
 
         flagged_regions = build_flagged_component_regions(
             flagged_comps=flagged_comps,
@@ -1890,8 +1870,9 @@ def run_inference(
             out = verify_bbox_with_local_search(
                 q_region=reg["q_region"],
                 r_region=reg["r_region"],
-                backbone=verifier_backbone,
+                model=local_model,
                 device=device,
+                transform=make_aligned_local_transform(img_size=224),
                 radius=1,
                 top_p=0.10,
             )
@@ -2320,9 +2301,6 @@ def save_outputs(save_dir, q_crop, r_crop, dist_map, valid_mask):
     cv2.imwrite(str(save_dir / "overlay_q.png"), overlay_q)
     cv2.imwrite(str(save_dir / "r_crop.png"), r_crop)
 
-
-
-
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--place",  required=True, help="실험 장소명 (recv/{place}/bank, query 구조)")
@@ -2401,14 +2379,7 @@ def main():
             raise ValueError(f"알 수 없는 calib_method: {calib_method}")
 
     img_size  = int(cfg.get("embed", {}).get("img_size", 560))
-
-    from backbone_wrapper import build_local_backbone
-
-    cc_backbone = build_local_backbone(backbone_name="resnet18_layer3",img_size=img_size,)
-    verifier_backbone = build_local_backbone(
-    backbone_name="resnet18_layer2",   #
-            img_size=224,
-        )
+    local_tfm = make_aligned_local_transform(img_size)
 
     # DINO preselection 조건부 설정
     dino_model_inst = None
@@ -2429,7 +2400,7 @@ def main():
     )
     sg = SuperGlueMatcher(sg_cfg, device=device)
 
-
+    local_model, device = load_model(device=device)  # CNN layer3
 
     bank_dir     = Path(ROOT) / args.place / "bank"
     th_calib_dir = Path(ROOT) / args.place / "th_calib"  # 캘리브레이션용 정상 이미지
@@ -2457,9 +2428,9 @@ def main():
             th_calib_dir=th_calib_dir,
             out_dir=out_dir,
             sg=sg,
-            cc_backbone = cc_backbone,
-            verifier_backbone = verifier_backbone,
+            local_model=local_model,
             device=device,
+            local_tfm=local_tfm,
             cfg=cfg,
             plc_idx=args.place,
             radius=args.radius,
@@ -2506,9 +2477,9 @@ def main():
             query_dir=query_dir,
             out_dir=out_dir,
             sg=sg,
-            cc_backbone = cc_backbone,
-            verifier_backbone = verifier_backbone,
+            local_model=local_model,
             device=device,
+            local_tfm=local_tfm,
             cfg=cfg,
             radius=args.radius,
             n_ref_candidates=args.n_ref_candidates,
@@ -2529,6 +2500,398 @@ def main():
         )
         return
 
+    # --- vis 모드: 기존 시각화 (SAM 포함) ---
+    print(f"\n[MODE] VISUALIZATION  place={args.place}")
+
+    # vis 모드에서만 사용하는 추가 모델
+    local_model_layer2, _ = load_model(out_layer="layer2")
+    dino_img_size = 560   # 14의 배수여야 함 (560 = 14 * 40)
+    dino_tfm      = make_dino_transform(img_size=dino_img_size)
+    dino_model, _ = load_dino_model(device=device)
+
+    # SAM 모델 조건부 로드 (--sam_ckpt 인자가 있을 때만)
+    sam_gen = None
+    if args.sam_ckpt is not None:
+        ckpt = Path(args.sam_ckpt)
+        if not ckpt.exists():
+            print(f"[WARN] SAM 체크포인트 없음: {ckpt}. SAM 정제 스킵.")
+        else:
+            print(f"[INFO] SAM 로드: {ckpt}")
+            sam_gen = load_sam_model(
+                checkpoint_path=str(ckpt),
+                model_type=args.sam_model,
+                device=device,
+            )
+            print("[INFO] SAM 로드 완료")
+
+    ref_paths = list_images(bank_dir)
+    query_paths = list_images(query_dir)
+
+    if len(ref_paths) == 0:
+        raise RuntimeError(f"No bank images found: {bank_dir}")
+    if len(query_paths) == 0:
+        print(f"[Error] None query in {query_dir}")
+        return
+
+    # 평가 지표 수집용
+    eval_y_true = []
+    eval_y_pred = []
+
+    for q_path in query_paths:
+        print(f"[PROCESS] {q_path.name}")
+        q_bgr = cv2.imread(str(q_path))
+        if q_bgr is None:
+            print(f"[FAIL] read query image failed: {q_path}")
+            continue
+
+        case_dir = out_dir / q_path.stem
+        case_dir.mkdir(parents=True, exist_ok=True)
+
+        shuffled_refs = ref_paths.copy()
+        random.shuffle(shuffled_refs)
+
+        tried_log = []
+        success = False
+
+        for try_idx, ref_path in enumerate(shuffled_refs):
+            ref_bgr = cv2.imread(str(ref_path))
+            if ref_bgr is None:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "ref_read_fail",
+                })
+                continue
+
+            # 1) superglue matching + H estimation
+            try:
+                match_res = sg.match_and_estimate(q_bgr, ref_bgr)
+            except Exception as e:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "match_exception",
+                    "error": str(e),
+                })
+                continue
+
+            if not match_res.get("ok", False):
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "align_fail",
+                    "reason": match_res.get("reason", "unknown"),
+                })
+                continue
+
+            H = match_res["H"]
+            if H is None or not isinstance(H, np.ndarray) or H.shape != (3, 3):
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "invalid_h",
+                })
+                continue
+
+            H = H.astype(np.float64)
+            bank_hw = ref_bgr.shape[:2]
+
+            # 2) warp query -> bank
+            try:
+                warped_q, warped_mask = warp_query_to_bank(q_bgr, H, bank_hw)
+            except Exception as e:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "warp_exception",
+                    "error": str(e),
+                })
+                continue
+
+            # 3) crop safe common region
+            try:
+                q_crop, r_crop, mask_crop, bbox = crop_common_safe_region(
+                    warped_q,
+                    ref_bgr,
+                    warped_mask,
+                )
+            except Exception as e:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "crop_exception",
+                    "error": str(e),
+                })
+                continue
+
+            if q_crop is None or r_crop is None or mask_crop is None:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "crop_fail",
+                })
+                continue
+
+            # 4) 조명 정규화 (히스토그램 매칭) 제거됨
+
+            # 5) local CNN feature
+            try:
+                q_crop_rgb = BGR_to_RGB(q_crop)  # 원본 query 바로 사용
+                q_crop_t = local_tfm(q_crop_rgb)
+                r_crop_rgb = BGR_to_RGB(r_crop)
+                r_crop_t = local_tfm(r_crop_rgb)
+
+                q_feat, _ = extract_grid_layers(local_model, device, q_crop_t)
+                r_feat, _ = extract_grid_layers(local_model, device, r_crop_t)
+
+                q_feat__, _ = extract_grid_layers(local_model_layer2, device, q_crop_t)
+                r_feat__, _ = extract_grid_layers(local_model_layer2, device, r_crop_t)
+
+                # ---------- DINOv2 patch token feature ----------
+                # cnn_emb와 동일한 transform이 아닌 dino_tfm 사용
+                # (입력 크기가 14의 배수여야 하기 때문)
+                q_dino_t = dino_tfm(q_crop_rgb)
+                r_dino_t = dino_tfm(r_crop_rgb)
+
+                # n_last_blocks=4: 마지막 4개 블록 평균
+                # → 최종 레이어보다 local texture 정보를 더 많이 포함
+                q_dino_feat, _ = extract_dino_grid(dino_model, device, q_dino_t, n_last_blocks=4)
+                r_dino_feat, _ = extract_dino_grid(dino_model, device, r_dino_t, n_last_blocks=4)
+
+            except Exception as e:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "feature_exception",
+                    "error": str(e),
+                })
+                continue
+
+            # 5) valid patch mask
+            try:
+                grid_h2, grid_w2 = q_feat__.shape[1], q_feat__.shape[2]
+                valid_mask2 = make_patch_valid_mask(mask_crop, grid_h2, grid_w2)
+
+                grid_h3, grid_w3 = q_feat.shape[1], q_feat.shape[2]
+                valid_mask3 = make_patch_valid_mask(mask_crop, grid_h3, grid_w3)
+
+                # DINOv2 grid (40x40 for img_size=560)
+                grid_hd, grid_wd = q_dino_feat.shape[1], q_dino_feat.shape[2]
+                valid_mask_dino = make_patch_valid_mask(mask_crop, grid_hd, grid_wd)
+            except Exception as e:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "valid_mask_exception",
+                    "error": str(e),
+                })
+                continue
+
+            valid_count = int(valid_mask2.sum())
+            if valid_count < 10:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "too_few_valid_patch",
+                    "valid_count": int(valid_count),
+                })
+                continue
+            valid_count = int(valid_mask3.sum())
+            if valid_count < 10:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "too_few_valid_patch",
+                    "valid_count": int(valid_count),
+                })
+                continue
+
+            # 6) local radius search dist map
+            try:
+                dist_map = compute_dist_map_local_search(
+                    q_feat,
+                    r_feat,
+                    valid_mask=valid_mask3,
+                    radius=args.radius,
+                )
+                dist_map__ = compute_dist_map_local_search(
+                    q_feat__,
+                    r_feat__,
+                    valid_mask=valid_mask2,
+                    radius=args.radius,
+                )
+
+                # DINOv2 기반 dist map
+                dist_map_dino = compute_dist_map_local_search(
+                    q_dino_feat,
+                    r_dino_feat,
+                    valid_mask=valid_mask_dino,
+                    radius=args.radius,
+                )
+
+            except Exception as e:
+                tried_log.append({
+                    "try_idx": int(try_idx),
+                    "ref_path": str(ref_path),
+                    "status": "dist_exception",
+                    "error": str(e),
+                })
+                continue
+
+            # 7) save
+            save_named_outputs(case_dir, q_crop, r_crop, dist_map,      valid_mask3,     prefix="layer3")
+            save_named_outputs(case_dir, q_crop, r_crop, dist_map__,    valid_mask2,     prefix="layer2")
+            save_named_outputs(case_dir, q_crop, r_crop, dist_map_dino, valid_mask_dino, prefix="dino")
+            # 원본 q_crop 저장
+            cv2.imwrite(str(case_dir / "q_crop.png"), q_crop)
+            cv2.imwrite(str(case_dir / "r_crop.png"), r_crop)
+
+            # 8) SAM 경계 정제 (--sam_ckpt 인자가 있고 로드 성공한 경우만)
+            # ZeroSCD 방식: dist_map(coarse) → SAM 세그먼트 검증 → binary mask
+            if sam_gen is not None:
+                try:
+                    # SAM은 RGB uint8 입력 필요
+                    q_rgb_for_sam = cv2.cvtColor(q_crop, cv2.COLOR_BGR2RGB)
+                    r_rgb_for_sam = cv2.cvtColor(r_crop,     cv2.COLOR_BGR2RGB)
+
+                    sam_result = refine_with_sam(
+                        q_crop_rgb=q_rgb_for_sam,
+                        r_crop_rgb=r_rgb_for_sam,
+                        dist_map=dist_map,        # ResNet layer3 dist를 coarse map으로 사용
+                        predictor=sam_gen,
+                        top_p=args.sam_top_p,
+                        abs_floor=args.sam_abs_floor,
+                        peak_alpha=args.sam_peak_alpha,
+                        min_blob_peak=args.sam_min_blob_peak,
+                        min_blob_mean=args.sam_min_blob_mean,
+                        dv_iou_thresh=args.sam_dv_iou_thresh,
+                    )
+                    # 추가: SAM 결과 로깅 (리포트용)
+                    sam_blobs = sam_result["num_blobs"]
+                    sam_confirmed = sam_result["num_confirmed_blobs"]
+                    print(f"  [SAM] blobs={sam_blobs} confirmed={sam_confirmed} (adaptive_th={sam_result['adaptive_threshold']:.3f})")
+
+                    save_sam_outputs(case_dir, q_crop, r_crop, sam_result)
+
+                    sam_meta = {
+                        "sam_blobs": sam_blobs,
+                        "sam_confirmed": sam_confirmed,
+                        "sam_adaptive_threshold": float(sam_result["adaptive_threshold"]),
+                        "is_anomaly": bool(sam_confirmed > 0)
+                    }
+
+                except Exception as e:
+                    print(f"  [SAM WARN] 정제 실패: {e}")
+                    sam_meta = {"is_anomaly": False}
+            else:
+                sam_meta = {"is_anomaly": False}
+
+            # 매칭 결과 메타데이터 저장
+            meta = {
+                "query_path": str(q_path),
+                "selected_ref_path": str(ref_path),
+                "bbox": [int(v) for v in bbox] if bbox is not None else None,
+                "valid_count": int(valid_count),
+                "dist_min": float(dist_map.min()),
+                "dist_max": float(dist_map.max()),
+                "dist_mean": float(dist_map.mean()),
+                "try_idx": int(try_idx),
+                "radius": int(args.radius),
+                "match_info": {
+                    "inliers": int(match_res.get("inliers", 0)),
+                    "inlier_ratio": float(match_res.get("inlier_ratio", 0.0)),
+                    "reproj_error_mean": float(match_res.get("reproj_error_mean", 0.0)),
+                    "reproj_error_median": float(match_res.get("reproj_error_median", 0.0)),
+                    "num_matches": int(match_res.get("num_matches", 0)),
+                },
+            }
+            meta.update(sam_meta)  # SAM 정보 병합
+            
+            with open(case_dir / "meta.json", "w", encoding="utf-8") as f:
+                json.dump(meta, f, ensure_ascii=False, indent=2)
+
+            tried_log.append({
+                "try_idx": int(try_idx),
+                "ref_path": str(ref_path),
+                "status": "success",
+                "valid_count": int(valid_count),
+                "inliers": int(match_res.get("inliers", 0)),
+                "inlier_ratio": float(match_res.get("inlier_ratio", 0.0)),
+                "reproj_error_mean": float(match_res.get("reproj_error_mean", 0.0)),
+            })
+
+            # 성공 → ref 루프 탈출
+            success = True
+            
+            # Ground Truth 확인 (파일명 기반)
+            is_abnormal = q_path.name.startswith("abnormal_")
+            is_pred_abnormal = sam_meta.get("is_anomaly", False)
+            
+            eval_y_true.append(1 if is_abnormal else 0)
+            eval_y_pred.append(1 if is_pred_abnormal else 0)
+            
+            print(
+                f"[OK] {q_path.name} <- {Path(ref_path).name} "
+                f"(try={try_idx}, inliers={match_res.get('inliers', 0)}, "
+                f"reproj={match_res.get('reproj_error_mean', 0.0):.3f})"
+            )
+            break
+
+        # ref 후보 전체 시도 결과 로그 저장
+        with open(case_dir / "candidate_log.json", "w", encoding="utf-8") as f:
+            json.dump(tried_log, f, ensure_ascii=False, indent=2)
+
+        if not success:
+            print(f"[FAIL] {q_path.name}")
+            # 실패한 경우도 평가에 반영 (정상을 예측하지 못한 것으로 간주 FN or TN)
+            is_abnormal = q_path.name.startswith("abnormal_")
+            eval_y_true.append(1 if is_abnormal else 0)
+            eval_y_pred.append(0) # 탐지 실패 = 정상 판정
+
+    # 평가 지표 출력
+    if len(eval_y_true) > 0:
+        print(f"\n[Done] place={args.place} queries: {len(query_paths)} 처리 완료.")
+        y_t = np.array(eval_y_true)
+        y_p = np.array(eval_y_pred)
+        
+        tp = int(np.sum((y_t == 1) & (y_p == 1)))
+        tn = int(np.sum((y_t == 0) & (y_p == 0)))
+        fp = int(np.sum((y_t == 0) & (y_p == 1)))
+        fn = int(np.sum((y_t == 1) & (y_p == 0)))
+        
+        acc = (tp + tn) / len(y_t)
+        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+        
+        print("\n" + "="*40)
+        print(f" [Evaluation Report] Place: {args.place}")
+        print("="*40)
+        print(f" Total Image: {len(y_t)}")
+        print(f"  - Actual Anomaly : {np.sum(y_t == 1)}")
+        print(f"  - Actual Normal  : {np.sum(y_t == 0)}")
+        print("-" * 40)
+        print(" [Confusion Matrix]")
+        print(f"             | Pred: Normal | Pred: Anomaly")
+        print(f" Actual: N   | TN: {tn:<8} | FP: {fp:<8}")
+        print(f" Actual: A   | FN: {fn:<8} | TP: {tp:<8}")
+        print("-" * 40)
+        print(f" Accuracy  : {acc:.4f}")
+        print(f" Precision : {precision:.4f}")
+        print(f" Recall    : {recall:.4f}")
+        print(f" F1 Score  : {f1:.4f}")
+        print("="*40 + "\n")
+        
+        # 파일로도 저장
+        with open(out_dir / "evaluation_report.txt", "w") as f:
+            f.write(f"Place: {args.place}\n")
+            f.write(f"Total Image: {len(y_t)}\n")
+            f.write(f"TN: {tn}, FP: {fp}\n")
+            f.write(f"FN: {fn}, TP: {tp}\n")
+            f.write(f"Accuracy: {acc:.4f}\n")
+            f.write(f"Precision: {precision:.4f}\n")
+            f.write(f"Recall: {recall:.4f}\n")
+            f.write(f"F1: {f1:.4f}\n")
 
 if __name__ == "__main__":
     main()
