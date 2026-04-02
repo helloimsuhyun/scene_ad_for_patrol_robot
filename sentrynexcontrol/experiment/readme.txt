@@ -12,7 +12,7 @@ python3 ex.py \
 
 
 python3 ex.py \
-  --place 00 \
+  --place 06 \
   --mode infer \
   --radius 1 \
   --n_ref_candidates 3 \
