@@ -17,7 +17,11 @@ from webrtc_sender import WebRTCSender
 # ==============================================================
 # 설정
 # ==============================================================
+<<<<<<< HEAD
 DESKTOP_IP = "127.0.0.1"
+=======
+DESKTOP_IP = "192.168.0.24"
+>>>>>>> ant_branch
 
 VISION_SERVER_URL = f"http://{DESKTOP_IP}:8000"
 SIGNALING_SERVER_URL = f"http://{DESKTOP_IP}:8001"

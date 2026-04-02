@@ -40,13 +40,8 @@ class ControlScreen extends ConsumerWidget {
                       backgroundColor: const Color(0xFF1F8CEB),
                       foregroundColor: Colors.white,
                       elevation: 0,
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 20,
-                        vertical: 16,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -67,15 +62,10 @@ class ControlScreen extends ConsumerWidget {
                     style: OutlinedButton.styleFrom(
                       side: const BorderSide(
                         color: Color(0xFFFF4B5C),
-                        width: 1.5,
+                        width: 1.0,
                       ),
-                      padding: const EdgeInsets.symmetric(
-                        horizontal: 20,
-                        vertical: 16,
-                      ),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(8),
-                      ),
+                      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(4)),
                     ),
                   ),
                 ],
@@ -90,7 +80,6 @@ class ControlScreen extends ConsumerWidget {
               width: double.infinity,
               decoration: BoxDecoration(
                 color: const Color(0xFF181924),
-                borderRadius: BorderRadius.circular(16),
                 border: Border.all(color: const Color(0xFF2D3041)),
               ),
               child: placesAsync.when(
@@ -123,26 +112,35 @@ class ControlScreen extends ConsumerWidget {
                               ),
                               dividerThickness: 0.5,
                               horizontalMargin: 24,
-                              columnSpacing: 40,
+                              columnSpacing: 24, // reduced spacing a bit so it fits better
+                              dataRowMaxHeight: 64, // taller rows to fit content comfortably
                               headingTextStyle: const TextStyle(
                                 color: Color(0xFFB5BAD3),
                                 fontWeight: FontWeight.bold,
-                                fontSize: 14,
+                                fontSize: 13,
                               ),
                               dataTextStyle: const TextStyle(
                                 color: Colors.white70,
                                 fontSize: 13,
                               ),
                               columns: const [
-                                DataColumn(label: Text('구역 (Place)')),
+                                DataColumn(label: Text('순서')),
+                                DataColumn(label: Text('구역명 (Name)')),
+                                DataColumn(label: Text('구역 ID')),
+                                DataColumn(label: Text('순찰 (Patrol)')),
                                 DataColumn(label: Text('모드 (Mode)')),
                                 DataColumn(label: Text('뱅크 (Bank)')),
                                 DataColumn(label: Text('임계 카운트')),
                                 DataColumn(label: Text('재학습 필요')),
                                 DataColumn(label: Text('관리 기능')),
                               ],
-                              rows: places.map((p) {
+                              rows: places.asMap().entries.map((entry) {
+                                final int index = entry.key;
+                                final p = entry.value;
                                 final placeId = p['place_id'].toString();
+                                final displayName = p['display_name']?.toString() ?? placeId;
+                                final patrolEnabled = p['patrol_enabled'] == 1 || p['patrol_enabled'] == true;
+                                final patrolOrder = p['patrol_order'] ?? 0;
                                 final mode = p['mode'].toString();
                                 final bankCount = p['bank_count'];
                                 final bankTarget = p['bank_target'];
@@ -153,13 +151,95 @@ class ControlScreen extends ConsumerWidget {
 
                                 return DataRow(
                                   cells: [
+                                    // 순서
                                     DataCell(
-                                      Text(
-                                        placeId,
-                                        style: const TextStyle(
-                                          fontWeight: FontWeight.bold,
-                                          color: Colors.white,
-                                        ),
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          SizedBox(
+                                            width: 20,
+                                            child: Text('$patrolOrder', style: const TextStyle(fontWeight: FontWeight.bold, color: Colors.white70)),
+                                          ),
+                                          const SizedBox(width: 8),
+                                          Column(
+                                            mainAxisSize: MainAxisSize.min,
+                                            children: [
+                                              InkWell(
+                                                onTap: index > 0 ? () {
+                                                  final newOrder = List<String>.from(places.map((e) => e['place_id'].toString()));
+                                                  final temp = newOrder[index];
+                                                  newOrder[index] = newOrder[index - 1];
+                                                  newOrder[index - 1] = temp;
+                                                  ControlActions.reorderPatrol(ref, newOrder);
+                                                } : null,
+                                                child: Icon(Icons.arrow_drop_up, size: 20, color: index > 0 ? Colors.white : Colors.white24),
+                                              ),
+                                              InkWell(
+                                                onTap: index < places.length - 1 ? () {
+                                                  final newOrder = List<String>.from(places.map((e) => e['place_id'].toString()));
+                                                  final temp = newOrder[index];
+                                                  newOrder[index] = newOrder[index + 1];
+                                                  newOrder[index + 1] = temp;
+                                                  ControlActions.reorderPatrol(ref, newOrder);
+                                                } : null,
+                                                child: Icon(Icons.arrow_drop_down, size: 20, color: index < places.length - 1 ? Colors.white : Colors.white24),
+                                              ),
+                                            ],
+                                          )
+                                        ],
+                                      ),
+                                    ),
+                                    // 구역명 편집
+                                    DataCell(
+                                      Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          Text(displayName, style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+                                          const SizedBox(width: 6),
+                                          InkWell(
+                                            onTap: () {
+                                               showDialog(context: context, builder: (ctx) {
+                                                  final ctrl = TextEditingController(text: displayName);
+                                                  return AlertDialog(
+                                                    backgroundColor: const Color(0xFF1C1E2B),
+                                                    title: const Text('구역명 변경', style: TextStyle(color: Colors.white)),
+                                                    content: TextField(
+                                                      controller: ctrl,
+                                                      style: const TextStyle(color: Colors.white),
+                                                      decoration: const InputDecoration(
+                                                        enabledBorder: UnderlineInputBorder(borderSide: BorderSide(color: Colors.white24)),
+                                                        focusedBorder: UnderlineInputBorder(borderSide: BorderSide(color: Color(0xFF7F7CFF))),
+                                                      ),
+                                                    ),
+                                                    actions: [
+                                                      TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.white70))),
+                                                      ElevatedButton(
+                                                        style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7F7CFF)),
+                                                        onPressed: () {
+                                                          ControlActions.updateDisplayName(ref, placeId, ctrl.text);
+                                                          Navigator.pop(ctx);
+                                                        }, 
+                                                        child: const Text('저장', style: TextStyle(color: Colors.white)))
+                                                    ],
+                                                  );
+                                               });
+                                            },
+                                            child: const Icon(Icons.edit, size: 14, color: Colors.white54),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                    // 구역 ID
+                                    DataCell(Text(placeId, style: const TextStyle(color: Colors.white54, fontSize: 11))),
+                                    // 순찰 스위치
+                                    DataCell(
+                                      Switch(
+                                        value: patrolEnabled,
+                                        activeColor: const Color(0xFF4ADE80),
+                                        inactiveThumbColor: Colors.white54,
+                                        onChanged: (val) {
+                                          ControlActions.updatePatrolEnabled(ref, placeId, val);
+                                        },
                                       ),
                                     ),
                                     DataCell(

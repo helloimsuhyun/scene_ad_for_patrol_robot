@@ -45,7 +45,7 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
       final pc = await createPeerConnection({
         'iceServers': [
           {'urls': 'stun:stun.l.google.com:19302'},
-        ]
+        ],
       });
       _peerConnection = pc;
 
@@ -60,7 +60,8 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
       // 연결 끊어지면 상태를 idle로 복귀
       pc.onConnectionState = (state) {
         if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
-            state == RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
+            state ==
+                RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
           if (mounted) setState(() => _status = _Status.idle);
         }
       };
@@ -92,7 +93,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
         answerJson['type'],
       );
       await pc.setRemoteDescription(answer);
-
     } catch (e) {
       debugPrint('[WebRTC] Error: $e');
       if (mounted) setState(() => _status = _Status.error);
@@ -123,7 +123,11 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
           //---------- 카메라 헤더 ----------
           Row(
             children: [
-              const Icon(Icons.videocam_outlined, size: 14, color: Color(0xFFB5BAD3)),
+              const Icon(
+                Icons.videocam_outlined,
+                size: 14,
+                color: Color(0xFFB5BAD3),
+              ),
               const SizedBox(width: 6),
               const Expanded(
                 child: Text(
@@ -139,7 +143,11 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
               IconButton(
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
-                icon: const Icon(Icons.fullscreen, size: 20, color: Color(0xFFB5BAD3)),
+                icon: const Icon(
+                  Icons.fullscreen,
+                  size: 20,
+                  color: Color(0xFFB5BAD3),
+                ),
                 onPressed: () => _showFullScreen(context),
               ),
               const SizedBox(width: 8),
@@ -161,10 +169,7 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
           const SizedBox(height: 10),
 
           //---------- 연결 / 끊기 버튼 ----------
-          SizedBox(
-            width: double.infinity,
-            child: _buildConnectButton(),
-          ),
+          SizedBox(width: double.infinity, child: _buildConnectButton()),
         ],
       ),
     );
@@ -225,13 +230,18 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
           ? const SizedBox(
               width: 14,
               height: 14,
-              child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white54),
+              child: CircularProgressIndicator(
+                strokeWidth: 2,
+                color: Colors.white54,
+              ),
             )
           : Text(
               isIdle ? '연결하기' : '끊기',
               style: TextStyle(
                 fontSize: 12,
-                color: isIdle ? const Color(0xFF1F8CEB) : const Color(0xFFEF4444),
+                color: isIdle
+                    ? const Color(0xFF1F8CEB)
+                    : const Color(0xFFEF4444),
               ),
             ),
     );
@@ -248,6 +258,19 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
         return '스트리밍 중';
       case _Status.error:
         return '연결 실패\n로봇 송신기 확인 후 재시도';
+    }
+  }
+
+  String _statusLabel2() {
+    switch (_status) {
+      case _Status.idle:
+        return '';
+      case _Status.connecting:
+        return '';
+      case _Status.connected:
+        return '실시간 로봇 카메라 송신 중';
+      case _Status.error:
+        return '';
     }
   }
 
@@ -271,7 +294,11 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
                 Align(
                   alignment: Alignment.topRight,
                   child: IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white, size: 30),
+                    icon: const Icon(
+                      Icons.close,
+                      color: Colors.white,
+                      size: 30,
+                    ),
                     onPressed: () => Navigator.pop(context),
                   ),
                 ),
@@ -289,9 +316,13 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
                   ),
                 ),
                 const SizedBox(height: 20),
-                const Text(
-                  '실시간 로봇 카메라 송신 중',
-                  style: TextStyle(color: Colors.white70, fontSize: 16, decoration: TextDecoration.none),
+                Text(
+                  _statusLabel2(),
+                  style: const TextStyle(
+                    color: Color(0xFF7F7CFF),
+                    fontSize: 16,
+                    decoration: TextDecoration.none,
+                  ),
                 ),
               ],
             ),

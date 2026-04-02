@@ -408,7 +408,6 @@ async def get_place(place_id: str):
         "place": place,
     }
 
-
 # GUI에서 place mode 변경 (bank / th_calib / query)
 @app.post("/places/{place_id}/config")
 async def set_place_config(
@@ -960,7 +959,6 @@ async def get_robot_command():
 #========================================================================================= audio endpoint
 # ----------------------------------------------------------------오디오 이벤트 endpoint
 # 오디오 이벤트를 받고, db에 넣는 endpoint
-
 @app.post("/upload_audio")
 async def upload_audio_event(
     file: UploadFile = File(...),

@@ -67,4 +67,6 @@ build/
 *.log
 chrome-device/
 SuperGluePretrainedNetwork/
-debug_out/
+debug_out/.dart_tool/
+build/
+*.log

@@ -33,6 +33,36 @@ def connect_db(db_path: Union[str, Path]) -> sqlite3.Connection:
 # db생성, 이미 있으면 무시하고 없으면 만들기
 def init_db(db: sqlite3.Connection) -> None:
     cur = db.cursor()
+    
+    # ----------------------------------------------------
+    # 자동 마이그레이션 (schema update)
+    # ----------------------------------------------------
+    
+    # 1. events 테이블 마이그레이션
+    try:
+        cur.execute("SELECT admin_checked FROM events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE events ADD COLUMN admin_checked INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE events ADD COLUMN admin_label TEXT")
+        except:
+            pass
+
+    # 2. places 테이블 마이그레이션
+    try:
+        cur.execute("SELECT is_active FROM places LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE places ADD COLUMN display_name TEXT")
+            cur.execute("ALTER TABLE places ADD COLUMN x REAL")
+            cur.execute("ALTER TABLE places ADD COLUMN y REAL")
+            cur.execute("ALTER TABLE places ADD COLUMN yaw REAL")
+            cur.execute("ALTER TABLE places ADD COLUMN patrol_enabled INTEGER NOT NULL DEFAULT 1")
+            cur.execute("ALTER TABLE places ADD COLUMN patrol_order INTEGER NOT NULL DEFAULT 0")
+            cur.execute("ALTER TABLE places ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
+        except:
+            pass
+
     cur.executescript(
         """
         -- =========================
@@ -353,6 +383,18 @@ def ensure_place(db, place_id: str, display_name: Optional[str] = None):
         VALUES (?, ?, 1, 1, 'idle', 1, ?)
     """, (str(place_id), display_name or str(place_id), now))
     db.commit()
+
+# 새 장소 추가 (프론트 맵 클릭 생성용)
+def create_place(db, place_id: str, display_name: str, x: float, y: float, yaw: float, patrol_enabled: int = 0):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO places
+        (place_id, display_name, x, y, yaw, patrol_enabled, is_active, mode, need_calibration, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, 1, 'idle', 1, ?)
+    """, (str(place_id), display_name, x, y, yaw, patrol_enabled, now))
+    db.commit()
+    return get_place(db, place_id)
 
 
 # 특정 place 상태 조회 
