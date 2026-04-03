@@ -51,6 +51,8 @@ pip-log.txt
 *.mp4
 *.avi
 
+/SuperGluePretrainedNetwork
+
 # --- IDE & OS ---
 .idea/
 .vscode/
