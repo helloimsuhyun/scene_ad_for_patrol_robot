@@ -5,7 +5,7 @@
     "global_mode": "patch_mean"
   },
   "repr": {
-    "repr_mode": "global_patch_with_aligned"
+    "repr_mode": "global_patch"
   },
     "patchcore": {
     "top_p": 0.05,
