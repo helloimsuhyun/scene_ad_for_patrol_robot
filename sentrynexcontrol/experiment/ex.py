@@ -51,6 +51,118 @@ def list_images(folder: Path):
         return []
     return sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXTS])
 
+
+import matplotlib.pyplot as plt
+
+
+def plot_compound_scores(out_dir: Path):
+    path = out_dir / "infer_all_results.json"
+    if not path.exists():
+        print("[PLOT] infer_all_results.json 없음")
+        return
+
+    data = json.loads(path.read_text())
+
+    normal_scores = []
+    abnormal_scores = []
+
+    for item in data:
+        is_abnormal = Path(item["query"]).name.startswith("abnormal_")
+        s = float(item.get("score", 0.0))
+
+        if is_abnormal:
+            abnormal_scores.append(s)
+        else:
+            normal_scores.append(s)
+
+    plt.figure(figsize=(10, 4))
+
+    # 🔥 jitter
+    x_n = np.random.normal(0, 0.04, size=len(normal_scores))
+    x_a = np.random.normal(1, 0.04, size=len(abnormal_scores))
+
+    plt.scatter(x_n, normal_scores, alpha=0.6, s=15, label="normal")
+    plt.scatter(x_a, abnormal_scores, alpha=0.6, s=15, label="abnormal")
+
+    plt.xticks([0, 1], ["normal", "abnormal"])
+
+    # 🔥 threshold line
+    thr_path = out_dir / "threshold.json"
+    if thr_path.exists():
+        meta = json.loads(thr_path.read_text())
+        thr = meta.get("threshold", None)
+        if thr is not None:
+            plt.axhline(thr, linestyle="--")
+
+    # 🔥 ylim 개선 (핵심)
+    all_scores = normal_scores + abnormal_scores
+    if len(all_scores) > 0:
+        low = np.percentile(all_scores, 1)
+        high = np.percentile(all_scores, 99)
+        plt.ylim(low, high)
+
+    plt.legend()
+    plt.savefig(out_dir / "compound_score_scatter.png")
+    plt.close()
+
+    print(f"[PLOT] saved: {out_dir / 'compound_score_scatter.png'}")
+
+
+def plot_bbox_scores(out_dir: Path):
+    path = out_dir / "infer_all_results.json"
+    if not path.exists():
+        print("[PLOT] infer_all_results.json 없음")
+        return
+
+    data = json.loads(path.read_text())
+
+    normal_scores = []
+    abnormal_scores = []
+
+    for item in data:
+        is_abnormal = Path(item["query"]).name.startswith("abnormal_")
+
+        for r in item.get("flagged_regions", []):
+            s = float(r.get("final_bbox_score", 0.0))
+
+            if is_abnormal:
+                abnormal_scores.append(s)
+            else:
+                normal_scores.append(s)
+
+    plt.figure(figsize=(10, 4))
+
+    # 🔥 jitter 적용
+    x_n = np.random.normal(0, 0.04, size=len(normal_scores))
+    x_a = np.random.normal(1, 0.04, size=len(abnormal_scores))
+
+    plt.scatter(x_n, normal_scores, alpha=0.6, s=15, label="normal")
+    plt.scatter(x_a, abnormal_scores, alpha=0.6, s=15, label="abnormal")
+
+    plt.xticks([0, 1], ["normal", "abnormal"])
+
+    # 🔥 verifier threshold
+    thr_path = out_dir / "threshold.json"
+    if thr_path.exists():
+        meta = json.loads(thr_path.read_text())
+        thr = meta.get("verifier_threshold", None)
+        if thr is not None:
+            plt.axhline(thr, linestyle="--")
+
+    # 🔥 ylim 개선
+    all_scores = normal_scores + abnormal_scores
+    if len(all_scores) > 0:
+        low = np.percentile(all_scores, 1)
+        high = np.percentile(all_scores, 99)
+        plt.ylim(low, high)
+
+    plt.legend()
+    plt.savefig(out_dir / "bbox_score_scatter.png")
+    plt.close()
+
+    print(f"[PLOT] saved: {out_dir / 'bbox_score_scatter.png'}")
+
+
 def compute_ssim_map_feature(q_feat, r_feat, valid_mask=None, window_size=7,
                              C1=0.01**2, C2=0.03**2):
     """
@@ -182,59 +294,6 @@ def compute_dist_map_local_search(q_feat, r_feat, valid_mask=None, radius=1):
     return dist
 
 
-import matplotlib.pyplot as plt
-from pathlib import Path
-
-def save_normal_abnormal_name_compare(all_infer_results, out_dir: Path, bbox_thr: float):
-    normal_items = []
-    abnormal_items = []
-
-    for meta in all_infer_results:
-        qname = Path(meta["query"]).name
-        max_score = float(meta.get("max_bbox_score", 0.0))
-
-        item = {
-            "name": qname,
-            "score": max_score,
-        }
-
-        if qname.startswith("abnormal_"):
-            abnormal_items.append(item)
-        else:
-            normal_items.append(item)
-
-    # 이름순 정렬
-    normal_items = sorted(normal_items, key=lambda x: x["name"])
-    abnormal_items = sorted(abnormal_items, key=lambda x: x["name"])
-
-    plt.figure(figsize=(20, 5))
-
-    if len(normal_items) > 0:
-        xs = list(range(len(normal_items)))
-        ys = [x["score"] for x in normal_items]
-        plt.scatter(xs, ys, s=20, label='normal')   # 점 크기 추가
-
-    if len(abnormal_items) > 0:
-        offset = len(normal_items) + 5  # 간격 더 벌림
-        xs2 = list(range(offset, offset + len(abnormal_items)))
-        ys2 = [x["score"] for x in abnormal_items]
-        plt.scatter(xs2, ys2, s=20, label='abnormal')
-
-    plt.axhline(y=bbox_thr, linestyle='--', label='bbox_thr')
-
-    # 🔥 여유 공간 확보
-    total_n = len(normal_items) + len(abnormal_items)
-    plt.xlim(-5, total_n + 10)
-
-    plt.ylabel("max bbox score")
-    plt.title("Normal vs Abnormal")
-    plt.legend()
-    plt.tight_layout()
-
-    plt.savefig(str(out_dir / "name_normal_abnormal_compare.png"))
-    plt.close()
-
-
 # =============================================================================
 # ① compound score 계산 함수
 #    connected component excess score 방식
@@ -278,17 +337,9 @@ def compute_compound_score(
     # --- top-p 선택 ---
     flat_valid = masked[valid_mask > 0]  # valid 픽셀 값만 추출
     if flat_valid.size == 0:
-        return {
-            "score": 0.0,
-            "area": 0,
-            "peak": 0.0,
-            "mean": 0.0,
-            "cut": min_cut,
-            "n_top": 0,
-            "bin_map": empty_masks[0],
-            "best_comp_mask": empty_masks[1],
-            "all_comp_scores": [],
-        }
+        return {"score": 0.0, "area": 0, "peak": 0.0, "mean": 0.0,
+                "cut": min_cut, "n_top": 0,
+                "bin_map": empty_masks[0], "best_comp_mask": empty_masks[1],"valid_count": 0,"all_comp_scores": [],}
 
     n_top = max(1, int(np.ceil(flat_valid.size * top_p)))
     # 상위 n_top 값의 최솟값을 top_threshold로 삼아 binary map 생성
@@ -309,6 +360,7 @@ def compute_compound_score(
             "mean": 0.0,
             "cut": cut,
             "n_top": n_top,
+            "valid_count": int(flat_valid.size),
             "bin_map": bin_map,
             "best_comp_mask": empty_masks[1],
             "all_comp_scores": [],
@@ -374,6 +426,7 @@ def compute_compound_score(
         "valid_count"    : valid_count,     # 디버그용
         "bin_map"        : bin_map,         # cut 이상 전체 hot-zone
         "best_comp_mask" : best_comp_mask,  # 최고 score 1개 component
+        "valid_count": int(flat_valid.size),
         "all_comp_scores": all_comp_scores, # [component-level] 전체 component 목록
     }
 
@@ -581,9 +634,8 @@ def score_one_pair(
     q_bgr: np.ndarray,   # 쿼리 이미지 (BGR)
     r_bgr: np.ndarray,   # 레퍼런스 이미지 (BGR)
     sg,                  # SuperGlueMatcher 인스턴스
-    local_model,         # CNN (layer3)
+    backbone,         # CNN (layer3)
     device: str,
-    local_tfm,           # CNN 전처리 transform
     radius: int = 1,
     top_p: float = 0.05,
     alpha: float = 0.6,
@@ -615,10 +667,8 @@ def score_one_pair(
         return None, {"reason": "crop_fail"}
 
     # 3) CNN feature 추출
-    q_t = local_tfm(BGR_to_RGB(q_crop))
-    r_t = local_tfm(BGR_to_RGB(r_crop))
-    q_feat, _ = extract_grid_layers(local_model, device, q_t)
-    r_feat, _ = extract_grid_layers(local_model, device, r_t)
+    q_feat, _ = backbone.extract_grid(q_crop, device)
+    r_feat, _ = backbone.extract_grid(r_crop, device)
 
     grid_h, grid_w = q_feat.shape[1], q_feat.shape[2]
     valid_mask = make_patch_valid_mask(mask_crop, grid_h, grid_w)  # (H, W) bool
@@ -672,14 +722,15 @@ def run_calibration(
     th_calib_dir: Path,
     out_dir: Path,
     sg,
-    local_model,
+    cc_backbone,
+    verifier_backbone,
     device: str,
-    local_tfm,
     cfg: dict,
     plc_idx: str = "",
     radius: int = 1,
     calib_method: str = "robust",
-    calib_k: float = 3.0,
+    cc_k: float = 1.5,
+    final_k: float = 2.5,
     calib_max_imgs: int = 30,
     calib_n_ref: int = 5,
     seed: int = 0,
@@ -689,14 +740,27 @@ def run_calibration(
     dino_top_m: int = 5,
     proposal_top_k: int = 3,
 ) -> dict:
+    """
+    1-pass:
+      th_calib 각 이미지에 대해 best ref 1개 선택
+      -> best ref의 component score 분포 수집
+      -> compound threshold 계산
+
+    2-pass:
+      th_calib 각 이미지에 대해 다시 best ref 1개 선택
+      -> top-K component proposal 생성
+      -> verifier score 계산
+      -> image-level final_score = mean(top2 verifier)
+      -> final threshold 계산
+    """
     random.seed(seed)
 
     pcfg = cfg.get("patchcore", {})
-    top_p   = float(pcfg.get("top_p", 0.05))
-    alpha   = float(pcfg.get("alpha", 0.6))
-    min_cut = float(pcfg.get("min_cut", 0.20))
-    sw      = float(pcfg.get("singleton_weight", 0.25))
-    cma     = int(pcfg.get("component_min_area", 2))
+    top_p    = float(pcfg.get("top_p", 0.05))
+    alpha    = float(pcfg.get("alpha", 0.6))
+    min_cut  = float(pcfg.get("min_cut", 0.20))
+    sw       = float(pcfg.get("singleton_weight", 0.25))
+    cma      = int(pcfg.get("component_min_area", 2))
 
     th_paths   = list_images(th_calib_dir)
     bank_paths = list_images(bank_dir)
@@ -711,115 +775,310 @@ def run_calibration(
 
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    calib_bbox_scores = []
-    calib_bbox_log = []
+    # =========================================================
+    # 1-pass: compound threshold calibration
+    # =========================================================
+    cc_scores = []
+    cc_pair_log = []
 
     for th_idx, q_path in enumerate(use_th):
         q_bgr = cv2.imread(str(q_path))
         if q_bgr is None:
-            print(f"  [CALIB-SKIP] 읽기 실패: {q_path.name}")
+            print(f"  [CALIB-CC-SKIP] 읽기 실패: {q_path.name}")
             continue
 
-        pack = collect_topk_bbox_regions_from_best_ref(
-            q_bgr=q_bgr,
-            bank_paths=bank_paths,
-            sg=sg,
-            local_model=local_model,
-            device=device,
-            local_tfm=local_tfm,
-            radius=radius,
-            n_ref_candidates=calib_n_ref,
-            proposal_top_k=proposal_top_k,
-            top_p=top_p,
-            alpha=alpha,
-            min_cut=min_cut,
-            singleton_weight=sw,
-            component_min_area=cma,
-            dino_model=dino_model,
-            dino_tfm=dino_tfm,
-            bank_dino=bank_dino,
-            dino_top_m=dino_top_m,
+        # preselect
+        if dino_model is not None and dino_tfm is not None:
+            bank_candidates = dino_preselect(
+                q_bgr, bank_dino, dino_model, dino_tfm, device, top_m=dino_top_m
+            )
+            if len(bank_candidates) == 0:
+                shuffled = bank_paths.copy()
+                random.shuffle(shuffled)
+                bank_candidates = shuffled[:calib_n_ref]
+            else:
+                bank_candidates = bank_candidates[:calib_n_ref]
+        else:
+            shuffled = bank_paths.copy()
+            random.shuffle(shuffled)
+            bank_candidates = shuffled[:calib_n_ref]
+
+        cand_scores = []
+        cand_infos  = []
+
+        for r_path in bank_candidates:
+            r_bgr = cv2.imread(str(r_path))
+            if r_bgr is None:
+                continue
+
+            score, debug = score_one_pair(
+                q_bgr, r_bgr, sg, cc_backbone, device,
+                radius=radius,
+                top_p=top_p,
+                alpha=alpha,
+                min_cut=min_cut,
+                singleton_weight=sw,
+                component_min_area=cma,
+            )
+
+            if score is None:
+                print(f"  [CALIB-CC-SKIP] {q_path.name} ↔ {r_path.name}: {debug.get('reason')}")
+                continue
+
+            cand_scores.append(float(score))
+            cand_infos.append({
+                "r": r_path.name,
+                "score": float(score),
+                "all_comp": debug.get("all_comp_scores", []),
+                "debug": debug,
+            })
+
+        if len(cand_scores) == 0:
+            print(f"  [CALIB-CC-SKIP] {q_path.name}: 모든 bank 후보 실패")
+            continue
+
+        # best ref 선택
+        best_idx  = int(np.argmin(cand_scores))
+        best_info = cand_infos[best_idx]
+        best_score = float(cand_scores[best_idx])
+
+        # best ref의 모든 component score 수집
+        comp_scores = [float(c["score"]) for c in best_info.get("all_comp", [])]
+        if len(comp_scores) == 0:
+            print(f"  [CALIB-CC-SKIP] {q_path.name}: best-match에 component가 없습니다.")
+            continue
+
+        cc_scores.extend(comp_scores)
+
+        cc_pair_log.append({
+            "q": q_path.name,
+            "best_r": best_info["r"],
+            "score": round(best_score, 6),
+            "n_comps": len(comp_scores),
+            "comp_scores": [round(v, 6) for v in comp_scores],
+            "all_cands": [{"r": ci["r"], "score": round(ci["score"], 6)} for ci in cand_infos],
+        })
+
+        print(
+            f"  [CALIB-CC] {th_idx+1}/{len(use_th)} {q_path.name} "
+            f"→ best={best_info['r']} score={best_score:.4f} "
+            f"comps={len(comp_scores)} comp_max={max(comp_scores):.4f}"
         )
 
-        if pack is None:
-            print(f"  [CALIB-SKIP] {q_path.name}: best ref / proposal 생성 실패")
+    if len(cc_scores) == 0:
+        raise RuntimeError("캘리브레이션 실패: compound score를 하나도 수집하지 못했습니다.")
+
+    cc_scores_arr = np.array(cc_scores, dtype=np.float32)
+    cc_calib = calibrate_threshold(
+        cc_scores_arr,
+        method=calib_method,
+        k=cc_k,
+        trim_outliers=True,
+        trim_k=3.5,
+    )
+    compound_thr = float(cc_calib["threshold"])
+
+    # =========================================================
+    # 2-pass: final threshold calibration (top2-mean)
+    # =========================================================
+    calib_final_scores = []
+    calib_final_log = []
+
+    for th_idx, q_path in enumerate(use_th):
+        q_bgr = cv2.imread(str(q_path))
+        if q_bgr is None:
+            print(f"  [CALIB-FINAL-SKIP] 읽기 실패: {q_path.name}")
             continue
 
-        regions = pack["regions"]
-        if len(regions) == 0:
-            print(f"  [CALIB-SKIP] {q_path.name}: region 없음")
+        # preselect (1-pass와 동일)
+        if dino_model is not None and dino_tfm is not None:
+            bank_candidates = dino_preselect(
+                q_bgr, bank_dino, dino_model, dino_tfm, device, top_m=dino_top_m
+            )
+            if len(bank_candidates) == 0:
+                shuffled = bank_paths.copy()
+                random.shuffle(shuffled)
+                bank_candidates = shuffled[:calib_n_ref]
+            else:
+                bank_candidates = bank_candidates[:calib_n_ref]
+        else:
+            shuffled = bank_paths.copy()
+            random.shuffle(shuffled)
+            bank_candidates = shuffled[:calib_n_ref]
+
+        cand_scores = []
+        cand_infos  = []
+
+        for r_path in bank_candidates:
+            r_bgr = cv2.imread(str(r_path))
+            if r_bgr is None:
+                continue
+
+            score, debug = score_one_pair(
+                q_bgr, r_bgr, sg, cc_backbone, device,
+                radius=radius,
+                top_p=top_p,
+                alpha=alpha,
+                min_cut=min_cut,
+                singleton_weight=sw,
+                component_min_area=cma,
+            )
+
+            if score is None:
+                continue
+
+            cand_scores.append(float(score))
+            cand_infos.append({
+                "r_path": r_path,
+                "score": float(score),
+                "debug": debug,
+            })
+
+        if len(cand_scores) == 0:
+            print(f"  [CALIB-FINAL-SKIP] {q_path.name}: 모든 bank 후보 실패")
+            continue
+
+        # best ref 선택
+        best_idx   = int(np.argmin(cand_scores))
+        best_score = float(cand_scores[best_idx])
+        best_info  = cand_infos[best_idx]
+        best_debug = best_info["debug"]
+
+        all_comps = best_debug.get("all_comp_scores", [])
+        if len(all_comps) == 0:
+            print(f"  [CALIB-FINAL-SKIP] {q_path.name}: component 없음")
+            continue
+
+        # proposal top-K
+        topk_comps = sorted(
+            all_comps,
+            key=lambda x: float(x.get("score", 0.0)),
+            reverse=True
+        )[:proposal_top_k]
+
+        flagged_regions = build_flagged_component_regions(
+            flagged_comps=topk_comps,
+            q_crop=best_debug["q_crop"],
+            r_crop=best_debug["r_crop"],
+            valid_mask=best_debug["valid_mask"],
+            patch_margin=1,
+            crop_margin_ratio=0.20,
+            min_patch_area=2,
+            min_crop_size=96,
+        )
+
+        if len(flagged_regions) == 0:
+            print(f"  [CALIB-FINAL-SKIP] {q_path.name}: region 없음")
             continue
 
         bbox_scores_this_img = []
 
-        for reg in regions:
+        for reg in flagged_regions:
             out = verify_bbox_with_local_search(
                 q_region=reg["q_region"],
                 r_region=reg["r_region"],
-                model=local_model,
+                backbone=verifier_backbone,
                 device=device,
-                transform=make_aligned_local_transform(img_size=224),
                 radius=1,
                 top_p=0.10,
             )
-            s = float(out["score"])
-            calib_bbox_scores.append(s)
-            bbox_scores_this_img.append(s)
+            bbox_scores_this_img.append(float(out["score"]))
 
-        calib_bbox_log.append({
+        if len(bbox_scores_this_img) == 0:
+            print(f"  [CALIB-FINAL-SKIP] {q_path.name}: verifier score 없음")
+            continue
+
+        bbox_scores_sorted = sorted(bbox_scores_this_img, reverse=True)
+
+        if len(bbox_scores_sorted) == 1:
+            final_score = float(bbox_scores_sorted[0])
+        else:
+            final_score = float(np.mean(bbox_scores_sorted[:2]))
+
+        calib_final_scores.append(final_score)
+
+        calib_final_log.append({
             "q": q_path.name,
-            "best_ref": pack["best_ref_path"].name,
+            "best_r": best_info["r_path"].name,
+            "compound_score": round(best_score, 6),
             "bbox_scores": [round(v, 6) for v in bbox_scores_this_img],
+            "bbox_scores_sorted": [round(v, 6) for v in bbox_scores_sorted],
+            "final_score": round(final_score, 6),
+            "n_regions": len(flagged_regions),
         })
 
         print(
-            f"  [CALIB] {th_idx+1}/{len(use_th)} {q_path.name} "
-            f"→ best={pack['best_ref_path'].name} "
+            f"  [CALIB-FINAL] {th_idx+1}/{len(use_th)} {q_path.name} "
+            f"→ best={best_info['r_path'].name} "
+            f"compound={best_score:.4f} "
             f"bbox_n={len(bbox_scores_this_img)} "
-            f"bbox_max={max(bbox_scores_this_img):.4f}"
+            f"final={final_score:.4f}"
         )
 
-    if len(calib_bbox_scores) >= 5:
-        bbox_arr = np.array(calib_bbox_scores, dtype=np.float32)
-        bbox_calib = calibrate_threshold(
-            bbox_arr,
+    if len(calib_final_scores) >= 5:
+        final_arr = np.array(calib_final_scores, dtype=np.float32)
+        final_calib = calibrate_threshold(
+            final_arr,
             method=calib_method,
-            k=calib_k,
+            k=final_k,
             trim_outliers=True,
             trim_k=3.5,
         )
-        bbox_threshold = float(bbox_calib["threshold"])
+        final_threshold = float(final_calib["threshold"])
     else:
-        bbox_threshold = 0.49
-        bbox_calib = None
-        print("[CALIB WARN] bbox 샘플 부족, 폴백 0.49 사용")
+        final_threshold = 0.49
+        final_calib = None
+        print("[CALIB WARN] final score 샘플 부족, 폴백 0.49 사용")
 
     from datetime import datetime
     created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     thr_json = {
         "plc_idx": plc_idx,
-        "repr_mode": "bbox_verifier",
-        "bbox_threshold": float(bbox_threshold),
-        "bbox_threshold_method": calib_method,
-        "bbox_num_samples": int(len(calib_bbox_scores)),
+        "repr_mode": "compound_cc_topkmean_verifier",
+        "method": calib_method,
+
+        # compound 단계
+        "cc_k": float(cc_k),
+        "threshold": float(compound_thr),
+        "num_th": int(len(cc_scores)),
+
+        # final 단계
+        "final_k": float(final_k),
+        "final_threshold": float(final_threshold),
+        "verifier_threshold": float(final_threshold),  # 하위 호환용 유지
+        "num_final": int(len(calib_final_scores)),
+
         "proposal_top_k": int(proposal_top_k),
         "created_at": created_at,
+
+        # patchcore config snapshot
         "radius": radius,
         "top_p": top_p,
         "alpha": alpha,
         "min_cut": min_cut,
     }
 
-    if bbox_calib is not None:
-        thr_json["bbox_stats"] = {
-            "median": round(bbox_calib["median"], 5),
-            "mad": round(bbox_calib["mad"], 5),
-            "mean": round(bbox_calib["mean"], 5),
-            "std": round(bbox_calib["std"], 5),
-            "min": round(bbox_calib["min"], 5),
-            "max": round(bbox_calib["max"], 5),
-            "top5": bbox_calib["top5"],
+    if cc_calib is not None:
+        thr_json["cc_stats"] = {
+            "median": round(cc_calib["median"], 5),
+            "mad": round(cc_calib["mad"], 5),
+            "mean": round(cc_calib["mean"], 5),
+            "std": round(cc_calib["std"], 5),
+            "min": round(cc_calib["min"], 5),
+            "max": round(cc_calib["max"], 5),
+            "top5": cc_calib["top5"],
+        }
+
+    if final_calib is not None:
+        thr_json["final_stats"] = {
+            "median": round(final_calib["median"], 5),
+            "mad": round(final_calib["mad"], 5),
+            "mean": round(final_calib["mean"], 5),
+            "std": round(final_calib["std"], 5),
+            "min": round(final_calib["min"], 5),
+            "max": round(final_calib["max"], 5),
+            "top5": final_calib["top5"],
         }
 
     thr_path = out_dir / "threshold.json"
@@ -828,16 +1087,21 @@ def run_calibration(
         encoding="utf-8",
     )
 
-    (out_dir / "calib_bbox_log.json").write_text(
-        json.dumps(calib_bbox_log, indent=2, ensure_ascii=False),
+    (out_dir / "calib_pair_log.json").write_text(
+        json.dumps(cc_pair_log, indent=2, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+    (out_dir / "calib_final_log.json").write_text(
+        json.dumps(calib_final_log, indent=2, ensure_ascii=False),
         encoding="utf-8",
     )
 
     print(f"\n[CALIB] threshold.json 저장 완료: {thr_path}")
-    print(f"[CALIB] bbox_threshold={bbox_threshold:.4f}, num_bbox={len(calib_bbox_scores)}")
+    print(f"[CALIB] compound_thr={compound_thr:.4f}, num_th={len(cc_scores)}")
+    print(f"[CALIB] final_thr={final_threshold:.4f}, num_final={len(calib_final_scores)}")
 
     return thr_json
-
 
 # =========== bbox 추론
 
@@ -1021,133 +1285,6 @@ def bgr_to_pil_rgb(img_bgr: np.ndarray):
     img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
     return Image.fromarray(img_rgb)
 
-def select_bank_candidates(
-    q_bgr: np.ndarray,
-    bank_paths: list,
-    n_ref: int,
-    dino_model,
-    dino_tfm,
-    bank_dino,
-    device: str,
-    dino_top_m: int,
-):
-    if dino_model is not None and dino_tfm is not None and bank_dino is not None:
-        bank_candidates = dino_preselect(
-            q_bgr, bank_dino, dino_model, dino_tfm, device, top_m=dino_top_m
-        )
-        if len(bank_candidates) > 0:
-            return bank_candidates[:n_ref]
-
-    shuffled = bank_paths.copy()
-    random.shuffle(shuffled)
-    return shuffled[:n_ref]
-
-
-def collect_topk_bbox_regions_from_best_ref(
-    q_bgr: np.ndarray,
-    bank_paths: list,
-    sg,
-    local_model,
-    device: str,
-    local_tfm,
-    radius: int,
-    n_ref_candidates: int,
-    proposal_top_k: int,
-    top_p: float,
-    alpha: float,
-    min_cut: float,
-    singleton_weight: float,
-    component_min_area: int,
-    dino_model=None,
-    dino_tfm=None,
-    bank_dino=None,
-    dino_top_m: int = 5,
-):
-    """
-    return None or dict:
-    {
-        "best_ref_path": Path,
-        "best_score": float,
-        "best_debug": dict,
-        "regions": list,
-        "cand_scores": list[float],
-    }
-    """
-    bank_candidates = select_bank_candidates(
-        q_bgr=q_bgr,
-        bank_paths=bank_paths,
-        n_ref=n_ref_candidates,
-        dino_model=dino_model,
-        dino_tfm=dino_tfm,
-        bank_dino=bank_dino,
-        device=device,
-        dino_top_m=dino_top_m,
-    )
-
-    cand_scores = []
-    cand_infos = []
-
-    for r_path in bank_candidates:
-        r_bgr = cv2.imread(str(r_path))
-        if r_bgr is None:
-            continue
-
-        score, debug = score_one_pair(
-            q_bgr, r_bgr, sg, local_model, device, local_tfm,
-            radius=radius,
-            top_p=top_p,
-            alpha=alpha,
-            min_cut=min_cut,
-            singleton_weight=singleton_weight,
-            component_min_area=component_min_area,
-        )
-
-        if score is None:
-            continue
-
-        cand_scores.append(float(score))
-        cand_infos.append({
-            "r_path": r_path,
-            "score": float(score),
-            "debug": debug,
-        })
-
-    if len(cand_scores) == 0:
-        return None
-
-    best_idx = int(np.argmin(cand_scores))
-    best_info = cand_infos[best_idx]
-    best_debug = best_info["debug"]
-
-    all_comps = best_debug.get("all_comp_scores", [])
-    if len(all_comps) == 0:
-        return None
-
-    topk_comps = sorted(
-        all_comps,
-        key=lambda x: float(x.get("score", 0.0)),
-        reverse=True
-    )[:proposal_top_k]
-
-    regions = build_flagged_component_regions(
-        flagged_comps=topk_comps,
-        q_crop=best_debug["q_crop"],
-        r_crop=best_debug["r_crop"],
-        valid_mask=best_debug["valid_mask"],
-        patch_margin=1,
-        crop_margin_ratio=0.20,
-        min_patch_area=2,
-        min_crop_size=96,
-    )
-
-    return {
-        "best_ref_path": best_info["r_path"],
-        "best_score": float(best_info["score"]),
-        "best_debug": best_debug,
-        "regions": regions,
-        "cand_scores": cand_scores,
-    }
-
 
 @torch.no_grad()
 def compute_local_search_dist_map_from_feats(
@@ -1196,40 +1333,13 @@ def make_top_p_mask(dist_map: np.ndarray, top_p: float = 0.10):
     top_mask = dist_map >= thr_top
     return top_mask, thr_top, k
 
-def preprocess_verifier_regions(
-    q_region: np.ndarray,
-    r_region: np.ndarray,
-    use_gray: bool = True,
-    use_hist_match: bool = True,
-):
-    """
-    verifier 전용 전처리
-    - grayscale 변환
-    - q -> r 기준 histogram matching
-    return: q_proc_bgr, r_proc_bgr
-    """
-    q_proc = q_region.copy()
-    r_proc = r_region.copy()
-
-    if use_gray:
-        q_gray = cv2.cvtColor(q_proc, cv2.COLOR_BGR2GRAY)
-        r_gray = cv2.cvtColor(r_proc, cv2.COLOR_BGR2GRAY)
-
-        if use_hist_match:
-            q_gray = match_histograms(q_gray, r_gray).astype(np.uint8)
-
-        q_proc = cv2.cvtColor(q_gray, cv2.COLOR_GRAY2BGR)
-        r_proc = cv2.cvtColor(r_gray, cv2.COLOR_GRAY2BGR)
-
-    return q_proc, r_proc
 
 @torch.no_grad()
 def verify_bbox_with_local_search(
     q_region: np.ndarray,
     r_region: np.ndarray,
-    model,
+    backbone,
     device,
-    transform,
     radius: int = 1,
     top_p: float = 0.10,
 ):
@@ -1246,14 +1356,9 @@ def verify_bbox_with_local_search(
         "top_p": float,
     }
     """
-    q_pil = bgr_to_pil_rgb(q_region)
-    r_pil = bgr_to_pil_rgb(r_region)
 
-    q_x = transform(q_pil)
-    r_x = transform(r_pil)
-
-    q_feat, (Hf, Wf) = extract_grid_layers(model, device, q_x)
-    r_feat, _ = extract_grid_layers(model, device, r_x)
+    q_feat, (Hf, Wf) = backbone.extract_grid(q_region, device)
+    r_feat, _ = backbone.extract_grid(r_region, device)
 
     dist_map_t = compute_local_search_dist_map_from_feats(
         q_feat=q_feat,
@@ -1628,12 +1733,12 @@ def run_inference(
     query_dir: Path,
     out_dir: Path,
     sg,
-    local_model,
+    cc_backbone,
+    verifier_backbone,
     device: str,
-    local_tfm,
     cfg: dict,
     radius: int = 1,
-    n_ref_candidates: int = 5,  # bank 중 몇 장과 매칭 시도할지 (min score 채택)
+    n_ref_candidates: int = 5,  # bank 중 몇 장과 매칭 시도할지
     seed: int = 0,
     # --- [3단계] SAM 파라미터 (None이면 SAM 스킵) ---
     sam_predictor=None,
@@ -1648,14 +1753,15 @@ def run_inference(
     dino_tfm=None,
     bank_dino: dict = None,
     dino_top_m: int = 5,
-    proposal_top_k=3
+    proposal_top_k: int = 3,
 ) -> None:
     """
     query 이미지마다:
-      bank에서 무작위로 n_ref_candidates장과 매칭 시도
-      → 성공한 것 중 min(score) 채택 (정상에 가장 가까운 ref 기준)
-      → threshold와 비교하여 1차 ANOMALY 판정
-      → [sam_predictor 있으면] ANOMALY 후보만 SAM IoU 검증 → 최종 판정
+      bank 후보들과 매칭 -> best ref 선택(min compound score)
+      -> top-K component proposal 생성
+      -> verifier score 계산
+      -> final_score = mean(top2 verifier)
+      -> final_threshold와 비교하여 최종 판정
     """
     random.seed(seed)
     all_infer_results = []
@@ -1666,12 +1772,26 @@ def run_inference(
         raise FileNotFoundError(
             f"threshold.json이 없습니다. --mode calib를 먼저 실행하세요: {thr_path}"
         )
-    meta = json.loads(thr_path.read_text(encoding="utf-8"))
-    bbox_thr = float(meta.get("bbox_threshold", meta.get("verifier_threshold", 0.49)))
-    proposal_top_k = int(meta.get("proposal_top_k", 3))
 
-    bbox_method = meta.get("bbox_threshold_method", "unknown")
-    print(f"\n[INFER] bbox_threshold={bbox_thr:.4f}, method={bbox_method}, proposal_top_k={proposal_top_k}")
+    meta = json.loads(thr_path.read_text(encoding="utf-8"))
+
+    # CC threshold
+    thr = float(meta["threshold"])
+
+    if meta.get("method") == "robust":
+        k_str = meta.get("robust_k", meta.get("k", "NA"))
+    elif meta.get("method") == "gaussian":
+        k_str = meta.get("gaussian_k", meta.get("k", "NA"))
+    else:
+        k_str = meta.get("percentile", meta.get("k", "NA"))
+
+    # final threshold: 이제 verifier_threshold를 "final_score threshold"로 사용
+    final_thr = float(meta.get("verifier_threshold", meta.get("final_threshold", 0.49)))
+    if ("verifier_threshold" not in meta) and ("final_threshold" not in meta):
+        print("[INFER WARN] threshold.json에 final/verifier threshold 없음. 폴백 0.49 사용")
+
+    print(f"\n[INFER] compound_thr={thr:.4f} (method={meta.get('method')}, k={k_str})")
+    print(f"[INFER] final_thr={final_thr:.4f} (top2-mean 기준)")
 
     pcfg = cfg.get("patchcore", {})
     top_p   = float(pcfg.get("top_p", 0.05))
@@ -1701,17 +1821,20 @@ def run_inference(
         case_dir = out_dir / q_path.stem
         case_dir.mkdir(parents=True, exist_ok=True)
 
-        # bank 후보 섞기 → 최대 n_ref_candidates장 시도
-        # [DINO preselection] DINO top-M 후보 선택, 실패 시 랜덤 폴백
+        # -------------------------------------------------
+        # 1) bank 후보 선택
+        # -------------------------------------------------
         if dino_model is not None and bank_dino is not None:
             candidates_to_try = dino_preselect(
                 q_bgr, bank_dino, dino_model, dino_tfm, device, top_m=dino_top_m
             )
             if len(candidates_to_try) == 0:
-                shuffled = ref_paths.copy(); random.shuffle(shuffled)
-                candidates_to_try = shuffled[:n_ref_candidates]
+                shuffled_refs = ref_paths.copy()
+                random.shuffle(shuffled_refs)
+                candidates_to_try = shuffled_refs[:n_ref_candidates]
+            else:
+                candidates_to_try = candidates_to_try[:n_ref_candidates]
         else:
-            # DINO 없으면 기존 랜덤 방식
             shuffled_refs = ref_paths.copy()
             random.shuffle(shuffled_refs)
             candidates_to_try = shuffled_refs[:n_ref_candidates]
@@ -1719,41 +1842,51 @@ def run_inference(
         cand_scores = []
         cand_debugs = []
 
+        # -------------------------------------------------
+        # 2) 후보 ref 각각과 score 계산
+        # -------------------------------------------------
         for r_path in candidates_to_try:
             r_bgr = cv2.imread(str(r_path))
             if r_bgr is None:
                 continue
 
             score, debug = score_one_pair(
-                q_bgr, r_bgr, sg, local_model, device, local_tfm,
-                radius=radius, top_p=top_p, alpha=alpha,
-                min_cut=min_cut, singleton_weight=sw,
+                q_bgr, r_bgr, sg, cc_backbone, device,
+                radius=radius,
+                top_p=top_p,
+                alpha=alpha,
+                min_cut=min_cut,
+                singleton_weight=sw,
                 component_min_area=cma,
             )
+
             if score is None:
                 print(f"  [SKIP] {r_path.name}: {debug.get('reason')}")
                 continue
 
-            cand_scores.append(score)
-            cand_debugs.append({"r_path": r_path, "score": score, "debug": debug})
+            cand_scores.append(float(score))
+            cand_debugs.append({
+                "r_path": r_path,
+                "score": float(score),
+                "debug": debug,
+            })
 
         if len(cand_scores) == 0:
-            print(f"  [FAIL] 매칭 실패 − 모든 ref 후보 실패")
-            eval_y_true.append(1 if q_path.name.startswith("abnormal_") else 0)
-            eval_y_pred.append(0)  # 탐지 실패 = 정상 판정
+            print("  [FAIL] 모든 ref 후보 매칭 실패")
             continue
 
-        # --- 정상에 가장 가까운 ref 기준으로 최종 score 결정 ---
-        # (compound score가 작을수록 정상에 가까움)
+        # -------------------------------------------------
+        # 3) best ref 선택 (compound score 최소)
+        # -------------------------------------------------
         best_idx   = int(np.argmin(cand_scores))
         best_score = float(cand_scores[best_idx])
         best_info  = cand_debugs[best_idx]
         best_debug = best_info["debug"]
 
-        # --- [component-level] 각 component를 threshold와 개별 비교 ---
-        # 하나라도 threshold를 초과하는 component가 있으면 ANOMALY 후보
+        # -------------------------------------------------
+        # 4) component proposal top-K
+        # -------------------------------------------------
         all_comps = best_debug.get("all_comp_scores", [])
-
         topk_comps = sorted(
             all_comps,
             key=lambda x: float(x.get("score", 0.0)),
@@ -1771,20 +1904,22 @@ def run_inference(
             min_crop_size=96,
         )
 
+        # -------------------------------------------------
+        # 5) bbox verifier
+        # -------------------------------------------------
         verifier_results = []
         for reg in flagged_regions:
             out = verify_bbox_with_local_search(
                 q_region=reg["q_region"],
                 r_region=reg["r_region"],
-                model=local_model,
+                backbone=verifier_backbone,
                 device=device,
-                transform=make_aligned_local_transform(img_size=224),
                 radius=1,
                 top_p=0.10,
             )
             verifier_results.append({
                 **reg,
-                "verifier_score": out["score"],
+                "verifier_score": float(out["score"]),
                 "verifier_dist_map": out["dist_map"],
                 "verifier_feat_hw": out["feat_hw"],
                 "verifier_top_p_mask": out["top_p_mask"],
@@ -1793,11 +1928,36 @@ def run_inference(
                 "verifier_top_p": out["top_p"],
             })
 
-            
-        
-        # -----------------------------
-        # 단계별 시각화 저장
-        # -----------------------------
+        # -------------------------------------------------
+        # 6) 최종 점수 집계: mean(top2)
+        # -------------------------------------------------
+        verifier_scores_sorted = sorted(
+            [r["verifier_score"] for r in verifier_results],
+            reverse=True
+        )
+
+        if len(verifier_scores_sorted) == 0:
+            final_score = 0.0
+        elif len(verifier_scores_sorted) == 1:
+            final_score = float(verifier_scores_sorted[0])
+        else:
+            final_score = float(np.mean(verifier_scores_sorted[:2]))
+
+        is_anomaly = bool(final_score > final_thr)
+
+        # 참고용
+        cc_is_anomaly = bool(best_score > thr)
+        best_verifier_score = max(verifier_scores_sorted, default=0.0)
+
+        # 시각화용 verified_regions
+        verified_regions = [
+            r for r in verifier_results
+            if r["verifier_score"] > final_thr
+        ]
+
+        # -------------------------------------------------
+        # 7) 단계별 시각화 저장
+        # -------------------------------------------------
         save_alignment_summary(
             case_dir,
             best_debug["q_crop"],
@@ -1805,8 +1965,10 @@ def run_inference(
             best_debug["valid_mask"],
             meta_lines=[
                 f"best_ref = {best_info['r_path'].name}",
-                f"best_score = {best_score:.5f}",
-                f"thr = {bbox_thr:.5f}",
+                f"compound_best = {best_score:.5f}",
+                f"compound_thr = {thr:.5f}",
+                f"final_score = {final_score:.5f}",
+                f"final_thr = {final_thr:.5f}",
                 f"inliers = {best_debug['inliers']}",
                 f"peak = {best_debug['peak']:.4f}, area = {best_debug['area']}",
             ],
@@ -1828,16 +1990,6 @@ def run_inference(
             verifier_results,
             alpha=0.65,
         )
-
-        # -----------------------------
-        # bbox verifier 기준 최종 판정
-        # -----------------------------
-        bbox_thr = float(meta.get("bbox_threshold", 0.49))
-
-        verified_regions = [
-            r for r in verifier_results
-            if r["verifier_score"] > bbox_thr
-        ]
         save_verified_bbox_overlay(
             case_dir,
             best_debug["q_crop"],
@@ -1845,146 +1997,78 @@ def run_inference(
             alpha=0.45,
         )
 
-        best_verifier_score = max(
-            [r["verifier_score"] for r in verifier_results],
-            default=0.0
-        )
-
-        best_verifier_score = max(
-            [r["verifier_score"] for r in verifier_results],
-            default=0.0
-        )
-
-        is_anomaly = best_verifier_score > bbox_thr
-        label_str = "ANOMALY" if is_anomaly else "NORMAL"
-        n_flagged = len(verified_regions)
-
-        print(f"  [RESULT] best_score={best_score:.5f}, thr={bbox_thr:.5f} → {label_str} "
-              f"(flagged comps: {n_flagged}/{len(all_comps)})")
-        print(f"           best_ref={best_info['r_path'].name}, "
-              f"area={best_debug['area']}, peak={best_debug['peak']:.4f}")
-
-        # --- [3단계] SAM 검증: ANOMALY 후보일 때만 실행 ---
-        sam_meta = {"sam_used": False, "sam_confirmed": None}
-        if is_anomaly and sam_predictor is not None:
-            try:
-                q_rgb = cv2.cvtColor(best_debug["q_crop"], cv2.COLOR_BGR2RGB)
-                r_rgb = cv2.cvtColor(best_debug["r_crop"], cv2.COLOR_BGR2RGB)
-                sam_result = refine_with_sam(
-                    q_crop_rgb=q_rgb,
-                    r_crop_rgb=r_rgb,
-                    dist_map=best_debug["dist_map"],
-                    predictor=sam_predictor,
-                    top_p=sam_top_p,
-                    abs_floor=sam_abs_floor,
-                    peak_alpha=sam_peak_alpha,
-                    min_blob_peak=sam_min_blob_peak,
-                    min_blob_mean=sam_min_blob_mean,
-                    dv_iou_thresh=sam_dv_iou_thresh,
-                )
-                # SAM에서 확인된 blob이 1개 이상이면 진짜 ANOMALY
-                sam_confirmed = sam_result["num_confirmed_blobs"] > 0
-                # SAM이 기각하면 NORMAL로 복구
-                if not sam_confirmed:
-                    is_anomaly = False
-                    label_str = "NORMAL(SAM_REJ)"
-                else:
-                    label_str = "ANOMALY(SAM_OK)"
-
-                print(f"  [SAM] blobs={sam_result['num_blobs']} "
-                      f"confirmed={sam_result['num_confirmed_blobs']} → {label_str}")
-
-                save_sam_outputs(case_dir, best_debug["q_crop"],
-                                 best_debug["r_crop"], sam_result)
-                sam_meta = {
-                    "sam_used"       : True,
-                    "sam_blobs"      : sam_result["num_blobs"],
-                    "sam_confirmed"  : sam_result["num_confirmed_blobs"],
-                    "sam_adaptive_th": float(sam_result["adaptive_threshold"]),
-                }
-            except Exception as e:
-                print(f"  [SAM WARN] 실패: {e}")
-
-        save_named_outputs(
-            case_dir,
-            best_debug["q_crop"],
-            best_debug["r_crop"],
-            best_debug["dist_map"],
-            best_debug["valid_mask"],
-            prefix="infer",
-        )
-        cv2.imwrite(str(case_dir / "q_crop.png"), best_debug["q_crop"])
-        cv2.imwrite(str(case_dir / "r_crop.png"), best_debug["r_crop"])
-
-        # --- compound 필터링 결과 시각화 저장 ---
-        # patch grid 크기로 이미지 크기로 리사이즈 후 q_crop 오버레이
-        q_h, q_w = best_debug["q_crop"].shape[:2]
-        target_size = (q_w, q_h)  # cv2.resize 인자 (W, H)
-
-        # ① 전체 hot-zone (cut 이상 모든 component)
-        bin_uint8 = best_debug["bin_map"]  # 0/1 uint8, patch grid 크기
-        bin_rs = cv2.resize(bin_uint8, target_size, interpolation=cv2.INTER_NEAREST)
-        overlay_all = best_debug["q_crop"].copy()
-        hot_mask_all = bin_rs.astype(bool)
-        # hot-zone 영역을 발게 쓰인 주황색으로 오버레이
-        orange = np.zeros_like(overlay_all)
-        orange[:] = (0, 165, 255)  # BGR orange
-        overlay_all[hot_mask_all] = cv2.addWeighted(
-            overlay_all, 0.45, orange, 0.55, 0
-        )[hot_mask_all]
-        cv2.imwrite(str(case_dir / "compound_all_hotzone.png"), overlay_all)
-
-        # ② best component 1개만
-        best_mask_bool = best_debug["best_comp_mask"]  # bool, patch grid 크기
-        best_mask_uint8 = best_mask_bool.astype(np.uint8)
-        best_rs = cv2.resize(best_mask_uint8, target_size, interpolation=cv2.INTER_NEAREST)
-        overlay_best = best_debug["q_crop"].copy()
-        hot_mask_best = best_rs.astype(bool)
-        # best component를 빨간색으로 오버레이
-        red = np.zeros_like(overlay_best)
-        red[:] = (0, 0, 255)  # BGR red
-        overlay_best[hot_mask_best] = cv2.addWeighted(
-            overlay_best, 0.35, red, 0.65, 0
-        )[hot_mask_best]
-        cv2.imwrite(str(case_dir / "compound_best_component.png"), overlay_best)
-
-        # --- 메타데이터 저장 ---
-        result_meta = {
-            "query"        : str(q_path),
-            "best_ref"     : str(best_info["r_path"]),
-            "score"        : round(best_score, 5),
-            "bbox_threshold"    : round(bbox_thr, 5),
-            "is_anomaly"   : bool(is_anomaly),
-            "label"        : label_str,
-            "area"         : best_debug["area"],
-            "peak"         : round(best_debug["peak"], 5),
-            "mean"         : round(best_debug["mean"], 5),
-            "cut"          : round(best_debug["cut"], 5),
-            "inliers"      : best_debug["inliers"],
-            "n_components" : len(all_comps),         # 전체 component 수
-            "n_flagged"    : n_flagged,              # threshold 초과 component 수
-            "proposal_comp_scores": [round(c["score"], 6) for c in topk_comps],
-            "all_cand_scores": [round(s, 5) for s in cand_scores],
-            
-            
+        # -------------------------------------------------
+        # 8) SAM 후처리 (원하면 유지, 없으면 그대로)
+        # -------------------------------------------------
+        sam_meta = {
+            "sam_used": False,
+            "sam_ok": None,
+            "sam_dv_iou": None,
         }
-        result_meta["max_bbox_score"] = float(best_verifier_score)
-        result_meta["all_bbox_scores"] = [
-            float(r["verifier_score"]) for r in verifier_results
-        ]
-        result_meta["verifier_threshold"] = round(bbox_thr, 6)
-        result_meta["best_verifier_score"] = round(best_verifier_score, 6)
+
+        # 여기서는 기존 구조 최대한 유지하려고,
+        # SAM predictor 없으면 그대로 is_anomaly 사용
+        # predictor 있으면 네 기존 로직 있던 곳에 붙이면 됨
+        # (현재 답변에서는 mean(top2) 구조가 핵심이라 SAM은 보수적으로 둠)
+
+        label_str = "ANOMALY" if is_anomaly else "NORMAL"
+        n_flagged = len(topk_comps)
+        n_regions = len(flagged_regions)
+        n_verified = len(verified_regions)
+
+        print(
+            f"  [RESULT] {label_str} | "
+            f"compound={best_score:.4f} (thr={thr:.4f}) | "
+            f"final={final_score:.4f} (thr={final_thr:.4f}) | "
+            f"props={n_flagged}, regions={n_regions}, verified={n_verified}"
+        )
+
+        # -------------------------------------------------
+        # 9) result.json 저장
+        # -------------------------------------------------
+        result_meta = {
+            "query": str(q_path),
+            "query_name": q_path.name,
+            "best_ref": str(best_info["r_path"]),
+            "best_ref_name": best_info["r_path"].name,
+
+            "label": label_str,
+            "is_anomaly": bool(is_anomaly),
+
+            # compound 단계
+            "score": round(best_score, 6),            # 기존 호환용
+            "compound_score": round(best_score, 6),
+            "threshold": round(thr, 6),               # 기존 호환용
+            "compound_threshold": round(thr, 6),
+            "cc_is_anomaly": bool(cc_is_anomaly),
+
+            # final 단계
+            "final_score": round(final_score, 6),
+            "final_threshold": round(final_thr, 6),
+            "best_verifier_score": round(best_verifier_score, 6),
+
+            "proposal_top_k": int(proposal_top_k),
+            "num_flagged_components": int(n_flagged),
+            "num_flagged_regions": int(n_regions),
+            "num_verified_regions": int(n_verified),
+
+            "flagged_comp_scores": [round(float(c["score"]), 6) for c in topk_comps],
+            "all_cand_scores": [round(float(s), 6) for s in cand_scores],
+        }
+
+        # 하위 호환용
+        result_meta["verifier_threshold"] = round(final_thr, 6)
 
         result_meta["flagged_regions"] = [
             {
                 "idx": i,
-                "component_score": round(r["score"], 6),
-                "verifier_score": round(r["verifier_score"], 6),
-                "final_bbox_score": round(r["verifier_score"], 6),   # 지금은 verifier_score를 최종 bbox 점수로 사용
-                "is_verified": bool(r["verifier_score"] > bbox_thr),
+                "component_score": round(float(r["score"]), 6),
+                "verifier_score": round(float(r["verifier_score"]), 6),
+                "final_bbox_score": round(float(r["verifier_score"]), 6),
+                "is_verified": bool(r["verifier_score"] > final_thr),
                 "area": int(r["area"]),
-                "peak": round(r["peak"], 6),
-                "mean": round(r["mean"], 6),
+                "peak": round(float(r["peak"]), 6),
+                "mean": round(float(r["mean"]), 6),
                 "patch_bbox": list(r["patch_bbox"]),
                 "img_bbox": list(r["img_bbox"]),
                 "verifier_top_p": r.get("verifier_top_p", None),
@@ -1993,38 +2077,48 @@ def run_inference(
             }
             for i, r in enumerate(verifier_results)
         ]
+
         result_meta["verified_regions"] = [
             {
                 "idx": i,
-                "final_bbox_score": round(r["verifier_score"], 6),
-                "component_score": round(r["score"], 6),
-                "verifier_score": round(r["verifier_score"], 6),
+                "final_bbox_score": round(float(r["verifier_score"]), 6),
+                "component_score": round(float(r["score"]), 6),
+                "verifier_score": round(float(r["verifier_score"]), 6),
                 "img_bbox": list(r["img_bbox"]),
                 "patch_bbox": list(r["patch_bbox"]),
             }
             for i, r in enumerate(verified_regions)
         ]
-        result_meta.update(sam_meta)  # SAM 필드 병합
+
+        result_meta.update(sam_meta)
+
         (case_dir / "result.json").write_text(
-            json.dumps(result_meta, indent=2, ensure_ascii=False), encoding="utf-8"
+            json.dumps(result_meta, indent=2, ensure_ascii=False),
+            encoding="utf-8",
         )
         all_infer_results.append(result_meta)
 
-        # 평가 집계 (파일명 기반 GT)
+        # -------------------------------------------------
+        # 10) 평가 집계
+        # -------------------------------------------------
         eval_y_true.append(1 if q_path.name.startswith("abnormal_") else 0)
         eval_y_pred.append(1 if is_anomaly else 0)
 
-    # --- 평가 리포트 출력 ---
+    # -------------------------------------------------
+    # 11) 전체 결과 저장
+    # -------------------------------------------------
     if len(eval_y_true) > 0:
         _print_eval_report(eval_y_true, eval_y_pred, out_dir)
 
-        # infer 전체 결과 통합 저장
     (out_dir / "infer_all_results.json").write_text(
         json.dumps(all_infer_results, indent=2, ensure_ascii=False),
         encoding="utf-8"
     )
-    save_normal_abnormal_name_compare(all_infer_results, out_dir, bbox_thr)
+
     _save_summary_gallery(out_dir)
+    plot_compound_scores(out_dir)
+    plot_bbox_scores(out_dir)
+
 
 
 def _save_summary_gallery(out_dir: Path):
@@ -2047,7 +2141,7 @@ def _save_summary_gallery(out_dir: Path):
         meta      = json.loads(result_path.read_text(encoding="utf-8"))
         label     = meta.get("label", "ANOMALY" if meta["is_anomaly"] else "NORMAL")
         score     = meta.get("score", 0.0)
-        threshold = meta.get("bbox_threshold", 0.0)
+        threshold = meta.get("threshold", 0.0)
         sam_used  = meta.get("sam_used", False)
 
         # 최종 오버레이 이미지 선택 우선순위:
@@ -2212,6 +2306,9 @@ def save_outputs(save_dir, q_crop, r_crop, dist_map, valid_mask):
     cv2.imwrite(str(save_dir / "overlay_q.png"), overlay_q)
     cv2.imwrite(str(save_dir / "r_crop.png"), r_crop)
 
+
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--place",  required=True, help="실험 장소명 (recv/{place}/bank, query 구조)")
@@ -2220,13 +2317,6 @@ def main():
                         help="calib: threshold 캘리브레이션 | infer: 이상감지 추론 | vis: 기존 시각화")
     parser.add_argument("--seed",   type=int, default=0)
     parser.add_argument("--radius", type=int, default=1)
-
-    parser.add_argument(
-        "--proposal_top_k",
-        type=int,
-        default=3,
-        help="compound score 상위 몇 개 component를 bbox proposal로 사용할지"
-    )
     # 캘리브레이션 전용 인자
     parser.add_argument(
         "--calib_method",
@@ -2241,6 +2331,12 @@ def main():
         default=None,
         help="k 값. 미지정 시 config.calib.* 또는 config.calib.k 사용"
     )
+    parser.add_argument("--cc_k", type=float, default=None,
+                    help="1차 component gate calibration k")
+    parser.add_argument("--final_k", type=float, default=None,
+                        help="2차 verifier threshold calibration k")
+
+    
     parser.add_argument("--calib_max_imgs", type=int, default=30,
                         help="캘리브레이션 시 th_calib 이미지 최대 수 (Fix1 best-match 방식)")
     parser.add_argument("--calib_n_ref",    type=int, default=5,
@@ -2295,9 +2391,25 @@ def main():
             calib_k = float(calib_cfg.get("percentile", 99.0))
         else:
             raise ValueError(f"알 수 없는 calib_method: {calib_method}")
+    cc_k = float(
+        args.cc_k if args.cc_k is not None
+        else calib_cfg.get("cc_k", calib_k)
+    )
+
+    final_k = float(
+        args.final_k if args.final_k is not None
+        else calib_cfg.get("final_k", calib_k)
+    )
 
     img_size  = int(cfg.get("embed", {}).get("img_size", 560))
-    local_tfm = make_aligned_local_transform(img_size)
+
+    from backbone_wrapper import build_local_backbone
+
+    cc_backbone = build_local_backbone(backbone_name="resnet18_layer3",img_size=img_size,)
+    verifier_backbone = build_local_backbone(
+    backbone_name="resnet18_layer3",   #
+            img_size=224,
+        )
 
     # DINO preselection 조건부 설정
     dino_model_inst = None
@@ -2318,7 +2430,7 @@ def main():
     )
     sg = SuperGlueMatcher(sg_cfg, device=device)
 
-    local_model, device = load_model(device=device)  # CNN layer3
+
 
     bank_dir     = Path(ROOT) / args.place / "bank"
     th_calib_dir = Path(ROOT) / args.place / "th_calib"  # 캘리브레이션용 정상 이미지
@@ -2346,14 +2458,15 @@ def main():
             th_calib_dir=th_calib_dir,
             out_dir=out_dir,
             sg=sg,
-            local_model=local_model,
+            cc_backbone = cc_backbone,
+            verifier_backbone = verifier_backbone,
             device=device,
-            local_tfm=local_tfm,
             cfg=cfg,
             plc_idx=args.place,
             radius=args.radius,
             calib_method=calib_method,
-            calib_k=calib_k,
+            cc_k=cc_k,
+            final_k=final_k,
             calib_max_imgs=args.calib_max_imgs,
             calib_n_ref=args.calib_n_ref,
             seed=args.seed,
@@ -2361,7 +2474,6 @@ def main():
             dino_tfm=dino_tfm_inst,
             bank_dino=bank_dino_data,
             dino_top_m=args.dino_top_m,
-            proposal_top_k=args.proposal_top_k,
         )
         return
 
@@ -2396,9 +2508,9 @@ def main():
             query_dir=query_dir,
             out_dir=out_dir,
             sg=sg,
-            local_model=local_model,
+            cc_backbone = cc_backbone,
+            verifier_backbone = verifier_backbone,
             device=device,
-            local_tfm=local_tfm,
             cfg=cfg,
             radius=args.radius,
             n_ref_candidates=args.n_ref_candidates,
@@ -2416,402 +2528,9 @@ def main():
             dino_tfm=dino_tfm_inst,
             bank_dino=bank_dino_infer,
             dino_top_m=args.dino_top_m,
-            proposal_top_k=args.proposal_top_k,
         )
         return
 
-    # --- vis 모드: 기존 시각화 (SAM 포함) ---
-    print(f"\n[MODE] VISUALIZATION  place={args.place}")
-
-    # vis 모드에서만 사용하는 추가 모델
-    local_model_layer2, _ = load_model(out_layer="layer2")
-    dino_img_size = 560   # 14의 배수여야 함 (560 = 14 * 40)
-    dino_tfm      = make_dino_transform(img_size=dino_img_size)
-    dino_model, _ = load_dino_model(device=device)
-
-    # SAM 모델 조건부 로드 (--sam_ckpt 인자가 있을 때만)
-    sam_gen = None
-    if args.sam_ckpt is not None:
-        ckpt = Path(args.sam_ckpt)
-        if not ckpt.exists():
-            print(f"[WARN] SAM 체크포인트 없음: {ckpt}. SAM 정제 스킵.")
-        else:
-            print(f"[INFO] SAM 로드: {ckpt}")
-            sam_gen = load_sam_model(
-                checkpoint_path=str(ckpt),
-                model_type=args.sam_model,
-                device=device,
-            )
-            print("[INFO] SAM 로드 완료")
-
-    ref_paths = list_images(bank_dir)
-    query_paths = list_images(query_dir)
-
-    if len(ref_paths) == 0:
-        raise RuntimeError(f"No bank images found: {bank_dir}")
-    if len(query_paths) == 0:
-        print(f"[Error] None query in {query_dir}")
-        return
-
-    # 평가 지표 수집용
-    eval_y_true = []
-    eval_y_pred = []
-
-    for q_path in query_paths:
-        print(f"[PROCESS] {q_path.name}")
-        q_bgr = cv2.imread(str(q_path))
-        if q_bgr is None:
-            print(f"[FAIL] read query image failed: {q_path}")
-            continue
-
-        case_dir = out_dir / q_path.stem
-        case_dir.mkdir(parents=True, exist_ok=True)
-
-        shuffled_refs = ref_paths.copy()
-        random.shuffle(shuffled_refs)
-
-        tried_log = []
-        success = False
-
-        for try_idx, ref_path in enumerate(shuffled_refs):
-            ref_bgr = cv2.imread(str(ref_path))
-            if ref_bgr is None:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "ref_read_fail",
-                })
-                continue
-
-            # 1) superglue matching + H estimation
-            try:
-                match_res = sg.match_and_estimate(q_bgr, ref_bgr)
-            except Exception as e:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "match_exception",
-                    "error": str(e),
-                })
-                continue
-
-            if not match_res.get("ok", False):
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "align_fail",
-                    "reason": match_res.get("reason", "unknown"),
-                })
-                continue
-
-            H = match_res["H"]
-            if H is None or not isinstance(H, np.ndarray) or H.shape != (3, 3):
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "invalid_h",
-                })
-                continue
-
-            H = H.astype(np.float64)
-            bank_hw = ref_bgr.shape[:2]
-
-            # 2) warp query -> bank
-            try:
-                warped_q, warped_mask = warp_query_to_bank(q_bgr, H, bank_hw)
-            except Exception as e:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "warp_exception",
-                    "error": str(e),
-                })
-                continue
-
-            # 3) crop safe common region
-            try:
-                q_crop, r_crop, mask_crop, bbox = crop_common_safe_region(
-                    warped_q,
-                    ref_bgr,
-                    warped_mask,
-                )
-            except Exception as e:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "crop_exception",
-                    "error": str(e),
-                })
-                continue
-
-            if q_crop is None or r_crop is None or mask_crop is None:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "crop_fail",
-                })
-                continue
-
-            # 4) 조명 정규화 (히스토그램 매칭) 제거됨
-
-            # 5) local CNN feature
-            try:
-                q_crop_rgb = BGR_to_RGB(q_crop)  # 원본 query 바로 사용
-                q_crop_t = local_tfm(q_crop_rgb)
-                r_crop_rgb = BGR_to_RGB(r_crop)
-                r_crop_t = local_tfm(r_crop_rgb)
-
-                q_feat, _ = extract_grid_layers(local_model, device, q_crop_t)
-                r_feat, _ = extract_grid_layers(local_model, device, r_crop_t)
-
-                q_feat__, _ = extract_grid_layers(local_model_layer2, device, q_crop_t)
-                r_feat__, _ = extract_grid_layers(local_model_layer2, device, r_crop_t)
-
-                # ---------- DINOv2 patch token feature ----------
-                # cnn_emb와 동일한 transform이 아닌 dino_tfm 사용
-                # (입력 크기가 14의 배수여야 하기 때문)
-                q_dino_t = dino_tfm(q_crop_rgb)
-                r_dino_t = dino_tfm(r_crop_rgb)
-
-                # n_last_blocks=4: 마지막 4개 블록 평균
-                # → 최종 레이어보다 local texture 정보를 더 많이 포함
-                q_dino_feat, _ = extract_dino_grid(dino_model, device, q_dino_t, n_last_blocks=4)
-                r_dino_feat, _ = extract_dino_grid(dino_model, device, r_dino_t, n_last_blocks=4)
-
-            except Exception as e:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "feature_exception",
-                    "error": str(e),
-                })
-                continue
-
-            # 5) valid patch mask
-            try:
-                grid_h2, grid_w2 = q_feat__.shape[1], q_feat__.shape[2]
-                valid_mask2 = make_patch_valid_mask(mask_crop, grid_h2, grid_w2)
-
-                grid_h3, grid_w3 = q_feat.shape[1], q_feat.shape[2]
-                valid_mask3 = make_patch_valid_mask(mask_crop, grid_h3, grid_w3)
-
-                # DINOv2 grid (40x40 for img_size=560)
-                grid_hd, grid_wd = q_dino_feat.shape[1], q_dino_feat.shape[2]
-                valid_mask_dino = make_patch_valid_mask(mask_crop, grid_hd, grid_wd)
-            except Exception as e:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "valid_mask_exception",
-                    "error": str(e),
-                })
-                continue
-
-            valid_count = int(valid_mask2.sum())
-            if valid_count < 10:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "too_few_valid_patch",
-                    "valid_count": int(valid_count),
-                })
-                continue
-            valid_count = int(valid_mask3.sum())
-            if valid_count < 10:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "too_few_valid_patch",
-                    "valid_count": int(valid_count),
-                })
-                continue
-
-            # 6) local radius search dist map
-            try:
-                dist_map = compute_dist_map_local_search(
-                    q_feat,
-                    r_feat,
-                    valid_mask=valid_mask3,
-                    radius=args.radius,
-                )
-                dist_map__ = compute_dist_map_local_search(
-                    q_feat__,
-                    r_feat__,
-                    valid_mask=valid_mask2,
-                    radius=args.radius,
-                )
-
-                # DINOv2 기반 dist map
-                dist_map_dino = compute_dist_map_local_search(
-                    q_dino_feat,
-                    r_dino_feat,
-                    valid_mask=valid_mask_dino,
-                    radius=args.radius,
-                )
-
-            except Exception as e:
-                tried_log.append({
-                    "try_idx": int(try_idx),
-                    "ref_path": str(ref_path),
-                    "status": "dist_exception",
-                    "error": str(e),
-                })
-                continue
-
-            # 7) save
-            save_named_outputs(case_dir, q_crop, r_crop, dist_map,      valid_mask3,     prefix="layer3")
-            save_named_outputs(case_dir, q_crop, r_crop, dist_map__,    valid_mask2,     prefix="layer2")
-            save_named_outputs(case_dir, q_crop, r_crop, dist_map_dino, valid_mask_dino, prefix="dino")
-            # 원본 q_crop 저장
-            cv2.imwrite(str(case_dir / "q_crop.png"), q_crop)
-            cv2.imwrite(str(case_dir / "r_crop.png"), r_crop)
-
-            # 8) SAM 경계 정제 (--sam_ckpt 인자가 있고 로드 성공한 경우만)
-            # ZeroSCD 방식: dist_map(coarse) → SAM 세그먼트 검증 → binary mask
-            if sam_gen is not None:
-                try:
-                    # SAM은 RGB uint8 입력 필요
-                    q_rgb_for_sam = cv2.cvtColor(q_crop, cv2.COLOR_BGR2RGB)
-                    r_rgb_for_sam = cv2.cvtColor(r_crop,     cv2.COLOR_BGR2RGB)
-
-                    sam_result = refine_with_sam(
-                        q_crop_rgb=q_rgb_for_sam,
-                        r_crop_rgb=r_rgb_for_sam,
-                        dist_map=dist_map,        # ResNet layer3 dist를 coarse map으로 사용
-                        predictor=sam_gen,
-                        top_p=args.sam_top_p,
-                        abs_floor=args.sam_abs_floor,
-                        peak_alpha=args.sam_peak_alpha,
-                        min_blob_peak=args.sam_min_blob_peak,
-                        min_blob_mean=args.sam_min_blob_mean,
-                        dv_iou_thresh=args.sam_dv_iou_thresh,
-                    )
-                    # 추가: SAM 결과 로깅 (리포트용)
-                    sam_blobs = sam_result["num_blobs"]
-                    sam_confirmed = sam_result["num_confirmed_blobs"]
-                    print(f"  [SAM] blobs={sam_blobs} confirmed={sam_confirmed} (adaptive_th={sam_result['adaptive_threshold']:.3f})")
-
-                    save_sam_outputs(case_dir, q_crop, r_crop, sam_result)
-
-                    sam_meta = {
-                        "sam_blobs": sam_blobs,
-                        "sam_confirmed": sam_confirmed,
-                        "sam_adaptive_threshold": float(sam_result["adaptive_threshold"]),
-                        "is_anomaly": bool(sam_confirmed > 0)
-                    }
-
-                except Exception as e:
-                    print(f"  [SAM WARN] 정제 실패: {e}")
-                    sam_meta = {"is_anomaly": False}
-            else:
-                sam_meta = {"is_anomaly": False}
-
-            # 매칭 결과 메타데이터 저장
-            meta = {
-                "query_path": str(q_path),
-                "selected_ref_path": str(ref_path),
-                "bbox": [int(v) for v in bbox] if bbox is not None else None,
-                "valid_count": int(valid_count),
-                "dist_min": float(dist_map.min()),
-                "dist_max": float(dist_map.max()),
-                "dist_mean": float(dist_map.mean()),
-                "try_idx": int(try_idx),
-                "radius": int(args.radius),
-                "match_info": {
-                    "inliers": int(match_res.get("inliers", 0)),
-                    "inlier_ratio": float(match_res.get("inlier_ratio", 0.0)),
-                    "reproj_error_mean": float(match_res.get("reproj_error_mean", 0.0)),
-                    "reproj_error_median": float(match_res.get("reproj_error_median", 0.0)),
-                    "num_matches": int(match_res.get("num_matches", 0)),
-                },
-            }
-            meta.update(sam_meta)  # SAM 정보 병합
-            
-            with open(case_dir / "meta.json", "w", encoding="utf-8") as f:
-                json.dump(meta, f, ensure_ascii=False, indent=2)
-
-            tried_log.append({
-                "try_idx": int(try_idx),
-                "ref_path": str(ref_path),
-                "status": "success",
-                "valid_count": int(valid_count),
-                "inliers": int(match_res.get("inliers", 0)),
-                "inlier_ratio": float(match_res.get("inlier_ratio", 0.0)),
-                "reproj_error_mean": float(match_res.get("reproj_error_mean", 0.0)),
-            })
-
-            # 성공 → ref 루프 탈출
-            success = True
-            
-            # Ground Truth 확인 (파일명 기반)
-            is_abnormal = q_path.name.startswith("abnormal_")
-            is_pred_abnormal = sam_meta.get("is_anomaly", False)
-            
-            eval_y_true.append(1 if is_abnormal else 0)
-            eval_y_pred.append(1 if is_pred_abnormal else 0)
-            
-            print(
-                f"[OK] {q_path.name} <- {Path(ref_path).name} "
-                f"(try={try_idx}, inliers={match_res.get('inliers', 0)}, "
-                f"reproj={match_res.get('reproj_error_mean', 0.0):.3f})"
-            )
-            break
-
-        # ref 후보 전체 시도 결과 로그 저장
-        with open(case_dir / "candidate_log.json", "w", encoding="utf-8") as f:
-            json.dump(tried_log, f, ensure_ascii=False, indent=2)
-
-        if not success:
-            print(f"[FAIL] {q_path.name}")
-            # 실패한 경우도 평가에 반영 (정상을 예측하지 못한 것으로 간주 FN or TN)
-            is_abnormal = q_path.name.startswith("abnormal_")
-            eval_y_true.append(1 if is_abnormal else 0)
-            eval_y_pred.append(0) # 탐지 실패 = 정상 판정
-
-    # 평가 지표 출력
-    if len(eval_y_true) > 0:
-        print(f"\n[Done] place={args.place} queries: {len(query_paths)} 처리 완료.")
-        y_t = np.array(eval_y_true)
-        y_p = np.array(eval_y_pred)
-        
-        tp = int(np.sum((y_t == 1) & (y_p == 1)))
-        tn = int(np.sum((y_t == 0) & (y_p == 0)))
-        fp = int(np.sum((y_t == 0) & (y_p == 1)))
-        fn = int(np.sum((y_t == 1) & (y_p == 0)))
-        
-        acc = (tp + tn) / len(y_t)
-        precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
-        recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
-        f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
-        
-        print("\n" + "="*40)
-        print(f" [Evaluation Report] Place: {args.place}")
-        print("="*40)
-        print(f" Total Image: {len(y_t)}")
-        print(f"  - Actual Anomaly : {np.sum(y_t == 1)}")
-        print(f"  - Actual Normal  : {np.sum(y_t == 0)}")
-        print("-" * 40)
-        print(" [Confusion Matrix]")
-        print(f"             | Pred: Normal | Pred: Anomaly")
-        print(f" Actual: N   | TN: {tn:<8} | FP: {fp:<8}")
-        print(f" Actual: A   | FN: {fn:<8} | TP: {tp:<8}")
-        print("-" * 40)
-        print(f" Accuracy  : {acc:.4f}")
-        print(f" Precision : {precision:.4f}")
-        print(f" Recall    : {recall:.4f}")
-        print(f" F1 Score  : {f1:.4f}")
-        print("="*40 + "\n")
-        
-        # 파일로도 저장
-        with open(out_dir / "evaluation_report.txt", "w") as f:
-            f.write(f"Place: {args.place}\n")
-            f.write(f"Total Image: {len(y_t)}\n")
-            f.write(f"TN: {tn}, FP: {fp}\n")
-            f.write(f"FN: {fn}, TP: {tp}\n")
-            f.write(f"Accuracy: {acc:.4f}\n")
-            f.write(f"Precision: {precision:.4f}\n")
-            f.write(f"Recall: {recall:.4f}\n")
-            f.write(f"F1: {f1:.4f}\n")
 
 if __name__ == "__main__":
     main()

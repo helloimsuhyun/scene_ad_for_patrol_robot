@@ -1,5 +1,4 @@
 #!/bin/bash
-06
 
 PLACES=(06 00 08)
 
@@ -12,10 +11,14 @@ for PLACE in "${PLACES[@]}"; do
     --place ${PLACE} \
     --mode calib \
     --calib_method robust \
-    --calib_k 3.0 \
-    --calib_max_imgs 30 \
+    --cc_k 2.5 \
+    --final_k 2.5 \
+    --calib_max_imgs 100 \
     --calib_n_ref 3 \
-    --proposal_top_k 3
+    --radius 1 \
+    --seed 0 \
+    --dino_model dinov2_vits14 \
+    --dino_top_m 3
 
   echo "=============================="
   echo "[INFER] place=${PLACE}"
@@ -25,7 +28,10 @@ for PLACE in "${PLACES[@]}"; do
     --place ${PLACE} \
     --mode infer \
     --n_ref_candidates 3 \
-    --proposal_top_k 3
+    --radius 1 \
+    --seed 0 \
+    --dino_model dinov2_vits14 \
+    --dino_top_m 3
 
 done
 
