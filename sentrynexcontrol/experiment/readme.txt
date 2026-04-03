@@ -19,21 +19,20 @@ python3 ex.py \
 
 
 python ex.py \
-  --place 06 \
+  --place 08 \
   --mode calib \
   --calib_method robust \
-  --calib_k 2.5 \
-  --calib_max_imgs 30 \
-  --calib_n_ref 5 \
+  --cc_k 1.3 \
+  --final_k 2.0 \
+  --calib_max_imgs 100 \
+  --calib_n_ref 3 \
   --dino_model dinov2_vits14 \
-  --dino_top_m 5 \
-  --n_ref_candidates 5
-
+  --dino_top_m 3
 
 python ex.py \
-  --place 06 \
+  --place 08 \
   --mode infer \
+  --n_ref_candidates 3\
   --dino_model dinov2_vits14 \
-  --dino_top_m 5 \
-  --n_ref_candidates 5
+  --dino_top_m 3
 

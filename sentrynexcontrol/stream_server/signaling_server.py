@@ -51,36 +51,44 @@ async def viewer_offer(req: SDP):
     global sender_offer_store, sender_answer_store
     global viewer_waiter, sender_waiter
 
+    print("[viewer_offer] received from viewer")
+    print(f"[viewer_offer] type={req.type}, sdp_len={len(req.sdp)}")
+
     viewer_offer_store = req.dict()
     viewer_answer_store = None
 
     sender_offer_store = None
     sender_answer_store = None
 
+    print("[viewer_offer] stored offer, notifying sender pollers")
     sender_waiter.set()
 
-    for _ in range(300):
+    for i in range(300):
         await asyncio.sleep(0.1)
         if viewer_answer_store is not None:
+            print(f"[viewer_offer] got answer after {0.1*(i+1):.1f}s")
             return viewer_answer_store
 
+    print("[viewer_offer] timeout waiting for sender answer")
     raise HTTPException(status_code=504, detail="timeout waiting for sender answer")
 
 
-@app.post("/sender_offer")
-async def sender_offer(req: SDP):
-    global viewer_offer_store, viewer_answer_store
-    global sender_offer_store, sender_answer_store
-    global viewer_waiter, sender_waiter
+@app.get("/sender_poll")
+async def sender_poll():
+    global viewer_offer_store
+    print("[sender_poll] robot polling started")
 
-    sender_offer_store = req.dict()
+    for i in range(300):
+        await asyncio.sleep(0.1)
+        if viewer_offer_store is not None:
+            print(f"[sender_poll] found viewer offer after {0.1*(i+1):.1f}s")
+            offer = viewer_offer_store
+            viewer_offer_store = None
+            print(f"[sender_poll] delivering offer to robot, sdp_len={len(offer['sdp'])}, type={offer['type']}")
+            return offer
 
-    if viewer_offer_store is None:
-        raise HTTPException(status_code=409, detail="no viewer waiting")
-
-    # sender가 viewer offer를 받아야 하므로 여기서는 직접 answer가 아니라
-    # 구조를 바꾸는 게 낫다.
-    raise HTTPException(status_code=500, detail="Use /sender_poll and /sender_answer flow")
+    print("[sender_poll] no viewer offer within polling window")
+    return JSONResponse(status_code=404, content={"detail": "no viewer offer"})
 
 
 @app.get("/sender_poll")
