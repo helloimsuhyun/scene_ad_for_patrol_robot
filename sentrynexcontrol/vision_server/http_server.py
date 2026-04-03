@@ -934,11 +934,13 @@ class RobotGoalReq(BaseModel):
 # 로봇 -> 서버 : 현재 pose 업로드 endpoint ( 로봇쪽에서 주기적으로 송신 /robot_pose)
 @app.post("/robot/pose")
 async def update_robot_pose(req: RobotPoseReq):
-    #print(
-    #    f"[ROBOT POSE] x={req.x:.3f}, y={req.y:.3f}, yaw={req.yaw:.3f}, "
-    #    f"status={req.status}",
-    #    flush=True,
-    #)
+    """
+    print(
+        f"[ROBOT POSE] x={req.x:.3f}, y={req.y:.3f}, yaw={req.yaw:.3f}, "
+        f"status={req.status}",
+        flush=True,
+    )
+    """
     app.state.robot_pose = {
         "x": req.x,
         "y": req.y,

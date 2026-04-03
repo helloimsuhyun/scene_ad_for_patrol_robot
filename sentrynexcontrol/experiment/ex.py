@@ -162,59 +162,6 @@ def plot_bbox_scores(out_dir: Path):
 
     print(f"[PLOT] saved: {out_dir / 'bbox_score_scatter.png'}")
 
-def plot_bbox_scores(out_dir: Path):
-    path = out_dir / "infer_all_results.json"
-    if not path.exists():
-        print("[PLOT] infer_all_results.json 없음")
-        return
-
-    data = json.loads(path.read_text())
-
-    normal_scores = []
-    abnormal_scores = []
-
-    for item in data:
-        is_abnormal = Path(item["query"]).name.startswith("abnormal_")
-
-        for r in item.get("flagged_regions", []):
-            s = float(r.get("final_bbox_score", 0.0))
-
-            if is_abnormal:
-                abnormal_scores.append(s)
-            else:
-                normal_scores.append(s)
-
-    plt.figure(figsize=(10, 4))
-
-    # 🔥 jitter 적용
-    x_n = np.random.normal(0, 0.04, size=len(normal_scores))
-    x_a = np.random.normal(1, 0.04, size=len(abnormal_scores))
-
-    plt.scatter(x_n, normal_scores, alpha=0.6, s=15, label="normal")
-    plt.scatter(x_a, abnormal_scores, alpha=0.6, s=15, label="abnormal")
-
-    plt.xticks([0, 1], ["normal", "abnormal"])
-
-    # 🔥 verifier threshold
-    thr_path = out_dir / "threshold.json"
-    if thr_path.exists():
-        meta = json.loads(thr_path.read_text())
-        thr = meta.get("verifier_threshold", None)
-        if thr is not None:
-            plt.axhline(thr, linestyle="--")
-
-    # 🔥 ylim 개선
-    all_scores = normal_scores + abnormal_scores
-    if len(all_scores) > 0:
-        low = np.percentile(all_scores, 1)
-        high = np.percentile(all_scores, 99)
-        plt.ylim(low, high)
-
-    plt.legend()
-    plt.savefig(out_dir / "bbox_score_scatter.png")
-    plt.close()
-
-    print(f"[PLOT] saved: {out_dir / 'bbox_score_scatter.png'}")
 
 def compute_ssim_map_feature(q_feat, r_feat, valid_mask=None, window_size=7,
                              C1=0.01**2, C2=0.03**2):
@@ -782,7 +729,8 @@ def run_calibration(
     plc_idx: str = "",
     radius: int = 1,
     calib_method: str = "robust",
-    calib_k: float = 3.0,
+    cc_k: float = 1.5,
+    final_k: float = 2.5,
     calib_max_imgs: int = 30,
     calib_n_ref: int = 5,
     seed: int = 0,
@@ -896,7 +844,7 @@ def run_calibration(
             continue
 
         image_comp_max = max(comp_scores)
-        scores.append(image_comp_max)
+        scores.extend(comp_scores)
 
         best_score = float(cand_scores[best_idx])
         pair_log.append({
@@ -922,7 +870,7 @@ def run_calibration(
     calib_result = calibrate_threshold(
         scores_arr,
         method=calib_method,
-        k=calib_k,
+        k=cc_k,
         trim_outliers=True,
         trim_k=3.5,
     )
@@ -992,21 +940,10 @@ def run_calibration(
         if len(all_comps) == 0:
             continue
 
-        roi_floor = 0.3 * compound_thr
-        roi_top_k = 5
-
-        roi_comps = [
+        flagged_comps = [
             c for c in all_comps
-            if float(c.get("score", 0.0)) > roi_floor and int(c.get("area", 0)) >= 1
+            if float(c.get("score", 0.0)) > compound_thr and int(c.get("area", 0)) >= 1
         ]
-
-        roi_comps = sorted(
-            roi_comps,
-            key=lambda x: float(x.get("score", 0.0)),
-            reverse=True
-        )[:roi_top_k]
-
-        flagged_comps = roi_comps
 
         if len(flagged_comps) == 0:
             continue
@@ -1042,7 +979,7 @@ def run_calibration(
         ver_calib = calibrate_threshold(
             ver_arr,
             method=calib_method,
-            k=calib_k,
+            k=final_k,
             trim_outliers=True,
             trim_k=3.5,
         )
@@ -1057,11 +994,10 @@ def run_calibration(
     thr_json = {
         "plc_idx": plc_idx,
         "repr_mode": "compound_cc",
-        "k": float(calib_k),
+        "cc_k": float(cc_k),
+        "final_k": float(final_k),
         "method": calib_method,
         "percentile": int(calib_result["percentile"]),
-        "robust_k": float(calib_k) if calib_method == "robust" else 0.0,
-        "gaussian_k": float(calib_k) if calib_method == "gaussian" else 0.0,
         "threshold": float(calib_result["threshold"]),
         "verifier_threshold": float(verifier_threshold),
         "num_th": int(len(scores)),
@@ -1858,21 +1794,10 @@ def run_inference(
         # 하나라도 threshold를 초과하는 component가 있으면 ANOMALY 후보
         all_comps = best_debug.get("all_comp_scores", [])
 
-        roi_floor = 0.3 * thr
-        roi_top_k = 5
-
-        roi_comps = [
+        flagged_comps = [
             c for c in all_comps
-            if float(c.get("score", 0.0)) > roi_floor and int(c.get("area", 0)) >= 1
+            if float(c.get("score", 0.0)) > thr and int(c.get("area", 0)) >= 1
         ]
-
-        roi_comps = sorted(
-            roi_comps,
-            key=lambda x: float(x.get("score", 0.0)),
-            reverse=True
-        )[:roi_top_k]
-
-        flagged_comps = roi_comps
 
         flagged_regions = build_flagged_component_regions(
             flagged_comps=flagged_comps,
@@ -1967,10 +1892,12 @@ def run_inference(
 
         is_anomaly = len(verified_regions) > 0
         label_str = "ANOMALY" if is_anomaly else "NORMAL"
-        n_flagged = len(verified_regions)
+        n_flagged = len(flagged_comps)
+        n_verified = len(verified_regions)
 
         print(f"  [RESULT] best_score={best_score:.5f}, thr={thr:.5f} → {label_str} "
-              f"(flagged comps: {n_flagged}/{len(all_comps)})")
+            f"(flagged comps: {n_flagged}/{len(all_comps)}, verified: {n_verified})")
+
         print(f"           best_ref={best_info['r_path'].name}, "
               f"area={best_debug['area']}, peak={best_debug['peak']:.4f}")
 
@@ -2059,6 +1986,7 @@ def run_inference(
         cv2.imwrite(str(case_dir / "compound_best_component.png"), overlay_best)
 
         # --- 메타데이터 저장 ---
+
         result_meta = {
             "query"        : str(q_path),
             "best_ref"     : str(best_info["r_path"]),
@@ -2071,11 +1999,11 @@ def run_inference(
             "mean"         : round(best_debug["mean"], 5),
             "cut"          : round(best_debug["cut"], 5),
             "inliers"      : best_debug["inliers"],
-            "n_components" : len(all_comps),         # 전체 component 수
-            "n_flagged"    : n_flagged,              # threshold 초과 component 수
+            "n_components" : len(all_comps),
+            "n_flagged"    : n_flagged,
+            "n_verified"   : n_verified,
             "flagged_comp_scores": [round(c["score"], 6) for c in flagged_comps],
             "all_cand_scores": [round(s, 5) for s in cand_scores],
-            
         }
         result_meta["verifier_threshold"] = round(verifier_thr, 6)
         result_meta["best_verifier_score"] = round(best_verifier_score, 6)
@@ -2345,6 +2273,12 @@ def main():
         default=None,
         help="k 값. 미지정 시 config.calib.* 또는 config.calib.k 사용"
     )
+    parser.add_argument("--cc_k", type=float, default=None,
+                    help="1차 component gate calibration k")
+    parser.add_argument("--final_k", type=float, default=None,
+                        help="2차 verifier threshold calibration k")
+
+    
     parser.add_argument("--calib_max_imgs", type=int, default=30,
                         help="캘리브레이션 시 th_calib 이미지 최대 수 (Fix1 best-match 방식)")
     parser.add_argument("--calib_n_ref",    type=int, default=5,
@@ -2399,6 +2333,15 @@ def main():
             calib_k = float(calib_cfg.get("percentile", 99.0))
         else:
             raise ValueError(f"알 수 없는 calib_method: {calib_method}")
+    cc_k = float(
+        args.cc_k if args.cc_k is not None
+        else calib_cfg.get("cc_k", calib_k)
+    )
+
+    final_k = float(
+        args.final_k if args.final_k is not None
+        else calib_cfg.get("final_k", calib_k)
+    )
 
     img_size  = int(cfg.get("embed", {}).get("img_size", 560))
 
@@ -2406,7 +2349,7 @@ def main():
 
     cc_backbone = build_local_backbone(backbone_name="resnet18_layer3",img_size=img_size,)
     verifier_backbone = build_local_backbone(
-    backbone_name="resnet18_layer2",   #
+    backbone_name="resnet18_layer3",   #
             img_size=224,
         )
 
@@ -2464,7 +2407,8 @@ def main():
             plc_idx=args.place,
             radius=args.radius,
             calib_method=calib_method,
-            calib_k=calib_k,
+            cc_k=cc_k,
+            final_k=final_k,
             calib_max_imgs=args.calib_max_imgs,
             calib_n_ref=args.calib_n_ref,
             seed=args.seed,
