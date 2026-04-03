@@ -7,6 +7,7 @@ datasets/
 dinov3/
 past/
 recv/
+recv_audio/
 
 # -------------------------
 # Model checkpoints
@@ -59,3 +60,13 @@ Thumbs.db
 *.iml
 *.iws
 *.ipr
+
+.dart_tool/
+build/
+.flutter-plugins-dependencies
+*.log
+chrome-device/
+SuperGluePretrainedNetwork/
+debug_out/.dart_tool/
+build/
+*.log

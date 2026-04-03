@@ -1,20 +1,46 @@
 import 'package:flutter/material.dart';
+import '../../widgets/alert_list.dart';
+import '../../widgets/audio_event_list.dart';
 
 class LogsScreen extends StatelessWidget {
   const LogsScreen({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      color: const Color(0xFF11121A),
-      padding: const EdgeInsets.all(24),
-      child: const Center(
-        child: Text(
-          '경보 기록 화면 (추후 구현 예정)',
-          style: TextStyle(
-            color: Colors.white70,
-            fontSize: 16,
-          ),
+    return DefaultTabController(
+      length: 2,
+      child: Container(
+        color: const Color(0xFF11121A),
+        padding: const EdgeInsets.all(24),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: const [
+            SizedBox(height: 8),
+            Text(
+              '데이터베이스에 저장된 비전(카메라) / 오디오 이벤트를 조회합니다 (최신순).',
+              style: TextStyle(color: Color(0xFF7A7F96), fontSize: 14),
+            ),
+            SizedBox(height: 16),
+            TabBar(
+              indicatorColor: Color(0xFF7F7CFF),
+              labelColor: Colors.white,
+              unselectedLabelColor: Color(0xFF757B92),
+              dividerColor: Colors.transparent,
+              tabs: [
+                Tab(text: '비전 이벤트'),
+                Tab(text: '오디오 이벤트'),
+              ],
+            ),
+            SizedBox(height: 24),
+            Expanded(
+              child: TabBarView(
+                children: [
+                  AlertList(showOnlyUnchecked: false),
+                  AudioEventList(showOnlyUnchecked: false),
+                ],
+              ),
+            ),
+          ],
         ),
       ),
     );

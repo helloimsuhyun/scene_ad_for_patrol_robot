@@ -1,0 +1,27 @@
+name: capston
+channels:
+  - pytorch
+  - nvidia
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pytorch
+  - torchvision
+  - torchaudio
+  - pytorch-cuda=11.8
+  - pip
+  - pip:
+      - fastapi
+      - "uvicorn[standard]"
+      - pydantic
+      - python-multipart
+      - requests
+      - numpy
+      - Pillow
+      - opencv-python
+      - matplotlib
+      - aiortc
+      - av
+      - pyyaml
+      - scipy

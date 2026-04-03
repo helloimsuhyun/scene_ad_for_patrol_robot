@@ -4,6 +4,7 @@
 
 import torch
 import torch.nn.functional as F
+import torchvision.transforms.functional as TF
 from PIL import Image
 from torchvision import transforms
 
@@ -16,6 +17,12 @@ def load_model(model_name="dinov2_vits14", device=None):
 
 def make_transform(img_size=560):
     return transforms.Compose([
+        # 4:3 비율로 좌우 crop
+        transforms.Lambda(lambda img: (
+            TF.center_crop(img, (img.height, int(img.height * 4 / 3)))
+            if img.width / img.height > 4/3
+            else TF.center_crop(img, (int(img.width * 3 / 4), img.width))
+        )),
         transforms.Resize(img_size),
         transforms.CenterCrop(img_size),
         transforms.ToTensor(),
@@ -32,6 +39,22 @@ def extract_feats(model, device, x):
     patch = feats["x_norm_patchtokens"]     # [1,P,D]
     return cls, patch
 
+#레이어를 선택하여 patch feature를 추출
+@torch.no_grad()
+def extract_patch_layers(model, device, x, layer_a=10, layer_b=11):
+    x = x.unsqueeze(0).to(device)
+
+    outs = model.get_intermediate_layers(
+        x,
+        n=[layer_a],
+        reshape=False,
+        return_class_token=False,
+        norm=True,
+    )
+
+    p = outs[0].squeeze(0) # [P, D]
+    p = F.normalize(p, dim=-1)
+    return p
 
 #모드에 맞추어 emb를 반환
 @torch.no_grad()
@@ -60,8 +83,17 @@ def make_embed(model, device, x,
     if repr_mode == "patch":
         return {"patch": p}
 
-    if repr_mode in {"global_patch", "patch_global", "global_patch_pool"}:
+    if repr_mode in {
+        "global_patch",
+        "patch_global",
+        "global_patch_pool",
+        "global_patch_with_aligned",
+        "global_patch_with_aligned_loss_bank",
+    }:
         return {"global": gvec, "patch": p}
 
-    raise ValueError(f"unknown repr_mode={repr_mode} (use global|patch|global_patch)")
+    raise ValueError(
+        f"unknown repr_mode={repr_mode} "
+        f"(use global|patch|global_patch|global_patch_pool|global_patch_with_aligned)"
+    )
 

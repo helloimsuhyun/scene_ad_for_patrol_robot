@@ -38,6 +38,11 @@ class Event {
   final String? refTopkJson;
   final String? summaryText;
   final String? createdAt;
+  final int? adminChecked;
+  final String? adminLabel;
+  final double? x;
+  final double? y;
+  final double? yaw;
   
   // 백엔드에서 조인해서 보내줄 경우를 위한 frame 리스트
   final List<Frame> frames;
@@ -53,6 +58,11 @@ class Event {
     this.refTopkJson,
     this.summaryText,
     this.createdAt,
+    this.adminChecked,
+    this.adminLabel,
+    this.x,
+    this.y,
+    this.yaw,
     this.frames = const [],
   });
 
@@ -73,6 +83,11 @@ class Event {
       refTopkJson: json['ref_topk_json'],
       summaryText: json['summary_text'],
       createdAt: json['created_at'],
+      adminChecked: json['admin_checked'],
+      adminLabel: json['admin_label'],
+      x: json['x']?.toDouble(),
+      y: json['y']?.toDouble(),
+      yaw: json['yaw']?.toDouble(),
       frames: parsedFrames,
     );
   }

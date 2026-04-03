@@ -1,94 +1,57 @@
-# 🔎 Scene Anomaly Detection (k-NN Embedding Based)
+# Conda 환경 설정 및 필요 패키지 정리 가이드
 
-본 프로젝트는 **DINO feature embedding + k-NN 거리 기반 이상 감지 시스템**이다.  
-순찰 로봇의 장소별 상태 변화를 자동 감지하는 것을 목표로 설계되었다.
+의존 패키지 설치 및 환경설정 가이드
 
----
+### [Component Name] Conda 설치 및 환경 구축
 
-## ⚙️ Pipeline Overview
+Conda가 설치되어 있지 않은 사용자를 위한 가이드와 통합 환경 설정 파일입니다.
 
-Image  
-→ DINO Embedding Extraction  
-→ Place-specific Reference Bank  
-→ k-NN Distance Computation (k=3)  
-→ Adaptive Threshold (Percentile Calibration)  
-→ Anomaly Detection  
+#### 1. Miniconda 설치 (Linux)
+```bash
+# 다운로드 및 자동 설치
+wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
+bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda3
+~/miniconda3/bin/conda init bash
+source ~/.bashrc
+```
 
----
+### [NEW] [environment.yml](file:///home/choisuhyun/scene_ad_for_patrol_robot/environment.yml)
+Conda에서 즉시 설치 가능한 환경 설정 파일입니다.
 
-## 📈 Industrial Dataset Evaluation (VisA)
+```bash
+# 1. 환경 생성 및 모든 패키지 동시 설치
+conda env create -f environment.yml
 
-- k = 3  
-- Adaptive threshold 적용  
+# 2. 환경 활성화
+conda activate capston_server
 
-**Overall Performance (Representative Range)**  
-- Accuracy: ~85–90%  
-- Precision: High tendency  
-- Recall: Lower for small/local defects  
+```
 
-> Global CLS embedding 기반 방식은 작은 국소 결함에 둔감한 한계 존재
+#### 파이썬 패키지 상세 목록 (참고용)
+위의 [environment.yml](file:///home/choisuhyun/scene_ad_for_patrol_robot/environment.yml)을 사용하면 아래 패키지들이 한 번에 설치됩니다:
+- **DL/CV**: `torch`, `torchvision`, `opencv-python`, `matplotlib`, `numpy`, `Pillow`
+- **Backend**: `fastapi`, `uvicorn`, `pydantic`, `python-multipart`, `requests`
+- **Streaming/Robot**: `aiortc`, [av](file:///home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/vision_server/vis.py#578-681)
+- **Utils**: `pyyaml`, `scipy`
 
----
+### [Component Name] Flutter 프런트엔드
 
-## 🏭 Real Patrol Environment Evaluation
+`sentrynexcontrol` 폴더의 GUI 앱을 위한 설정입니다.
 
-- Total: 120 images (Normal 67 / Anomaly 53)  
-- k = 3  
-- Adaptive threshold 적용  
+- **Flutter SDK**: `^3.8.1` (버전 확인 필수: `flutter --version`)
+- **패키지 설치**: `sentrynexcontrol` 폴더에서 아래 명령 실행
+  ```bash
+  flutter pub get
+  ```
+- **주요 의존성**:
+  - `flutter_riverpod`: 상태 관리
+  - `flutter_webrtc`: 실시간 영상 스트리밍
+  - `audioplayers`: 오디오 이벤트 재생
+  - `http`: API 통신
 
-**Results**
-- Accuracy: **90.83%**
-- Recall: **88.68%**
-- Precision: **90.38%**
-- F1 Score: **89.52%**
+## Verification Plan
 
-→ 실제 순찰 환경 적용 가능성 확인
 
----
-
-## 📷 Demo Examples
-
-<p align="center">
-  <img src="./exam_chg.png" width="700"/>
-</p>
-<p align="center">
-  <img src="./exam_chg2.png" width="700"/>
-</p>
-<p align="center">
-  <img src="./example_chg.png" width="700"/>
-</p>
-
-<p align="center">
-  <img src="./exam_query_dist_curve.png" width="500"/>
-</p>
-
----
-
-## 🛠️ Tech Stack
-
-- PyTorch
-- DINO (Self-supervised Vision Transformer)
-- NumPy / Scikit-learn
-- OpenCV
-
----
-
-## 🚀 Future Work
-
-- Patch-level anomaly localization  
-- RGB-D 기반 구조 변화 감지  
-- ROS 연동 실시간 파이프라인 통합  
-
----
-
-## 📚 References
-
-- Deep Nearest Neighbor Anomaly Detection — NeurIPS 2022  
-- An Anomaly Detection System via Moving Surveillance Robots with Human — IROS 2021  
-- Semantic Scene Difference Detection in Daily Life Patroling by Mobile Robots using Pre-Trained Large-Scale Vision-Language Model — ICRA 2024  
-
-#서버실행
-./run_servers.sh
-#gui실헹
-cd sentrynexcontrol
-flutter run -d linux
+### 서버 실행 방법
+1. [run_servers.sh](file:///home/choisuhyun/scene_ad_for_patrol_robot/run_servers.sh) 실행 시 포트 8000, 8001이 정상적으로 열리는지 확인.
+2. `sentrynexcontrol`에서 `flutter run` 실행 시 빌드 오류가 없는지 확인.

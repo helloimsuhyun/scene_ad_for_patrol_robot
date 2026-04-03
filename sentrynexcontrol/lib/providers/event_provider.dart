@@ -44,13 +44,22 @@ class EventListNotifier extends StateNotifier<List<Event>> {
           final newEvents =
               eventsJson.map((json) => Event.fromJson(json)).toList();
 
-          _lastCapturedAt = newEvents.first.capturedAt;
-
-          if (state.isEmpty) {
-            state = newEvents;
-          } else {
-            state = [...newEvents, ...state];
+          // 최신 시간 업데이트
+          if (newEvents.isNotEmpty) {
+            _lastCapturedAt = newEvents.first.capturedAt;
           }
+
+          // 기존 상태와 병합 (중복 ID는 새 데이터로 교체)
+          final updatedState = List<Event>.from(state);
+          for (var newEvent in newEvents) {
+            final index = updatedState.indexWhere((e) => e.eventId == newEvent.eventId);
+            if (index != -1) {
+              updatedState[index] = newEvent; // 기존 항목 업데이트
+            } else {
+              updatedState.insert(0, newEvent); // 새 항목 추가
+            }
+          }
+          state = updatedState;
         }
       }
     } catch (e) {

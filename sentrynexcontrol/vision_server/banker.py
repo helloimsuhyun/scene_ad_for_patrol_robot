@@ -31,7 +31,7 @@ def BGR_to_RGB(img_bgr_uint8):
     img_pil = Image.fromarray(img_rgb).convert("RGB")
     return img_pil
 
-#경로에따른 npz에서 emb와 해당하는 이미지 경로를 return
+# 경로에따른 npz에서 emb와 해당하는 이미지 경로를 return
 def load_bank_npz(npz_path):
     """
     npz_path: Path or str
@@ -69,8 +69,6 @@ def load_bank_by_place(save_root, plc_idx, mode="bank"):
 #해당 장소의 npz 초기화
 def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
     
-
-
     #임베딩 추출 cfg ----
     cfg = cfg or {}
 
@@ -78,8 +76,8 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
     global_mode = str(cfg.get("embed", {}).get("global_mode", "patch_mean"))
     img_size    = int(cfg.get("embed", {}).get("img_size", 560))
 
-    if repr_mode not in {"global", "patch", "global_patch", "global_patch_pool"}:
-        raise ValueError(f"repr_mode must be global|patch|global_patch|global_patch_pool, got {repr_mode}")
+    if repr_mode not in {"global", "patch", "global_patch", "global_patch_pool", "global_patch_with_aligned", "global_patch_with_aligned_loss_bank"}:
+        raise ValueError(f"repr_mode must be global|patch|global_patch|global_patch_pool|global_patch_with_aligned, got {repr_mode}")
     effective_mode = "global_patch" if repr_mode == "patch" else repr_mode
 
     save_root = Path(save_root)
@@ -111,7 +109,7 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
 
         out = make_embed(
             model, device, x,
-            repr_mode=effective_mode,      # global|patch|global_patch|global_patch_poll
+            repr_mode=effective_mode,      # global|patch|global_patch|global_patch_poll|global_patch_with_aligned
             global_mode=global_mode,
         )
 
