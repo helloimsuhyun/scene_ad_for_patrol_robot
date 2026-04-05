@@ -17,7 +17,7 @@ from webrtc_sender import WebRTCSender
 # ==============================================================
 # 설정
 # ==============================================================
-DESKTOP_IP = "192.168.0.24"
+DESKTOP_IP = "192.168.0.204"
 
 VISION_SERVER_URL = f"http://{DESKTOP_IP}:8000"
 SIGNALING_SERVER_URL = f"http://{DESKTOP_IP}:8001"

@@ -18,6 +18,252 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
 
   bool isSubmitting = false;
   bool _isEditMode = false;
+  bool _isInitialized = false;
+
+  Widget _buildPresetSlots() {
+    final presetsAsync = ref.watch(presetsProvider);
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          const Text(
+            '저장된 순찰 프리셋',
+            style: TextStyle(
+              color: Colors.white,
+              fontSize: 13,
+              fontWeight: FontWeight.bold,
+            ),
+          ),
+          const SizedBox(height: 8),
+          presetsAsync.when(
+            data: (presets) {
+              return Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                children: [
+                  // 1. 기존에 저장된 프리셋 칩 영역
+                  ...presets.map((preset) {
+                    final routesList = List<String>.from(
+                      jsonDecode(preset['routes']),
+                    );
+                    bool isSelected = false;
+                    if (selectedPlaceIds.length == routesList.length) {
+                      isSelected = true;
+                      for (int i = 0; i < selectedPlaceIds.length; i++) {
+                        if (selectedPlaceIds[i] != routesList[i]) {
+                          isSelected = false;
+                          break;
+                        }
+                      }
+                    }
+
+                    return Container(
+                      height: 36,
+                      padding: const EdgeInsets.only(left: 12, right: 0),
+                      decoration: BoxDecoration(
+                        color: isSelected
+                            ? const Color(0xFF7F7CFF).withOpacity(0.15)
+                            : const Color(0xFF1C1E2B),
+                        border: Border.all(
+                          color: isSelected
+                              ? const Color(0xFF7F7CFF)
+                              : const Color(0xFF2D3041),
+                        ),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          InkWell(
+                            onTap: () {
+                              setState(() {
+                                selectedPlaceIds.clear();
+                                selectedPlaceIds.addAll(routesList);
+                              });
+                            },
+                            child: Padding(
+                              padding: const EdgeInsets.symmetric(
+                                vertical: 8.0,
+                              ),
+                              child: Text(
+                                preset['name'],
+                                style: TextStyle(
+                                  color: isSelected
+                                      ? const Color(0xFF7F7CFF)
+                                      : Colors.white70,
+                                  fontSize: 12,
+                                  fontWeight: isSelected
+                                      ? FontWeight.bold
+                                      : FontWeight.normal,
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 2),
+                          Theme(
+                            data: Theme.of(context).copyWith(
+                              splashColor: Colors.transparent,
+                              highlightColor: Colors.transparent,
+                            ),
+                            child: PopupMenuButton<String>(
+                              icon: Icon(
+                                Icons.more_vert,
+                                size: 16,
+                                color: isSelected
+                                    ? const Color(0xFF7F7CFF)
+                                    : Colors.white54,
+                              ),
+                              padding: EdgeInsets.zero,
+                              tooltip: '더보기',
+                              color: const Color(0xFF26293A),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(8),
+                              ),
+                              onSelected: (value) {
+                                if (value == 'delete') {
+                                  ControlActions.deletePreset(
+                                    ref,
+                                    preset['id'],
+                                  );
+                                }
+                              },
+                              itemBuilder: (context) => [
+                                const PopupMenuItem(
+                                  value: 'delete',
+                                  child: Row(
+                                    children: [
+                                      Icon(
+                                        Icons.delete_outline,
+                                        color: Colors.redAccent,
+                                        size: 18,
+                                      ),
+                                      SizedBox(width: 8),
+                                      Text(
+                                        '삭제',
+                                        style: TextStyle(
+                                          color: Colors.redAccent,
+                                          fontSize: 13,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  }),
+
+                  // 2. 새 프리셋 저장 버튼 (동적 버튼)
+                  InkWell(
+                    onTap: () {
+                      if (selectedPlaceIds.isEmpty) {
+                        ScaffoldMessenger.of(context).showSnackBar(
+                          const SnackBar(
+                            content: Text(
+                              '저장할 노드가 없습니다.',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                          ),
+                        );
+                        return;
+                      }
+                      showDialog(
+                        context: context,
+                        builder: (ctx) {
+                          final txtCtrl = TextEditingController(
+                            text: '프리셋 ${presets.length + 1}',
+                          );
+                          return AlertDialog(
+                            backgroundColor: const Color(0xFF1C1E2B),
+                            title: const Text(
+                              '현재 경로 프리셋 저장',
+                              style: TextStyle(color: Colors.white),
+                            ),
+                            content: TextField(
+                              controller: txtCtrl,
+                              style: const TextStyle(color: Colors.white),
+                              decoration: const InputDecoration(
+                                labelText: '프리셋 이름',
+                                labelStyle: TextStyle(color: Colors.white54),
+                              ),
+                            ),
+                            actions: [
+                              TextButton(
+                                onPressed: () => Navigator.pop(ctx),
+                                child: const Text(
+                                  '취소',
+                                  style: TextStyle(color: Colors.white54),
+                                ),
+                              ),
+                              ElevatedButton(
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: const Color(0xFF7F7CFF),
+                                ),
+                                onPressed: () async {
+                                  await ControlActions.savePreset(
+                                    ref,
+                                    txtCtrl.text,
+                                    selectedPlaceIds,
+                                  );
+                                  if (ctx.mounted) Navigator.pop(ctx);
+                                },
+                                child: const Text(
+                                  '저장',
+                                  style: TextStyle(color: Colors.white),
+                                ),
+                              ),
+                            ],
+                          );
+                        },
+                      );
+                    },
+                    child: Container(
+                      height: 36,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF1C1E2B),
+                        border: Border.all(color: const Color(0xFF2D3041)),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(Icons.add, size: 14, color: Colors.white54),
+                          SizedBox(width: 4),
+                          Text(
+                            '현재 경로 저장',
+                            style: TextStyle(
+                              color: Colors.white54,
+                              fontSize: 12,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                ],
+              );
+            },
+            loading: () => const SizedBox(
+              height: 36,
+              child: Center(child: CircularProgressIndicator()),
+            ),
+            error: (_, __) => const SizedBox(
+              height: 36,
+              child: Center(
+                child: Text('오류', style: TextStyle(color: Colors.red)),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -47,6 +293,32 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                         data: (placesData) {
                           final places =
                               placesData['places'] as List<dynamic>? ?? [];
+
+                          if (!_isInitialized) {
+                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                              if (!mounted) return;
+                              setState(() {
+                                final activePlaces = places
+                                    .where(
+                                      (p) =>
+                                          p['patrol_enabled'] == 1 ||
+                                          p['patrol_enabled'] == true,
+                                    )
+                                    .toList();
+                                activePlaces.sort((a, b) {
+                                  final orderA =
+                                      a['patrol_order'] as int? ?? 999;
+                                  final orderB =
+                                      b['patrol_order'] as int? ?? 999;
+                                  return orderA.compareTo(orderB);
+                                });
+                                selectedPlaceIds = activePlaces
+                                    .map((p) => p['place_id'].toString())
+                                    .toList();
+                                _isInitialized = true;
+                              });
+                            });
+                          }
 
                           // 선택된 노드들의 픽셀 좌표 리스트 추출 (점선 연결용)
                           final List<Offset> points = [];
@@ -322,203 +594,212 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                 });
                                               }
                                             },
-                                            child: Stack(
-                                              clipBehavior: Clip.none,
-                                              children: [
-                                                Column(
-                                                  mainAxisSize:
-                                                      MainAxisSize.min,
-                                                  children: [
-                                                    Container(
-                                                      width: 32,
-                                                      height: 32,
-                                                      decoration: BoxDecoration(
-                                                        color:
-                                                            Colors.transparent,
-                                                        shape: BoxShape.circle,
-                                                        border: Border.all(
-                                                          color: const Color(
-                                                            0xFF7F7CFF,
+                                            child: Container(
+                                              // Increased tap target size for easier clicking
+                                              padding: const EdgeInsets.all(12),
+                                              color: Colors.transparent,
+                                              child: Stack(
+                                                clipBehavior: Clip.none,
+                                                children: [
+                                                  Column(
+                                                    mainAxisSize:
+                                                        MainAxisSize.min,
+                                                    children: [
+                                                      Container(
+                                                        width: 32,
+                                                        height: 32,
+                                                        decoration: BoxDecoration(
+                                                          color: Colors
+                                                              .transparent,
+                                                          shape:
+                                                              BoxShape.circle,
+                                                          border: Border.all(
+                                                            color: const Color(
+                                                              0xFF7F7CFF,
+                                                            ),
+                                                            width: 2,
                                                           ),
-                                                          width: 2,
+                                                          boxShadow: isSelected
+                                                              ? const [
+                                                                  BoxShadow(
+                                                                    color: Color(
+                                                                      0x667F7CFF,
+                                                                    ),
+                                                                    blurRadius:
+                                                                        10,
+                                                                    spreadRadius:
+                                                                        2,
+                                                                  ),
+                                                                ]
+                                                              : [],
                                                         ),
-                                                        boxShadow: isSelected
-                                                            ? const [
-                                                                BoxShadow(
-                                                                  color: Color(
-                                                                    0x667F7CFF,
+                                                        child: Center(
+                                                          child: isSelected
+                                                              ? Container(
+                                                                  width: 25,
+                                                                  height: 25,
+                                                                  decoration: BoxDecoration(
+                                                                    color: const Color(
+                                                                      0xFF7F7CFF,
+                                                                    ),
+                                                                    shape: BoxShape
+                                                                        .circle,
                                                                   ),
-                                                                  blurRadius:
-                                                                      10,
-                                                                  spreadRadius:
-                                                                      2,
-                                                                ),
-                                                              ]
-                                                            : [],
-                                                      ),
-                                                      child: Center(
-                                                        child: isSelected
-                                                            ? Container(
-                                                                width: 25,
-                                                                height: 25,
-                                                                decoration: BoxDecoration(
-                                                                  color: const Color(
-                                                                    0xFF7F7CFF,
-                                                                  ),
-                                                                  shape: BoxShape
-                                                                      .circle,
-                                                                ),
-                                                                child: Center(
-                                                                  child: Text(
-                                                                    '$orderIndex',
-                                                                    style: const TextStyle(
-                                                                      color: Colors
-                                                                          .white,
-                                                                      fontWeight:
-                                                                          FontWeight
-                                                                              .bold,
-                                                                      fontSize:
-                                                                          11,
+                                                                  child: Center(
+                                                                    child: Text(
+                                                                      '$orderIndex',
+                                                                      style: const TextStyle(
+                                                                        color: Colors
+                                                                            .white,
+                                                                        fontWeight:
+                                                                            FontWeight.bold,
+                                                                        fontSize:
+                                                                            11,
+                                                                      ),
                                                                     ),
                                                                   ),
-                                                                ),
-                                                              )
-                                                            : const SizedBox.shrink(),
-                                                      ),
-                                                    ),
-                                                    const SizedBox(height: 4),
-                                                    Container(
-                                                      // 노드 이름표
-                                                      padding:
-                                                          const EdgeInsets.symmetric(
-                                                            horizontal: 6,
-                                                            vertical: 4, // 2 -> 4로 확대
-                                                          ),
-                                                      decoration: BoxDecoration(
-                                                        color: Colors.black87,
-                                                        borderRadius:
-                                                            BorderRadius.circular(
-                                                              4,
-                                                            ),
-                                                      ),
-                                                      child: Text(
-                                                        displayName,
-                                                        style: const TextStyle(
-                                                          color: Colors.white,
-                                                          fontSize: 10,
-                                                          fontWeight:
-                                                              FontWeight.w600,
+                                                                )
+                                                              : const SizedBox.shrink(),
                                                         ),
                                                       ),
-                                                    ),
-                                                  ],
-                                                ),
-                                                if (_isEditMode)
-                                                  Positioned(
-                                                    top: -8,
-                                                    right: -8,
-                                                    child: GestureDetector(
-                                                      onTap: () async {
-                                                        final confirmed = await showDialog<bool>(
-                                                          context: context,
-                                                          builder: (ctx) => AlertDialog(
-                                                            backgroundColor:
-                                                                const Color(
-                                                                  0xFF1C1E2B,
-                                                                ),
-                                                            title: const Text(
-                                                              '노드 영구 삭제',
-                                                              style: TextStyle(
+                                                      const SizedBox(height: 4),
+                                                      Container(
+                                                        // 노드 이름표
+                                                        padding:
+                                                            const EdgeInsets.symmetric(
+                                                              horizontal: 6,
+                                                              vertical:
+                                                                  4, // 2 -> 4로 확대
+                                                            ),
+                                                        decoration: BoxDecoration(
+                                                          color: Colors.black87,
+                                                          borderRadius:
+                                                              BorderRadius.circular(
+                                                                4,
+                                                              ),
+                                                        ),
+                                                        child: Text(
+                                                          displayName,
+                                                          style:
+                                                              const TextStyle(
                                                                 color: Colors
                                                                     .white,
-                                                                fontSize: 16,
+                                                                fontSize: 10,
+                                                                fontWeight:
+                                                                    FontWeight
+                                                                        .w600,
                                                               ),
-                                                            ),
-                                                            content: Text(
-                                                              "'$displayName' 노드를 DB에서 영구적으로 삭제하겠습니까?",
-                                                              style:
-                                                                  const TextStyle(
-                                                                    color: Colors
-                                                                        .white70,
+                                                        ),
+                                                      ),
+                                                    ],
+                                                  ),
+                                                  if (_isEditMode)
+                                                    Positioned(
+                                                      top: -8,
+                                                      right: -8,
+                                                      child: GestureDetector(
+                                                        onTap: () async {
+                                                          final confirmed = await showDialog<bool>(
+                                                            context: context,
+                                                            builder: (ctx) => AlertDialog(
+                                                              backgroundColor:
+                                                                  const Color(
+                                                                    0xFF1C1E2B,
                                                                   ),
-                                                            ),
-                                                            actions: [
-                                                              TextButton(
-                                                                onPressed: () =>
-                                                                    Navigator.pop(
-                                                                      ctx,
-                                                                      false,
-                                                                    ),
-                                                                child:
-                                                                    const Text(
-                                                                      '취소',
-                                                                    ),
-                                                              ),
-                                                              ElevatedButton(
-                                                                style: ElevatedButton.styleFrom(
-                                                                  backgroundColor:
-                                                                      Colors
-                                                                          .redAccent,
-                                                                ),
-                                                                onPressed: () =>
-                                                                    Navigator.pop(
-                                                                      ctx,
-                                                                      true,
-                                                                    ),
-                                                                child: const Text(
-                                                                  '삭제',
-                                                                  style: TextStyle(
-                                                                    color: Colors
-                                                                        .white,
-                                                                  ),
+                                                              title: const Text(
+                                                                '노드 영구 삭제',
+                                                                style: TextStyle(
+                                                                  color: Colors
+                                                                      .white,
+                                                                  fontSize: 16,
                                                                 ),
                                                               ),
-                                                            ],
-                                                          ),
-                                                        );
+                                                              content: Text(
+                                                                "'$displayName' 노드를 DB에서 영구적으로 삭제하겠습니까?",
+                                                                style: const TextStyle(
+                                                                  color: Colors
+                                                                      .white70,
+                                                                ),
+                                                              ),
+                                                              actions: [
+                                                                TextButton(
+                                                                  onPressed: () =>
+                                                                      Navigator.pop(
+                                                                        ctx,
+                                                                        false,
+                                                                      ),
+                                                                  child:
+                                                                      const Text(
+                                                                        '취소',
+                                                                      ),
+                                                                ),
+                                                                ElevatedButton(
+                                                                  style: ElevatedButton.styleFrom(
+                                                                    backgroundColor:
+                                                                        Colors
+                                                                            .redAccent,
+                                                                  ),
+                                                                  onPressed: () =>
+                                                                      Navigator.pop(
+                                                                        ctx,
+                                                                        true,
+                                                                      ),
+                                                                  child: const Text(
+                                                                    '삭제',
+                                                                    style: TextStyle(
+                                                                      color: Colors
+                                                                          .white,
+                                                                    ),
+                                                                  ),
+                                                                ),
+                                                              ],
+                                                            ),
+                                                          );
 
-                                                        if (confirmed == true &&
-                                                            context.mounted) {
-                                                          await ControlActions.deletePlace(
-                                                            ref,
-                                                            placeId,
-                                                          );
-                                                          ref.invalidate(
-                                                            placesProvider,
-                                                          );
-                                                          setState(() {
-                                                            selectedPlaceIds
-                                                                .remove(
-                                                                  placeId,
-                                                                );
-                                                          });
-                                                        }
-                                                      },
-                                                      child: Container(
-                                                        padding:
-                                                            const EdgeInsets.all(
-                                                              3,
-                                                            ),
-                                                        decoration:
-                                                            BoxDecoration(
-                                                              color: Colors
-                                                                  .redAccent
-                                                                  .withAlpha(
-                                                                    70,
-                                                                  ),
-                                                              shape: BoxShape
-                                                                  .circle,
-                                                            ),
-                                                        child: const Icon(
-                                                          Icons.close,
-                                                          size: 14,
-                                                          color:
-                                                              Colors.redAccent,
+                                                          if (confirmed ==
+                                                                  true &&
+                                                              context.mounted) {
+                                                            await ControlActions.deletePlace(
+                                                              ref,
+                                                              placeId,
+                                                            );
+                                                            ref.invalidate(
+                                                              placesProvider,
+                                                            );
+                                                            setState(() {
+                                                              selectedPlaceIds
+                                                                  .remove(
+                                                                    placeId,
+                                                                  );
+                                                            });
+                                                          }
+                                                        },
+                                                        child: Container(
+                                                          padding:
+                                                              const EdgeInsets.all(
+                                                                3,
+                                                              ),
+                                                          decoration:
+                                                              BoxDecoration(
+                                                                color: Colors
+                                                                    .redAccent
+                                                                    .withAlpha(
+                                                                      70,
+                                                                    ),
+                                                                shape: BoxShape
+                                                                    .circle,
+                                                              ),
+                                                          child: const Icon(
+                                                            Icons.close,
+                                                            size: 14,
+                                                            color: Colors
+                                                                .redAccent,
+                                                          ),
                                                         ),
                                                       ),
                                                     ),
-                                                  ),
-                                              ],
+                                                ],
+                                              ),
                                             ),
                                           ),
                                         );
@@ -626,6 +907,9 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                       ),
                     ),
                     const SizedBox(height: 16),
+                    // 프리셋 컴포넌트 추가
+                    _buildPresetSlots(),
+                    const SizedBox(height: 8),
 
                     // 선택된 리스트
                     Expanded(

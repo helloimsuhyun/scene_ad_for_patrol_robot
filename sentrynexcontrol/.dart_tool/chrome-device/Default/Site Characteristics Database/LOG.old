@@ -1,4 +1,7 @@
-2026/03/27-22:41:33.511 7c84 Reusing MANIFEST C:\Users\ilgye\AppData\Local\Temp\flutter_tools.46c9c152\flutter_tools_chrome_device.7bb57182\Default\Site Characteristics Database/MANIFEST-000001
-2026/03/27-22:41:33.512 7c84 Recovering log #6
-2026/03/27-22:41:33.512 7c84 Reusing old log C:\Users\ilgye\AppData\Local\Temp\flutter_tools.46c9c152\flutter_tools_chrome_device.7bb57182\Default\Site Characteristics Database/000006.log 
-2026/03/27-22:41:33.513 7c84 Delete type=0 #3
+2026/04/04-02:03:35.376 8a20 Reusing MANIFEST C:\Users\ilgye\AppData\Local\Temp\flutter_tools.7d4fcf5a\flutter_tools_chrome_device.fec8f8b3\Default\Site Characteristics Database/MANIFEST-000001
+2026/04/04-02:03:35.383 8a20 Recovering log #10
+2026/04/04-02:03:35.383 8a20 Reusing old log C:\Users\ilgye\AppData\Local\Temp\flutter_tools.7d4fcf5a\flutter_tools_chrome_device.fec8f8b3\Default\Site Characteristics Database/000010.log 
+2026/04/04-02:03:35.384 8a20 Delete type=0 #3
+2026/04/04-02:03:35.384 8a20 Delete type=2 #4
+2026/04/04-02:03:35.384 8a20 Delete type=2 #6
+2026/04/04-02:03:35.384 8a20 Delete type=0 #6

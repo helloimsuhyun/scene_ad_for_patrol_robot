@@ -139,7 +139,7 @@ class ControlScreen extends ConsumerWidget {
                                 final p = entry.value;
                                 final placeId = p['place_id'].toString();
                                 final displayName = p['display_name']?.toString() ?? placeId;
-                                final patrolEnabled = p['patrol_enabled'] == 1 || p['patrol_enabled'] == true;
+                                final patrolEnabled = p['patrol_enabled'] == 1 || p['patrol_enabled'] == true || p['patrol_enabled'] == '1' || p['patrol_enabled'] == 'true';
                                 final patrolOrder = p['patrol_order'] ?? 0;
                                 final mode = p['mode'].toString();
                                 final bankCount = p['bank_count'];
@@ -165,22 +165,30 @@ class ControlScreen extends ConsumerWidget {
                                             mainAxisSize: MainAxisSize.min,
                                             children: [
                                               InkWell(
-                                                onTap: index > 0 ? () {
+                                                onTap: index > 0 ? () async {
                                                   final newOrder = List<String>.from(places.map((e) => e['place_id'].toString()));
                                                   final temp = newOrder[index];
                                                   newOrder[index] = newOrder[index - 1];
                                                   newOrder[index - 1] = temp;
-                                                  ControlActions.reorderPatrol(ref, newOrder);
+                                                  try {
+                                                    await ControlActions.reorderPatrol(ref, newOrder);
+                                                  } catch (e) {
+                                                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('에러: $e')));
+                                                  }
                                                 } : null,
                                                 child: Icon(Icons.arrow_drop_up, size: 20, color: index > 0 ? Colors.white : Colors.white24),
                                               ),
                                               InkWell(
-                                                onTap: index < places.length - 1 ? () {
+                                                onTap: index < places.length - 1 ? () async {
                                                   final newOrder = List<String>.from(places.map((e) => e['place_id'].toString()));
                                                   final temp = newOrder[index];
                                                   newOrder[index] = newOrder[index + 1];
                                                   newOrder[index + 1] = temp;
-                                                  ControlActions.reorderPatrol(ref, newOrder);
+                                                  try {
+                                                    await ControlActions.reorderPatrol(ref, newOrder);
+                                                  } catch (e) {
+                                                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('에러: $e')));
+                                                  }
                                                 } : null,
                                                 child: Icon(Icons.arrow_drop_down, size: 20, color: index < places.length - 1 ? Colors.white : Colors.white24),
                                               ),
@@ -215,9 +223,13 @@ class ControlScreen extends ConsumerWidget {
                                                       TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('취소', style: TextStyle(color: Colors.white70))),
                                                       ElevatedButton(
                                                         style: ElevatedButton.styleFrom(backgroundColor: const Color(0xFF7F7CFF)),
-                                                        onPressed: () {
-                                                          ControlActions.updateDisplayName(ref, placeId, ctrl.text);
-                                                          Navigator.pop(ctx);
+                                                        onPressed: () async {
+                                                          try {
+                                                            await ControlActions.updateDisplayName(ref, placeId, ctrl.text);
+                                                            if (context.mounted) Navigator.pop(ctx);
+                                                          } catch (e) {
+                                                            if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('에러: $e')));
+                                                          }
                                                         }, 
                                                         child: const Text('저장', style: TextStyle(color: Colors.white)))
                                                     ],
@@ -237,8 +249,12 @@ class ControlScreen extends ConsumerWidget {
                                         value: patrolEnabled,
                                         activeColor: const Color(0xFF4ADE80),
                                         inactiveThumbColor: Colors.white54,
-                                        onChanged: (val) {
-                                          ControlActions.updatePatrolEnabled(ref, placeId, val);
+                                        onChanged: (val) async {
+                                          try {
+                                            await ControlActions.updatePatrolEnabled(ref, placeId, val);
+                                          } catch (e) {
+                                            if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('에러: $e')));
+                                          }
                                         },
                                       ),
                                     ),

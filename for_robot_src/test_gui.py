@@ -6,10 +6,11 @@ import requests
 from pprint import pprint
 
 SERVER_URL = "http://127.0.0.1:8000"      # vision server
-BRIDGE_URL = "http://192.168.0.88"   # ROS2 patrol_http_bridge device IP
+BRIDGE_URL = "http://192.168.0.24:8090"   # ROS2 patrol_http_bridge device IP
 TIMEOUT = 5
 
 MODE_CYCLE = ["idle", "bank", "th_calib", "query"]
+VALID_ROBOT_COMMANDS = ["idle", "start", "pause", "resume", "stop", "teach", "reload_waypoints"]
 
 
 # =========================
@@ -67,24 +68,43 @@ def delete_threshold(place_id: str):
     return resp.json()
 
 
-# =========================
-# ROS2 Patrol bridge API
-# =========================
-def set_patrol_place(place_id: str):
+def get_robot_command():
+    resp = requests.get(f"{SERVER_URL}/robot/command", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def set_robot_command(command: str):
+    command = normalize_robot_command(command)
     resp = requests.post(
-        f"{BRIDGE_URL}/patrol/place",
-        json={"place_id": place_id},
+        f"{SERVER_URL}/robot/command",
+        json={"command": command},
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
     return resp.json()
 
 
-def set_query_gt(label: str):
-    label = normalize_label(label)
+def get_robot_pose():
+    resp = requests.get(f"{SERVER_URL}/robot/pose", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
 
+def get_robot_goal():
+    resp = requests.get(f"{SERVER_URL}/robot/goal", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+def get_query_capture_label():
+    resp = requests.get(f"{SERVER_URL}/query_capture_label", timeout=TIMEOUT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def set_query_capture_label(label: str):
+    label = normalize_label(label)
     resp = requests.post(
-        f"{BRIDGE_URL}/patrol/query_gt",
+        f"{SERVER_URL}/query_capture_label",
         json={"label": label},
         timeout=TIMEOUT,
     )
@@ -92,9 +112,13 @@ def set_query_gt(label: str):
     return resp.json()
 
 
-def trigger_capture():
+# =========================
+# ROS2 Patrol bridge API
+# =========================
+def trigger_capture(place_id: str):
     resp = requests.post(
         f"{BRIDGE_URL}/patrol/capture",
+        json={"place_id": place_id},
         timeout=TIMEOUT,
     )
     resp.raise_for_status()
@@ -124,6 +148,7 @@ def print_help():
     print("  c          -> 현재 place로 capture")
     print("  v          -> 현재 place 설정 후 capture")
     print("  l          -> 현재 place 상세 조회")
+    print("  g          -> 현재 robot pose / goal / next_place_id 조회")
     print("  s          -> calibration status 조회")
     print("  w          -> calibration status watch")
     print("  r          -> 전체 place recalibration 시작")
@@ -133,6 +158,9 @@ def print_help():
     print("  place <place_id>               -> 현재 선택 place 설정/조회")
     print("  mode <place_id> <mode>         -> 특정 place mode 변경")
     print("     valid mode: idle bank th_calib query")
+    print("  cmdget                         -> 현재 robot command 조회")
+    print("  cmd <command>                  -> robot command 설정")
+    print("     valid command: idle start pause resume stop teach reload_waypoints")
     print("  delplace <place_id>            -> 특정 place 삭제")
     print("  delall                         -> 전체 place 삭제")
     print("  delth <place_id>               -> 특정 place threshold 삭제")
@@ -140,8 +168,9 @@ def print_help():
     print("  exit                           -> 종료")
     print("")
     print("note:")
-    print("  - bank / th_calib 는 항상 normal")
-    print("  - z 는 query 라벨(normal/abnormal)만 토글")
+    print("  - capture 시 place_id는 브리지로 보내고, mode는 서버의 place.mode 기준으로 결정됨")
+    print("  - z 는 서버의 query_capture_label(normal/abnormal)만 토글")
+    print("  - bank / th_calib 는 서버가 normal로 처리하고, query만 서버 라벨을 사용함")
 
 
 def print_calibration_status(data: dict):
@@ -157,6 +186,33 @@ def print_calibration_status(data: dict):
 
     print(f"calib_progress: {done}/{total} ({pct:.1f}%)")
     print("current_place_id:", current)
+
+
+def print_robot_command(data: dict):
+    print("\n=== ROBOT COMMAND ===")
+    print("ok:", data.get("ok"))
+    print("command:", data.get("command"))
+    print("timestamp:", data.get("timestamp"))
+
+
+def print_robot_state():
+    pose_data = get_robot_pose()
+    goal_data = get_robot_goal()
+
+    pose = pose_data.get("pose", {}) or {}
+    goal = goal_data.get("goal", {}) or {}
+
+    print("\n=== ROBOT STATE ===")
+    print(
+        f"robot_pose: x={pose.get('x')}, y={pose.get('y')}, yaw={pose.get('yaw')}"
+    )
+    print(f"robot_status: {pose.get('status')}")
+    print(f"pose_timestamp: {pose.get('timestamp')}")
+    print(
+        f"robot_goal: x={goal.get('x')}, y={goal.get('y')}, yaw={goal.get('yaw')}"
+    )
+    print(f"next_place_id: {goal.get('next_place_id')}")
+    print(f"goal_timestamp: {goal.get('timestamp')}")
 
 
 def print_one_place(p: dict):
@@ -278,6 +334,13 @@ def normalize_label(value: str) -> str:
     return alias[s]
 
 
+def normalize_robot_command(value: str) -> str:
+    s = str(value).strip().lower()
+    if s not in VALID_ROBOT_COMMANDS:
+        raise ValueError(f"command must be one of: {', '.join(VALID_ROBOT_COMMANDS)}")
+    return s
+
+
 def next_place_id(current_place: str | None) -> str:
     if current_place is None:
         return "00"
@@ -343,7 +406,10 @@ def show_current_place(current_place: str):
 
 def main():
     current_place = "00"
-    current_label = "normal"   # query mode 전용
+    try:
+        current_label = get_query_capture_label().get("query_capture_label") or "normal"
+    except Exception:
+        current_label = "normal"
 
     print_help()
     print(f"\ncurrent_selected_place: {current_place}")
@@ -404,50 +470,30 @@ def main():
 
             elif op == "z":
                 current_label = toggle_label(current_label)
-                data = set_query_gt(current_label)
-                print(f"[label toggle] query_label -> {current_label}")
+                data = set_query_capture_label(current_label)
+                print(f"[label toggle] query_capture_label -> {current_label}")
                 pprint(data)
 
             elif op == "c":
                 current_place = ensure_current_place(current_place)
-                set_patrol_place(current_place)
-
-                mode = get_mode_of_place(current_place)
-
-                if mode == "query":
-                    set_query_gt(current_label)
-                    data = trigger_capture()
-                    print(f"[capture] place_id={current_place} mode=query query_label={current_label}")
-                elif mode in ["bank", "th_calib"]:
-                    data = trigger_capture()
-                    print(f"[capture] place_id={current_place} mode={mode} label=normal (fixed)")
-                else:
-                    data = trigger_capture()
-                    print(f"[capture] place_id={current_place} mode={mode}")
-
+                data = trigger_capture(current_place)
+                print(f"[capture] place_id={current_place} (server decides mode/label)")
                 pprint(data)
 
             elif op == "v":
                 current_place = ensure_current_place(current_place)
-                mode = get_mode_of_place(current_place)
-
-                if mode == "query":
-                    set_query_gt(current_label)
-                    data = place_and_capture(current_place)
-                    print(f"[place_and_capture] place_id={current_place} mode=query query_label={current_label}")
-                elif mode in ["bank", "th_calib"]:
-                    data = place_and_capture(current_place)
-                    print(f"[place_and_capture] place_id={current_place} mode={mode} label=normal (fixed)")
-                else:
-                    data = place_and_capture(current_place)
-                    print(f"[place_and_capture] place_id={current_place} mode={mode}")
-
+                data = place_and_capture(current_place)
+                print(f"[place_and_capture] place_id={current_place} (server decides mode/label)")
                 pprint(data)
+
 
             elif op == "l":
                 current_place = ensure_current_place(current_place)
                 show_current_place(current_place)
                 print(f"current_query_label: {current_label}")
+
+            elif op == "g":
+                print_robot_state()
 
             elif op == "s":
                 data = get_calibration_status()
@@ -459,6 +505,22 @@ def main():
 
             elif op == "w":
                 watch_calibration_status()
+
+            elif op == "cmdget":
+                data = get_robot_command()
+                print_robot_command(data)
+
+            elif op == "cmd":
+                if len(cmd) != 2:
+                    print("usage: cmd <idle|start|pause|resume|stop|teach|reload_waypoints>")
+                    continue
+
+                data = set_robot_command(cmd[1])
+                print_robot_command({
+                    "ok": data.get("ok"),
+                    "command": data.get("command", {}).get("command"),
+                    "timestamp": data.get("command", {}).get("timestamp"),
+                })
 
             elif op == "mode":
                 if len(cmd) != 3:

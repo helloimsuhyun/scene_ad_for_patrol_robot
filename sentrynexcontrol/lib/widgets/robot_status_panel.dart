@@ -5,6 +5,7 @@ import 'dart:convert';
 import '../providers/robot_provider.dart';
 import '../features/control/control_provider.dart'; // placesProvider 참조
 import 'patrol_route_dialog.dart';
+import 'timeline_dialog.dart';
 
 // 로봇 현재 목표 지점 폴링은 실제 연동 시 활성화 예정
 // final _robotGoalProvider = StreamProvider...
@@ -14,6 +15,9 @@ final _isCapturingProvider = StateProvider<bool>((ref) => false);
 
 // 수동 캡처 테스트를 위한 현재 라벨 상태 (z 명령어 토글용)
 final _queryLabelProvider = StateProvider<String>((ref) => 'normal');
+
+// 수동 캡처(이동+캡처)를 위한 테스트용 타겟 구역
+final _testTargetPlaceProvider = StateProvider<String?>((ref) => null);
 
 class RobotStatusPanel extends ConsumerStatefulWidget {
   const RobotStatusPanel({super.key});
@@ -34,13 +38,24 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
     final loadingNotifier = ref.read(_isCapturingProvider.notifier);
     loadingNotifier.state = true;
     try {
+      final targetPlace = ref.read(_testTargetPlaceProvider);
+      final body = endpoint == 'place_and_capture' && targetPlace != null
+          ? jsonEncode({'place_id': targetPlace})
+          : null;
+
       final response = await http.post(
         Uri.parse('http://192.168.0.88:8090/patrol/$endpoint'),
+        headers: body != null ? {'Content-Type': 'application/json'} : null,
+        body: body,
       );
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['image_b64'] != null && context.mounted) {
-          final bytes = base64Decode(data['image_b64']);
+          final b64String = data['image_b64'].toString().replaceFirst(
+            RegExp(r'data:image/[^;]+;base64,'),
+            '',
+          );
+          final bytes = base64Decode(b64String);
           showDialog(
             context: context,
             builder: (ctx) => Dialog(
@@ -270,131 +285,282 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                 builder: (context) {
                   final queryLabel = ref.watch(_queryLabelProvider);
                   final isCapturing = ref.watch(_isCapturingProvider);
+                  final testPlace = ref.watch(_testTargetPlaceProvider);
+                  final placesAsync = ref.watch(placesProvider);
 
-                  return Row(
+                  return Column(
                     children: [
-                      Expanded(
-                        child: TextButton.icon(
-                          onPressed: () => _toggleQueryLabel(ref),
-                          style: TextButton.styleFrom(
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            minimumSize: Size.zero,
-                            tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          ),
-                          icon: Icon(
-                            queryLabel == 'normal'
-                                ? Icons.shield_outlined
-                                : Icons.warning_amber_rounded,
-                            color: queryLabel == 'normal'
-                                ? Colors.greenAccent
-                                : Colors.redAccent,
-                            size: 13,
-                          ),
-                          label: Text(
-                            '라벨: $queryLabel',
-                            style: TextStyle(
-                              color: queryLabel == 'normal'
-                                  ? Colors.greenAccent
-                                  : Colors.redAccent,
-                              fontSize: 10,
+                      // ---------- 1열: 라벨 및 대상 구역 선택 ----------
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextButton.icon(
+                              onPressed: () => _toggleQueryLabel(ref),
+                              style: TextButton.styleFrom(
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 8,
+                                ),
+                                minimumSize: Size.zero,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              icon: Icon(
+                                queryLabel == 'normal'
+                                    ? Icons.shield_outlined
+                                    : Icons.warning_amber_rounded,
+                                color: queryLabel == 'normal'
+                                    ? Colors.greenAccent
+                                    : Colors.redAccent,
+                                size: 13,
+                              ),
+                              label: Text(
+                                '라벨: $queryLabel',
+                                style: TextStyle(
+                                  color: queryLabel == 'normal'
+                                      ? Colors.greenAccent
+                                      : Colors.redAccent,
+                                  fontSize: 10,
+                                ),
+                              ),
                             ),
                           ),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: isCapturing
-                              ? null
-                              : () => _triggerCapture(context, ref, 'capture'),
-                          icon: isCapturing
-                              ? const SizedBox(
-                                  width: 12,
-                                  height: 12,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white54,
+                          const SizedBox(width: 4),
+                          Expanded(
+                            flex: 2,
+                            child: Container(
+                              height: 32,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 10,
+                              ),
+                              decoration: BoxDecoration(
+                                color: const Color(0xFF26293A),
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: DropdownButtonHideUnderline(
+                                child: placesAsync.when(
+                                  data: (data) {
+                                    final list =
+                                        data['places'] as List<dynamic>? ?? [];
+                                    // 현재 선택된 값이 list에 없으면 null
+                                    final currentVal =
+                                        list.any(
+                                          (p) =>
+                                              p['place_id'].toString() ==
+                                              testPlace,
+                                        )
+                                        ? testPlace
+                                        : null;
+                                    return DropdownButton<String>(
+                                      value: currentVal,
+                                      hint: const Text(
+                                        '테스트 이동 구역 선택',
+                                        style: TextStyle(
+                                          color: Colors.white54,
+                                          fontSize: 10,
+                                        ),
+                                      ),
+                                      dropdownColor: const Color(0xFF1C1E2B),
+                                      isExpanded: true,
+                                      icon: const Icon(
+                                        Icons.arrow_drop_down,
+                                        color: Colors.white54,
+                                        size: 16,
+                                      ),
+                                      items: list.map((p) {
+                                        final pid = p['place_id'].toString();
+                                        final name =
+                                            p['display_name']?.toString() ??
+                                            pid;
+                                        return DropdownMenuItem(
+                                          value: pid,
+                                          child: Text(
+                                            name,
+                                            style: const TextStyle(
+                                              color: Colors.white,
+                                              fontSize: 10,
+                                            ),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                        );
+                                      }).toList(),
+                                      onChanged: (val) {
+                                        ref
+                                                .read(
+                                                  _testTargetPlaceProvider
+                                                      .notifier,
+                                                )
+                                                .state =
+                                            val;
+                                      },
+                                    );
+                                  },
+                                  loading: () => const Text(
+                                    '로딩중...',
+                                    style: TextStyle(
+                                      color: Colors.white54,
+                                      fontSize: 10,
+                                    ),
                                   ),
-                                )
-                              : const Icon(Icons.camera_alt_outlined, size: 12),
-                          label: const Text(
-                            '현재캡처',
-                            style: TextStyle(fontSize: 10),
-                          ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF26293A),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            minimumSize: Size.zero,
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: ElevatedButton.icon(
-                          onPressed: isCapturing
-                              ? null
-                              : () => _triggerCapture(
-                                  context,
-                                  ref,
-                                  'place_and_capture',
-                                ),
-                          icon: isCapturing
-                              ? const SizedBox(
-                                  width: 12,
-                                  height: 12,
-                                  child: CircularProgressIndicator(
-                                    strokeWidth: 2,
-                                    color: Colors.white54,
+                                  error: (_, __) => const Text(
+                                    '에러',
+                                    style: TextStyle(
+                                      color: Colors.redAccent,
+                                      fontSize: 10,
+                                    ),
                                   ),
-                                )
-                              : const Icon(
-                                  Icons.location_on_outlined,
-                                  size: 12,
                                 ),
-                          label: const Text(
-                            '이동+캡처',
-                            style: TextStyle(fontSize: 10),
+                              ),
+                            ),
                           ),
-                          style: ElevatedButton.styleFrom(
-                            backgroundColor: const Color(0xFF1F8CEB),
-                            foregroundColor: Colors.white,
-                            padding: const EdgeInsets.symmetric(vertical: 12),
-                            minimumSize: Size.zero,
+                        ],
+                      ),
+                      const SizedBox(height: 6),
+                      // ---------- 2열: 캡처 및 이동+캡처 ----------
+                      Row(
+                        children: [
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: isCapturing
+                                  ? null
+                                  : () => _triggerCapture(
+                                      context,
+                                      ref,
+                                      'capture',
+                                    ),
+                              icon: isCapturing
+                                  ? const SizedBox(
+                                      width: 12,
+                                      height: 12,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white54,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.camera_alt_outlined,
+                                      size: 12,
+                                    ),
+                              label: const Text(
+                                '현재캡처',
+                                style: TextStyle(fontSize: 10),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF26293A),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                minimumSize: Size.zero,
+                              ),
+                            ),
                           ),
-                        ),
+                          const SizedBox(width: 4),
+                          Expanded(
+                            child: ElevatedButton.icon(
+                              onPressed: isCapturing
+                                  ? null
+                                  : () => _triggerCapture(
+                                      context,
+                                      ref,
+                                      'place_and_capture',
+                                    ),
+                              icon: isCapturing
+                                  ? const SizedBox(
+                                      width: 12,
+                                      height: 12,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                        color: Colors.white54,
+                                      ),
+                                    )
+                                  : const Icon(
+                                      Icons.location_on_outlined,
+                                      size: 12,
+                                    ),
+                              label: const Text(
+                                '이동+캡처',
+                                style: TextStyle(fontSize: 10),
+                              ),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF1F8CEB),
+                                foregroundColor: Colors.white,
+                                padding: const EdgeInsets.symmetric(
+                                  vertical: 12,
+                                ),
+                                minimumSize: Size.zero,
+                              ),
+                            ),
+                          ),
+                        ],
                       ),
                     ],
                   );
                 },
               ),
+
               const SizedBox(height: 10),
             ],
             const SizedBox(height: 10),
-            //---------- 순찰 글로벌 경로 및 제어 ----------
-            SizedBox(
-              width: double.infinity,
-              child: OutlinedButton.icon(
-                onPressed: () {
-                  showDialog(
-                    context: context,
-                    builder: (_) => const PatrolRouteDialog(),
-                  );
-                },
-                icon: const Icon(Icons.route_outlined, size: 18),
-                label: const Text(
-                  '순찰 루트 설정',
-                  style: TextStyle(fontWeight: FontWeight.w600, fontSize: 16),
-                ),
-                style: OutlinedButton.styleFrom(
-                  side: const BorderSide(color: Color(0xFF7F7CFF), width: 1.5),
-                  foregroundColor: const Color(0xFF7F7CFF),
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  shape: RoundedRectangleBorder(
-                    borderRadius: BorderRadius.circular(8),
+            //---------- 순찰 루트 및 타임라인 제어 ----------
+            Row(
+              children: [
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: () {
+                      showDialog(
+                        context: context,
+                        builder: (_) => const PatrolRouteDialog(),
+                      );
+                    },
+                    icon: const Icon(Icons.route_outlined, size: 16),
+                    label: const Text(
+                      '순찰 루트 설정',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                    ),
+                    style: OutlinedButton.styleFrom(
+                      side: const BorderSide(
+                        color: Color(0xFF7F7CFF),
+                        width: 1.5,
+                      ),
+                      foregroundColor: const Color(0xFF7F7CFF),
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
                   ),
                 ),
-              ),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: ElevatedButton.icon(
+                    onPressed: () {
+                      showDialog(
+                        context: context,
+                        builder: (_) => const TimelineDialog(),
+                      );
+                    },
+                    icon: const Icon(Icons.schedule, size: 16),
+                    label: const Text(
+                      '순찰 타임라인',
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 13,
+                      ),
+                    ),
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: const Color(0xFF7F7CFF),
+                      foregroundColor: Colors.white,
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                  ),
+                ),
+              ],
             ),
             const SizedBox(height: 12),
             Row(
