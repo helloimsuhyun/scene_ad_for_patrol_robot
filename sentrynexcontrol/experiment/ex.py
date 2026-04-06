@@ -210,6 +210,37 @@ def compute_ssim_map_feature(q_feat, r_feat, valid_mask=None, window_size=7,
 
     return dist
 
+def save_cc_heatmap(case_dir, q_crop, dist_map, valid_mask):
+    h, w = q_crop.shape[:2]
+
+    # 1. absolute heat (0~1 기준)
+    d = np.clip(dist_map, 0.0, 1.0)
+    heat = (d * 255).astype(np.uint8)
+    heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+
+    # 2. resize (patch → image)
+    heat_rs = cv2.resize(heat, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    valid_rs = cv2.resize(
+        valid_mask.astype(np.uint8),
+        (w, h),
+        interpolation=cv2.INTER_NEAREST
+    ).astype(bool)
+
+    # 3. overlay
+    overlay = q_crop.copy()
+    alpha = 0.5
+
+    blended = cv2.addWeighted(q_crop, 1 - alpha, heat_rs, alpha, 0)
+    overlay[valid_rs] = blended[valid_rs]
+
+    # invalid → gray
+    overlay[~valid_rs] = (128, 128, 128)
+
+    # 4. 저장
+    cv2.imwrite(str(case_dir / "cc_heat.png"), heat_rs)
+    cv2.imwrite(str(case_dir / "cc_overlay.png"), overlay)
+
 def save_named_outputs(save_dir, q_crop, r_crop, dist_map, valid_mask, prefix="dist"):
     save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -1022,9 +1053,14 @@ def run_calibration(
         )
         final_threshold = float(final_calib["threshold"])
     else:
-        final_threshold = 0.49
+        final_threshold = 0.45
         final_calib = None
         print("[CALIB WARN] final score 샘플 부족, 폴백 0.49 사용")
+    
+    MIN_FINAL_THR = 0.45
+    if final_threshold < MIN_FINAL_THR:
+        print(f"[CALIB FIX] final_thr {final_threshold:.4f} → {MIN_FINAL_THR:.4f}")
+        final_threshold = MIN_FINAL_THR
 
     from datetime import datetime
     created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -1868,6 +1904,13 @@ def run_inference(
         best_info  = cand_debugs[best_idx]
         best_debug = best_info["debug"]
 
+        save_cc_heatmap(
+            case_dir,
+            best_debug["q_crop"],
+            best_debug["dist_map"],
+            best_debug["valid_mask"],
+        )
+
         # -------------------------------------------------
         # 4) component proposal top-K
         # -------------------------------------------------
@@ -2129,7 +2172,7 @@ def _save_summary_gallery(out_dir: Path):
         # ② compound best component (compound_best_component.png)  ← 두 번째
         # ③ 원본 query crop (q_crop.png)  ← fallback
         overlay_path = None
-        candidates = ["stage6_verified_bbox_overlay_rel.png", "compound_best_component.png", "q_crop.png"]
+        candidates = ["stage6_verified_bbox_overlay_abs.png", "compound_best_component.png", "q_crop.png"]
         for c in candidates:
             p = case_dir / c
             if p.exists():
