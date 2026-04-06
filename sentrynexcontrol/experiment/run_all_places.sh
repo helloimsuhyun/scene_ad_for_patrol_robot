@@ -12,6 +12,7 @@ for PLACE in "${PLACES[@]}"; do
     --mode calib \
     --calib_method percentile \
     --calib_k 97 \
+    --final_threshold_floor 0.45 \
     --calib_max_imgs 100 \
     --calib_n_ref 3 \
     --radius 1 \
