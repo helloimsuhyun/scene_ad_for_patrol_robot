@@ -989,11 +989,7 @@ def run_calibration(
             continue
 
         bbox_scores_sorted = sorted(bbox_scores_this_img, reverse=True)
-
-        if len(bbox_scores_sorted) == 1:
-            final_score = float(bbox_scores_sorted[0])
-        else:
-            final_score = float(np.mean(bbox_scores_sorted[:2]))
+        final_score = float(max(bbox_scores_sorted)) if len(bbox_scores_sorted) > 0 else 0.0
 
         calib_final_scores.append(final_score)
 
@@ -1021,7 +1017,7 @@ def run_calibration(
             final_arr,
             method=calib_method,
             k=final_k,
-            trim_outliers=True,
+            trim_outliers=False,
             trim_k=3.5,
         )
         final_threshold = float(final_calib["threshold"])
@@ -1605,43 +1601,37 @@ def save_verified_bbox_overlay(
     case_dir,
     q_crop,
     verified_regions,
-    alpha=0.5,
-    vis_thr=0.5   # 🔥 중요: 이 값 이상만 보이게
+    alpha=0.45,
+    abs_min=0.0,
+    abs_max=1.0,
+    vis_thr_abs=0.30,   # 절대 임계값
 ):
     """
-    상대 기준(min-max) 히트맵 + low 값 투명 처리
-    bbox 테두리 없음
+    절대 기준 heatmap overlay
+    - bbox별 min-max 정규화 안 함
+    - verifier_dist_map의 절대값을 그대로 사용
+    - vis_thr_abs 이상만 overlay
     """
     vis = q_crop.copy()
 
-    for i, reg in enumerate(verified_regions):
+    for reg in verified_regions:
         y0, x0, y1, x1 = reg["img_bbox"]
         dist_map = reg["verifier_dist_map"].astype(np.float32)
 
         if dist_map.size == 0 or (y1 - y0) <= 0 or (x1 - x0) <= 0:
             continue
 
-        # -----------------------------
-        # 1. 상대 기준 normalization
-        # -----------------------------
-        d_min, d_max = float(dist_map.min()), float(dist_map.max())
-        if d_max - d_min < 1e-8:
-            continue
+        # 1) 절대값 기준 clip + normalize
+        d_vis = np.clip((dist_map - abs_min) / max(abs_max - abs_min, 1e-8), 0.0, 1.0)
 
-        d_norm = (dist_map - d_min) / (d_max - d_min)
-
-        # -----------------------------
-        # 2. threshold 이하 제거 (투명)
-        # -----------------------------
-        mask = d_norm >= vis_thr   # 🔥 핵심
-
+        # 2) 절대 threshold 이상만 표시
+        thr_norm = np.clip((vis_thr_abs - abs_min) / max(abs_max - abs_min, 1e-8), 0.0, 1.0)
+        mask = d_vis >= thr_norm
         if mask.sum() == 0:
             continue
 
-        # -----------------------------
-        # 3. heatmap 생성
-        # -----------------------------
-        heat = (d_norm * 255).astype(np.uint8)
+        # 3) heatmap 생성
+        heat = (d_vis * 255).astype(np.uint8)
         heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
         heat = cv2.resize(heat, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
 
@@ -1651,18 +1641,13 @@ def save_verified_bbox_overlay(
             interpolation=cv2.INTER_NEAREST
         ).astype(bool)
 
-        # -----------------------------
-        # 4. overlay (mask 부분만)
-        # -----------------------------
+        # 4) overlay
         roi = vis[y0:y1, x0:x1].copy()
         blended = cv2.addWeighted(roi, 1 - alpha, heat, alpha, 0)
-
         roi[mask_rs] = blended[mask_rs]
         vis[y0:y1, x0:x1] = roi
 
-        # -----------------------------
-        # 5. 텍스트만 표시 (bbox 없음)
-        # -----------------------------
+        # 5) 점수 텍스트
         cv2.putText(
             vis,
             f"{reg['verifier_score']:.3f}",
@@ -1674,7 +1659,7 @@ def save_verified_bbox_overlay(
             cv2.LINE_AA,
         )
 
-    cv2.imwrite(str(case_dir / "stage6_verified_bbox_overlay_rel.png"), vis)
+    cv2.imwrite(str(case_dir / "stage6_verified_bbox_overlay_abs.png"), vis)
 
 
 def save_verified_bbox_top_p_overlay(case_dir, q_crop, verified_regions, alpha=0.65):
@@ -1722,7 +1707,7 @@ def save_verified_bbox_top_p_overlay(case_dir, q_crop, verified_regions, alpha=0
             cv2.LINE_AA,
         )
 
-    cv2.imwrite(str(case_dir / "stage6_verified_bbox_top_p_overlay.png"), vis)
+    cv2.imwrite(str(case_dir / "stage6_verified_bbox_top_p_overlay_rel.png"), vis)
 
 # =============================================================================
 # ⑤ 추론 모드: query 이미지를 bank와 비교, threshold와 비교하여 판정
@@ -1760,7 +1745,7 @@ def run_inference(
       bank 후보들과 매칭 -> best ref 선택(min compound score)
       -> top-K component proposal 생성
       -> verifier score 계산
-      -> final_score = mean(top2 verifier)
+      -> final_score = mean(max verifier)
       -> final_threshold와 비교하여 최종 판정
     """
     random.seed(seed)
@@ -1791,7 +1776,7 @@ def run_inference(
         print("[INFER WARN] threshold.json에 final/verifier threshold 없음. 폴백 0.49 사용")
 
     print(f"\n[INFER] compound_thr={thr:.4f} (method={meta.get('method')}, k={k_str})")
-    print(f"[INFER] final_thr={final_thr:.4f} (top2-mean 기준)")
+    print(f"[INFER] final_thr={final_thr:.4f} (max verifier 기준)")
 
     pcfg = cfg.get("patchcore", {})
     top_p   = float(pcfg.get("top_p", 0.05))
@@ -1936,12 +1921,7 @@ def run_inference(
             reverse=True
         )
 
-        if len(verifier_scores_sorted) == 0:
-            final_score = 0.0
-        elif len(verifier_scores_sorted) == 1:
-            final_score = float(verifier_scores_sorted[0])
-        else:
-            final_score = float(np.mean(verifier_scores_sorted[:2]))
+        final_score = float(max(verifier_scores_sorted)) if len(verifier_scores_sorted) > 0 else 0.0
 
         is_anomaly = bool(final_score > final_thr)
 

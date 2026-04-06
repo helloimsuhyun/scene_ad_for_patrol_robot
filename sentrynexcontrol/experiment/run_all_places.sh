@@ -10,9 +10,8 @@ for PLACE in "${PLACES[@]}"; do
   python ex.py \
     --place ${PLACE} \
     --mode calib \
-    --calib_method robust \
-    --cc_k 2.5 \
-    --final_k 2.5 \
+    --calib_method percentile \
+    --calib_k 97 \
     --calib_max_imgs 100 \
     --calib_n_ref 3 \
     --radius 1 \
