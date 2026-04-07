@@ -5,23 +5,56 @@
     "global_mode": "patch_mean"
   },
   "repr": {
-    "repr_mode": "global_patch"
+    "repr_mode": "global_patch_with_aligned"
   },
-    "patchcore": {
+  "patchcore": {
     "top_p": 0.05,
     "preselect_m": 3,
     "radius": 1,
     "alpha": 0.6,
-    "min_cut": 0.2,
+    "min_cut": 0.20,
     "singleton_weight": 0.25,
     "component_min_area": 2
-    },
+  },
+  "repr_modes": {
+    "global_patch_with_aligned": {
+      "global_preselect": {
+        "mode": "vpr",
+        "top_m": 3
+      },
+      "cc": {
+        "radius": 1,
+        "top_p": 0.05,
+        "alpha": 0.6,
+        "min_cut": 0.20,
+        "singleton_weight": 0.25,
+        "component_min_area": 2
+      },
+      "proposal": {
+        "top_k": 3,
+        "patch_margin": 1,
+        "crop_margin_ratio": 0.20,
+        "min_patch_area": 2,
+        "min_crop_size": 96
+      },
+      "verifier": {
+        "radius": 1,
+        "top_p": 0.10
+      },
+      "calibration": {
+        "cc_k": 97,
+        "final_k": 97,
+        "final_threshold_floor": 0.45,
+        "max_imgs": 100
+      }
+    }
+  },
   "calib": {
+    "method": "percentile",
     "k": 3,
-    "method": "robust",
-    "gaussian_k": 2.5,
-    "robust_k": 2.0,
-    "percentile": 97
+    "percentile": 97,
+    "robust_k": 2.5,
+    "gaussian_k": 2.5
   },
   "infer": {
     "event_rule": "median",

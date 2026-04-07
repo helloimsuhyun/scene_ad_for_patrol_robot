@@ -90,11 +90,13 @@ from fastapi.responses import JSONResponse
 
 from . import sqlite_db
 from . import dino_emb
-from . import cnn_emb
+from .backbone_wrapper import build_local_backbone
 
 from . import place_manager
 from .distance import infer_event, calibrate_place
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
+from vpr_megaloc import MegaLocWrapper, load_megaloc_model
+
 from .config import load_cfg
 
 # path 
@@ -166,16 +168,18 @@ async def lifespan(app: FastAPI):
     "current_place_id": None,
     }
 
-    #model load
+    # global preselect model load
     model, device = dino_emb.load_model()
-    local_model, device = cnn_emb.load_model(
-        model_name="resnet18",
-        out_layer="layer3",
-        device=device,
-    )
+    megaloc = load_megaloc_model(device=device) 
+    vpr_model = MegaLocWrapper(megaloc, device=device)
 
     cfg = load_cfg(SAVE_ROOT)
     sg_raw = cfg["superglue"]
+    cfg["vpr_model"] = vpr_model
+
+    # local focus model load
+    cc_backbone = build_local_backbone("resnet18_layer3", img_size=560)
+    verifier_backbone = build_local_backbone("resnet18_layer3", img_size=224)
 
     sg_cfg = SuperGlueMatchConfig(
         resize_long_side=sg_raw["resize_long_side"],
@@ -190,10 +194,12 @@ async def lifespan(app: FastAPI):
 
     app.state.engine = {
         "global_model": model,
-        "local_model": local_model,
+        "cc_backbone": cc_backbone,
+        "verifier_backbone": verifier_backbone,
         "device": device,
         "bank_root": SAVE_ROOT,
         "sg_matcher": sg_matcher,
+        "vpr_model": vpr_model,
     }
 
     print(" ------------Server startup complete")
@@ -229,9 +235,11 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         bank_root=engine["bank_root"],
         plc_idx=place_id,
         global_model=engine["global_model"],
-        local_model=engine["local_model"],
+        cc_backbone=engine["cc_backbone"],
+        verifier_backbone = engine["verifier_backbone"],
         device=engine["device"],
         sg_matcher=engine.get("sg_matcher"),
+        cfg=load_cfg(engine["bank_root"]),
     )
 
 #임계치 업데이트 함수 호출----------------------------------
@@ -240,7 +248,8 @@ def run_threshold_calibration(place_id, engine):
         bank_root=engine["bank_root"],
         plc_idx=place_id,
         global_model=engine["global_model"],
-        local_model=engine["local_model"],
+        cc_backbone=engine["cc_backbone"],
+        verifier_backbone = engine["verifier_backbone"],
         device=engine["device"],
         sg_matcher=engine.get("sg_matcher"),
     )

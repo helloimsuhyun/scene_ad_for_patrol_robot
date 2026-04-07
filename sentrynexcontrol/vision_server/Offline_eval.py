@@ -1,886 +1,663 @@
-# offline_eval.py
-# ref bank 폴더트리 완성되어있는 상황에서
-# event 단위 추론/평가 + 서버와 동일한 DB 저장까지 수행하는 스크립트
+"""
 
-from __future__ import annotations
+python -m vision_server.offline_eval --places 00
 
-import re
-import json
+"""
+
 import argparse
-from dataclasses import dataclass
+import json
+import random
+from collections import defaultdict
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any
+from typing import Dict, List, Optional
 
-import numpy as np
 import cv2
 import matplotlib.pyplot as plt
-from PIL import Image, ImageDraw
-from torchvision import transforms
+import numpy as np
+import torch
 
-from . import sqlite_db
-from . import place_manager
-from . import dino_emb
-from . import cnn_emb
-
-
-from .distance import infer_event, calibrate_place
 from .config import load_cfg
+from .distance import calibrate_place, infer_event
+from .distance_util import (
+    score_one_pair,
+    build_flagged_component_regions,
+    verify_bbox_with_local_search,
+)
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
-from .vis import draw_top_p_heatmap, save_aligned_debug_vis, save_patch_match_vis
+from .dino_emb import load_model as load_global_model
+from .backbone_wrapper import build_local_backbone
+from vpr_megaloc import MegaLocWrapper
 
-# =========================
-# 설정
-# =========================
-THIS_DIR = Path(__file__).resolve().parent
-RECV_ROOT = THIS_DIR.parent / "recv"
 
-DB_PATH = RECV_ROOT / "events.db"
-OUT_ROOTNAME = "_offline_out"
+
+RECV_ROOT = Path("./recv")
+OUT_ROOT = Path("./recv/_offline_out")
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
 
-USE_SAME_DB = True
-OFFLINE_DB_PATH = RECV_ROOT / "offline_eval.db"
 
-
-# =========================
-# batch 구조
-# =========================
-@dataclass
-class Batch:
-    place_id: str
-    safe_ts: str
-    label: Optional[str]
-    paths: List[Path]
-
-
-def is_image(p: Path) -> bool:
-    return p.suffix.lower() in IMG_EXTS
-
-
-def normalize_label(x: Optional[str]) -> Optional[str]:
-    if x is None:
-        return None
-    s = str(x).strip().lower()
-    if s in {"normal", "nomal"}:
-        return "normal"
-    if s in {"abnormal", "unnomal", "unnormal", "anomaly", "anomal"}:
-        return "abnormal"
-    return s
-
-
-# =========================
-# DB helper
-# =========================
-def get_db_path() -> Path:
-    return DB_PATH if USE_SAME_DB else OFFLINE_DB_PATH
-
-
-def sync_places_from_fs(db, save_root: Path):
-    for p in save_root.iterdir():
-        if not p.is_dir():
-            continue
-        sqlite_db.ensure_place(db, p.name)
-
-
-# =========================
-# model-view helper
-# =========================
-def load_pil_for_model_view(img_path: Path, img_size: int) -> Image.Image:
-    img_pil = Image.open(img_path).convert("RGB")
-    img_pil = transforms.Resize(img_size)(img_pil)
-    img_pil = transforms.CenterCrop(img_size)(img_pil)
-    return img_pil
-
-
-def load_bgr_for_model_view(img_path: Path, img_size: int) -> np.ndarray:
-    img_pil = load_pil_for_model_view(img_path, img_size=img_size)
-    img_rgb = np.array(img_pil)
-    img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
-    return img_bgr
-
-
-def save_loss_map_vis(
-    query_path: Path,
-    loss_vis: Dict[str, Any],
-    out_path: Path,
-    img_size: int = 560,
-):
-    aggr_loss = loss_vis.get("aggr_loss_map", None)
-    aggr_valid = loss_vis.get("aggr_valid_map", None)
-
-    if aggr_loss is None:
-        return
-
-    # query image 로드
-    q_img = load_bgr_for_model_view(query_path, img_size=img_size)
-
-    # 크기 맞추기
-    if aggr_loss.shape[:2] != q_img.shape[:2]:
-        aggr_loss = cv2.resize(
-            aggr_loss,
-            (q_img.shape[1], q_img.shape[0]),
-            interpolation=cv2.INTER_LINEAR,
-        )
-
-    if aggr_valid is not None and aggr_valid.shape[:2] != q_img.shape[:2]:
-        aggr_valid = cv2.resize(
-            aggr_valid,
-            (q_img.shape[1], q_img.shape[0]),
-            interpolation=cv2.INTER_NEAREST,
-        )
-
-    # uint8 보장
-    if aggr_loss.dtype != np.uint8:
-        aggr_loss = np.clip(aggr_loss, 0, 255).astype(np.uint8)
-
-    # loss map 단독 시각화
-    loss_color = cv2.applyColorMap(aggr_loss, cv2.COLORMAP_JET)
-
-    # valid mask 밖은 검정 처리
-    if aggr_valid is not None:
-        vm = (aggr_valid > 0)
-        loss_color = loss_color.copy()
-        loss_color[~vm] = 0
-
-    # 제목 바
-    bar_h = 36
-    H, W = q_img.shape[:2]
-
-    def add_title(img, title):
-        canvas = np.full((H + bar_h, W, 3), 255, dtype=np.uint8)
-        canvas[bar_h:] = img
-        cv2.putText(
-            canvas,
-            title,
-            (12, 24),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            0.7,
-            (0, 0, 0),
-            2,
-            cv2.LINE_AA,
-        )
-        return canvas
-
-    panel_loss = add_title(loss_color, "loss map")
-    panel_query = add_title(q_img, "query")
-
-    vis = np.concatenate([panel_loss, panel_query], axis=1)
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_path), vis)
-
-
-def parse_server_filename(
-    p: Path
-) -> Tuple[Optional[str], Optional[str], Optional[str], Optional[str], Optional[int]]:
-    stem = p.stem
-
-    m = re.match(
-        r"^(?P<label>[^_]+)_(?P<place>[^_]+)_(?P<mode>bank|th_calib|query)_(?P<ts>.+)_(?P<idx>\d+)$",
-        stem
-    )
-    if m:
-        return (
-            m.group("label"),
-            m.group("place"),
-            m.group("mode"),
-            m.group("ts"),
-            int(m.group("idx")),
-        )
-
-    m = re.match(
-        r"^(?P<place>[^_]+)_(?P<mode>bank|th_calib|query)_(?P<ts>.+)_(?P<idx>\d+)$",
-        stem
-    )
-    if m:
-        return (
-            None,
-            m.group("place"),
-            m.group("mode"),
-            m.group("ts"),
-            int(m.group("idx")),
-        )
-
-    return None, None, None, None, None
-
-
-def collect_batches_for_place(place_dir: Path, mode: str) -> List[Batch]:
-    assert mode in {"query", "th_calib", "bank"}
-
-    target_dir = place_dir / mode
-    if not target_dir.exists():
+# =========================================================
+# basic utils
+# =========================================================
+def list_images(folder: Path) -> List[Path]:
+    if not folder.exists():
         return []
-
-    groups: Dict[Tuple[str, Optional[str]], List[Tuple[int, Path]]] = {}
-    place_id = place_dir.name
-
-    for p in target_dir.iterdir():
-        if not p.is_file() or not is_image(p):
-            continue
-        label, plc, md, safe_ts, idx = parse_server_filename(p)
-        if plc != place_id or md != mode or safe_ts is None or idx is None:
-            continue
-        label = normalize_label(label)
-        key = (safe_ts, label)
-        groups.setdefault(key, []).append((idx, p))
-
-    out: List[Batch] = []
-    for (safe_ts, label), items in groups.items():
-        items = sorted(items, key=lambda x: x[0])
-        out.append(
-            Batch(
-                place_id=place_id,
-                safe_ts=safe_ts,
-                label=label,
-                paths=[p for _, p in items],
-            )
-        )
-
-    out.sort(key=lambda b: b.safe_ts)
-    return out
+    return sorted([p for p in folder.iterdir() if p.is_file() and p.suffix.lower() in IMG_EXTS])
 
 
-def load_imgs_bgr(paths: List[Path]) -> List[np.ndarray]:
-    imgs: List[np.ndarray] = []
+def safe_read_bgr(path: Path) -> Optional[np.ndarray]:
+    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
+    return img
+
+
+def ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def dump_json(path: Path, obj):
+    path.write_text(json.dumps(obj, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+def stem_without_frame_idx(path: Path) -> str:
+    # ..._000.jpg 같은 프레임 suffix 제거
+    stem = path.stem
+    parts = stem.rsplit("_", 1)
+    if len(parts) == 2 and parts[1].isdigit():
+        return parts[0]
+    return stem
+
+
+def label_from_name(path: Path) -> int:
+    name = path.name.lower()
+    return 1 if name.startswith("abnormal_") else 0
+
+
+def build_query_events(query_dir: Path) -> List[Dict]:
+    """
+    query 폴더의 이미지들을 이벤트 단위로 묶는다.
+    파일명 마지막 _000, _001, ... 를 같은 이벤트로 간주.
+    """
+    paths = list_images(query_dir)
+    groups: Dict[str, List[Path]] = defaultdict(list)
     for p in paths:
-        img = cv2.imread(str(p), cv2.IMREAD_COLOR)
-        if img is None:
-            raise RuntimeError(f"Failed to read image: {p}")
-        imgs.append(img)
-    return imgs
+        groups[stem_without_frame_idx(p)].append(p)
 
-
-def compute_metrics(y_true: List[int], y_pred: List[int]) -> Dict[str, float]:
-    tp = sum((t == 1 and p == 1) for t, p in zip(y_true, y_pred))
-    tn = sum((t == 0 and p == 0) for t, p in zip(y_true, y_pred))
-    fp = sum((t == 0 and p == 1) for t, p in zip(y_true, y_pred))
-    fn = sum((t == 1 and p == 0) for t, p in zip(y_true, y_pred))
-
-    n = max(1, len(y_true))
-    acc = (tp + tn) / n
-    prec = tp / max(1, (tp + fp))
-    rec = tp / max(1, (tp + fn))
-    f1 = 0.0 if (prec + rec) == 0 else 2 * prec * rec / (prec + rec)
-
-    return {
-        "TP": float(tp),
-        "TN": float(tn),
-        "FP": float(fp),
-        "FN": float(fn),
-        "Accuracy": acc,
-        "Precision": prec,
-        "Recall": rec,
-        "F1": f1,
-        "N_total": float(len(y_true)),
-        "N_pos": float(sum(y_true)),
-        "N_neg": float(len(y_true) - sum(y_true)),
-    }
-
-def load_bgr_for_cnn_view(img_bgr, img_size=560):
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    img_pil = Image.fromarray(img_rgb)
-
-    img_pil = transforms.Resize((img_size, img_size))(img_pil)
-
-    img = np.array(img_pil)
-    return cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-
-
-def save_pair_vis_k(
-    topk_paths: List[Path],
-    query_path: Path,
-    out_path: Path,
-    score: float,
-    topk_sims: List[float],
-    is_change: bool,
-    vis_size: int = 384,
-    model_view_img_size: int = 560,
-):
-    k = len(topk_paths)
-
-    ref_imgs = [
-        load_pil_for_model_view(p, img_size=model_view_img_size).resize(
-            (vis_size, vis_size), Image.BICUBIC
+    events = []
+    for key in sorted(groups.keys()):
+        frames = sorted(groups[key])
+        y_true = label_from_name(frames[0])
+        events.append(
+            {
+                "event_key": key,
+                "paths": frames,
+                "label": y_true,
+            }
         )
-        for p in topk_paths
-    ]
-    qry_img = load_pil_for_model_view(
-        query_path, img_size=model_view_img_size
-    ).resize((vis_size, vis_size), Image.BICUBIC)
-
-    if is_change:
-        draw_q = ImageDraw.Draw(qry_img)
-        draw_q.rectangle(
-            [0, 0, vis_size - 1, vis_size - 1],
-            outline=(255, 0, 0),
-            width=6,
-        )
-
-    canvas_w = vis_size * (k + 1)
-    canvas = Image.new("RGB", (canvas_w, vis_size))
-    for i, im in enumerate(ref_imgs):
-        canvas.paste(im, (i * vis_size, 0))
-    canvas.paste(qry_img, (k * vis_size, 0))
-
-    draw = ImageDraw.Draw(canvas)
-    draw.rectangle([0, 0, canvas_w, 24], fill=(0, 0, 0))
-    sim_txt = " | ".join([f"{s:.3f}" for s in topk_sims]) if topk_sims else "-"
-    txt = f"score={score:.4f}  sims=[{sim_txt}]"
-    draw.text((5, 4), txt, fill=(255, 255, 255))
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    canvas.save(out_path)
+    return events
 
 
-def save_top_p_patch_vis(
-    query_path: Path,
-    patch_vis: Dict[str, Any],
-    out_path: Path,
-):
-    if not patch_vis:
-        return
-
-    top_patch_idx = patch_vis.get("top_patch_idx", [])
-    top_patch_vals = patch_vis.get("top_patch_vals", [])
-    img_size = int(patch_vis.get("img_size", 560))
-    patch_size = int(patch_vis.get("patch_size", 14))
-
-    if len(top_patch_idx) == 0:
-        return
-
-    img = load_bgr_for_model_view(query_path, img_size=img_size)
-
-    print(
-        "top_patch_vals:",
-        float(np.min(top_patch_vals)),
-        float(np.mean(top_patch_vals)),
-        float(np.max(top_patch_vals)),
-    )
-
-    vis_img = draw_top_p_heatmap(
-        img_bgr=img,
-        top_patch_idx=top_patch_idx,
-        top_patch_vals=top_patch_vals,
-        img_size=img_size,
-        patch_size=patch_size,
-        alpha=0.45,
-        blur_ksize=0,
-        normalize_each=False,
-        abs_min=0.2,
-        abs_max=0.80,
-    )
-
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    cv2.imwrite(str(out_path), vis_img)
-
-
-def _resolve_path(p: str, bank_root: Path) -> Path:
-    p = str(p)
-    pp = Path(p)
-
-    if pp.is_absolute():
-        return pp
-
-    cand1 = bank_root / pp
-    if cand1.exists():
-        return cand1.resolve()
-
-    cand2 = pp.resolve()
-    if cand2.exists():
-        return cand2
-
-    br_name = bank_root.name
-    parts = pp.parts
-    if len(parts) > 0 and parts[0] == br_name:
-        cand3 = bank_root / Path(*parts[1:])
-        if cand3.exists():
-            return cand3.resolve()
-
-    return cand1.resolve()
-
-
-def extract_topk_from_out(
-    out: dict,
-    bank_root: Path,
-    rep_idx_fallback: int = 0,
-    k: int = 3,
-) -> Tuple[List[Path], List[float], int]:
-    rj: Any = out.get("ref_topk_json")
-    if rj is None:
-        return [], [], rep_idx_fallback
-
-    if isinstance(rj, str):
-        try:
-            rj = json.loads(rj)
-        except Exception:
-            return [], [], rep_idx_fallback
-
-    if isinstance(rj, dict) and ("topk_paths" in rj):
-        topk_paths_all = rj.get("topk_paths") or []
-        topk_sims_all = rj.get("topk_sims") or []
-        rep = rj.get("rep")
-
-        rep_idx = rep_idx_fallback
-        if isinstance(rep, dict) and isinstance(rep.get("frame_idx"), int):
-            rep_idx = int(rep["frame_idx"])
-
-        if not isinstance(topk_paths_all, list) or len(topk_paths_all) == 0:
-            return [], [], rep_idx
-
-        rep_idx = max(0, min(rep_idx, len(topk_paths_all) - 1))
-
-        p_list = topk_paths_all[rep_idx]
-        s_list = (
-            topk_sims_all[rep_idx]
-            if isinstance(topk_sims_all, list) and rep_idx < len(topk_sims_all)
-            else None
-        )
-
-        if not isinstance(p_list, list) or len(p_list) == 0:
-            return [], [], rep_idx
-
-        pths = [_resolve_path(str(p), bank_root) for p in p_list[:k]]
-        if isinstance(s_list, list):
-            ss = [float(x) for x in s_list[:k]]
-        else:
-            ss = [float("nan")] * len(pths)
-
-        return pths, ss, rep_idx
-
-    return [], [], rep_idx_fallback
-
-
-def plot_curve(
-    xs: np.ndarray,
-    ys: np.ndarray,
-    thr: Optional[float],
-    title: str,
-    out_path: Path,
-):
-    plt.figure()
-    plt.plot(xs, ys, marker="o")
-    if thr is not None:
-        plt.axhline(thr)
-    plt.xlabel("index")
-    plt.ylabel("score")
+# =========================================================
+# plotting
+# =========================================================
+def plot_calibration_curve(scores: List[float], thr: float, out_path: Path, title: str):
+    plt.figure(figsize=(10, 4))
+    xs = np.arange(len(scores))
+    plt.plot(xs, scores, marker="o", markersize=3)
+    plt.axhline(thr, linestyle="--")
     plt.title(title)
+    plt.xlabel("sample idx")
+    plt.ylabel("score")
     plt.tight_layout()
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.savefig(out_path, dpi=200)
+    plt.savefig(out_path)
     plt.close()
 
 
-def safe_ts_to_iso(safe_ts: str) -> str:
-    if "T" not in safe_ts:
-        return safe_ts
+def plot_event_curve(frame_scores: List[float], thr: float, out_path: Path, title: str):
+    plt.figure(figsize=(8, 4))
+    xs = np.arange(len(frame_scores))
+    plt.plot(xs, frame_scores, marker="o")
+    plt.axhline(thr, linestyle="--")
+    plt.title(title)
+    plt.xlabel("frame idx")
+    plt.ylabel("frame score")
+    plt.tight_layout()
+    plt.savefig(out_path)
+    plt.close()
 
-    date_part, time_part = safe_ts.split("T", 1)
-    time_part = time_part.replace("-", ":")
-    return f"{date_part}T{time_part}"
+
+def save_metrics_report(y_true: List[int], y_pred: List[int], out_path: Path):
+    y_t = np.array(y_true, dtype=np.int32)
+    y_p = np.array(y_pred, dtype=np.int32)
+
+    tp = int(np.sum((y_t == 1) & (y_p == 1)))
+    tn = int(np.sum((y_t == 0) & (y_p == 0)))
+    fp = int(np.sum((y_t == 0) & (y_p == 1)))
+    fn = int(np.sum((y_t == 1) & (y_p == 0)))
+
+    acc = (tp + tn) / len(y_t) if len(y_t) > 0 else 0.0
+    precision = tp / (tp + fp) if (tp + fp) > 0 else 0.0
+    recall = tp / (tp + fn) if (tp + fn) > 0 else 0.0
+    f1 = 2 * precision * recall / (precision + recall) if (precision + recall) > 0 else 0.0
+
+    text = (
+        f"Total={len(y_t)}\n"
+        f"TP={tp} TN={tn} FP={fp} FN={fn}\n"
+        f"Precision={precision:.4f}\n"
+        f"Recall={recall:.4f}\n"
+        f"F1={f1:.4f}\n"
+        f"Accuracy={acc:.4f}\n"
+    )
+    out_path.write_text(text, encoding="utf-8")
+
+    print("\n" + "=" * 40)
+    print("[Evaluation Report]")
+    print("=" * 40)
+    print(text)
+    print("=" * 40 + "\n")
 
 
-def main(target_places: Optional[List[str]] = None):
-    recv_root = Path(args.bank_root) if args.bank_root is not None else recv_root
+# =========================================================
+# visualization helpers (adapted from ex.py)
+# =========================================================
+def save_cc_heatmap(case_dir: Path, q_crop: np.ndarray, dist_map: np.ndarray, valid_mask: np.ndarray):
+    h, w = q_crop.shape[:2]
+    d = np.clip(dist_map, 0.0, 1.0)
+    heat = (d * 255).astype(np.uint8)
+    heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
 
-    if not recv_root.exists():
-        raise FileNotFoundError(f"RECV_ROOT not found: {recv_root.resolve()}")
+    heat_rs = cv2.resize(heat, (w, h), interpolation=cv2.INTER_NEAREST)
+    valid_rs = cv2.resize(
+        valid_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST
+    ).astype(bool)
 
-    cfg = load_cfg(recv_root)
-    override_cfg = {}
-    if args.config is not None:
-        with open(args.config, "r") as f:
-            override_cfg = json.load(f)
+    overlay = q_crop.copy()
+    blended = cv2.addWeighted(q_crop, 0.5, heat_rs, 0.5, 0)
+    overlay[valid_rs] = blended[valid_rs]
+    overlay[~valid_rs] = (128, 128, 128)
 
-    def merge(d, u):
-        for k, v in u.items():
-            if isinstance(v, dict):
-                d[k] = merge(d.get(k, {}), v)
-            else:
-                d[k] = v
-        return d
+    cv2.imwrite(str(case_dir / "cc_heat.png"), heat_rs)
+    cv2.imwrite(str(case_dir / "cc_overlay.png"), overlay)
 
-    cfg = merge(cfg, override_cfg)
 
-    # override merge
-    def merge(d, u):
-        for k, v in u.items():
-            if isinstance(v, dict):
-                d[k] = merge(d.get(k, {}), v)
-            else:
-                d[k] = v
-        return d
+def draw_text_box(img, lines, org=(10, 20), line_h=18):
+    out = img.copy()
+    x, y = org
+    for i, line in enumerate(lines):
+        yy = y + i * line_h
+        cv2.putText(out, str(line), (x, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 255), 2, cv2.LINE_AA)
+        cv2.putText(out, str(line), (x, yy), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1, cv2.LINE_AA)
+    return out
 
-    cfg = merge(cfg, override_cfg)
 
-    calib_cfg = cfg.get("calib", {})
-    infer_cfg = cfg.get("infer", {})
-    embed_cfg = cfg.get("embed", {})
+def colorize_patch_mask(mask_patch, out_h, out_w, color=(0, 0, 255), alpha=0.55, base=None):
+    mask_u8 = mask_patch.astype(np.uint8)
+    mask_rs = cv2.resize(mask_u8, (out_w, out_h), interpolation=cv2.INTER_NEAREST).astype(bool)
 
-    k_cfg = int(calib_cfg.get("k", 3))
-    percentile_cfg = int(calib_cfg.get("percentile", 97))
-    method_cfg = str(calib_cfg.get("method", "robust"))
-    event_rule_cfg = str(infer_cfg.get("event_rule", "max"))
-    use_vlm_cfg = bool(infer_cfg.get("use_two_stage_vlm", False))
-    img_size_cfg = int(embed_cfg.get("img_size", 560))
+    if base is None:
+        base = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+    out = base.copy()
 
-    print("[CFG] calib:", {"k": k_cfg, "percentile": percentile_cfg, "method": method_cfg})
-    print("[CFG] infer :", {"event_rule": event_rule_cfg, "use_two_stage_vlm": use_vlm_cfg})
-    print("[CFG] embed :", {"img_size": img_size_cfg})
+    color_img = np.zeros_like(out)
+    color_img[:] = color
+    out[mask_rs] = cv2.addWeighted(out, 1 - alpha, color_img, alpha, 0)[mask_rs]
+    return out, mask_rs
 
-    db_path = get_db_path()
-    db = sqlite_db.connect_db(db_path)
-    sqlite_db.init_db(db)
-    sync_places_from_fs(db, recv_root)
-    print(f"[DB] connected: {db_path.resolve()}")
 
-    global_model, device = dino_emb.load_model()
-    local_model, device = cnn_emb.load_model(
-        model_name="resnet18",
-        out_layer="layer3",
-        device=device,
+def save_component_summary(case_dir: Path, q_crop: np.ndarray, bin_map: np.ndarray, best_comp_mask: np.ndarray, flagged_regions: list):
+    h, w = q_crop.shape[:2]
+    hot_all, _ = colorize_patch_mask(bin_map, h, w, color=(0, 165, 255), alpha=0.55, base=q_crop)
+    best_only, _ = colorize_patch_mask(best_comp_mask, h, w, color=(0, 0, 255), alpha=0.60, base=q_crop)
+
+    bbox_vis = q_crop.copy()
+    for i, reg in enumerate(flagged_regions):
+        y0, x0, y1, x1 = reg["img_bbox"]
+        cv2.rectangle(bbox_vis, (x0, y0), (x1 - 1, y1 - 1), (0, 255, 255), 2)
+        txt = f"#{i} s={reg['score']:.3f} a={reg['area']}"
+        cv2.putText(bbox_vis, txt, (x0, max(15, y0 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (0, 255, 255), 1, cv2.LINE_AA)
+
+    panel = np.vstack([np.hstack([q_crop, hot_all]), np.hstack([best_only, bbox_vis])])
+    panel = draw_text_box(
+        panel,
+        ["TL: q_crop", "TR: compound all hot-zone", "BL: best component", "BR: flagged component bbox"],
+        org=(10, 20),
+    )
+    cv2.imwrite(str(case_dir / "stage3_component_summary.png"), panel)
+
+
+def make_dist_overlay(base_bgr, dist_map, alpha=0.45, abs_min=0.0, abs_max=1.0):
+    h, w = base_bgr.shape[:2]
+    d = dist_map.astype(np.float32)
+    if d.size == 0:
+        return base_bgr.copy()
+
+    d_vis = np.clip((d - abs_min) / max(abs_max - abs_min, 1e-8), 0.0, 1.0)
+    heat = (d_vis * 255).astype(np.uint8)
+    heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+    heat = cv2.resize(heat, (w, h), interpolation=cv2.INTER_NEAREST)
+
+    return cv2.addWeighted(base_bgr, 1 - alpha, heat, alpha, 0)
+
+
+def save_flagged_region_visuals(case_dir: Path, verifier_results: list):
+    for i, reg in enumerate(verifier_results):
+        sub_dir = case_dir / f"bbox_{i:02d}"
+        ensure_dir(sub_dir)
+
+        q_region = reg["q_region"]
+        r_region = reg["r_region"]
+        vscore = reg["verifier_score"]
+        dist_map = reg["verifier_dist_map"]
+        top_p_mask = reg.get("verifier_top_p_mask", None)
+        top_p_thr = reg.get("verifier_top_p_thr", None)
+        top_k = reg.get("verifier_top_k", None)
+        top_p = reg.get("verifier_top_p", None)
+
+        cv2.imwrite(str(sub_dir / "q_region.png"), q_region)
+        cv2.imwrite(str(sub_dir / "r_region.png"), r_region)
+
+        q_overlay = make_dist_overlay(q_region, dist_map)
+        r_overlay = make_dist_overlay(r_region, dist_map)
+
+        q_overlay = draw_text_box(
+            q_overlay,
+            [f"bbox verifier score = {vscore:.4f}", f"img_bbox = {reg['img_bbox']}", f"patch_bbox = {reg['patch_bbox']}"],
+            org=(8, 18),
+        )
+        r_overlay = draw_text_box(
+            r_overlay,
+            [f"component score = {reg['score']:.4f}", f"area = {reg['area']}", f"peak = {reg['peak']:.4f}"],
+            org=(8, 18),
+        )
+
+        cv2.imwrite(str(sub_dir / "verifier_pair.png"), np.hstack([q_overlay, r_overlay]))
+
+        d = dist_map.astype(np.float32)
+        d_vis = np.clip(d, 0.0, 1.0)
+        heat = (d_vis * 255).astype(np.uint8)
+        heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+        cv2.imwrite(str(sub_dir / "verifier_heat.png"), heat)
+        np.save(sub_dir / "verifier_dist_map.npy", dist_map)
+
+        if top_p_mask is not None:
+            h, w = q_region.shape[:2]
+            top_mask_rs = cv2.resize(top_p_mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST).astype(bool)
+            cv2.imwrite(str(sub_dir / "verifier_top_p_mask.png"), (top_mask_rs.astype(np.uint8) * 255))
+
+            cyan = np.zeros_like(q_region)
+            cyan[:] = (255, 255, 0)
+            q_top = q_region.copy()
+            r_top = r_region.copy()
+            q_blend = cv2.addWeighted(q_region, 0.35, cyan, 0.65, 0)
+            r_blend = cv2.addWeighted(r_region, 0.35, cyan, 0.65, 0)
+            q_top[top_mask_rs] = q_blend[top_mask_rs]
+            r_top[top_mask_rs] = r_blend[top_mask_rs]
+            q_top = draw_text_box(
+                q_top,
+                [f"top_p = {top_p}", f"top_k = {top_k}", f"top_thr = {top_p_thr:.4f}" if top_p_thr is not None else "top_thr = NA"],
+                org=(8, 18),
+            )
+            cv2.imwrite(str(sub_dir / "verifier_top_p_pair.png"), np.hstack([q_top, r_top]))
+
+
+def save_verifier_summary(case_dir: Path, q_crop: np.ndarray, verifier_results: list):
+    vis = q_crop.copy()
+    for i, reg in enumerate(verifier_results):
+        y0, x0, y1, x1 = reg["img_bbox"]
+        cv2.rectangle(vis, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 2)
+        txt = f"#{i} comp={reg['score']:.3f} ver={reg['verifier_score']:.3f}"
+        cv2.putText(vis, txt, (x0, max(15, y0 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 0), 1, cv2.LINE_AA)
+    cv2.imwrite(str(case_dir / "stage5_verifier_summary.png"), vis)
+
+
+def save_verified_bbox_overlay(case_dir: Path, q_crop: np.ndarray, verified_regions: list, alpha=0.45, abs_min=0.0, abs_max=1.0, vis_thr_abs=0.30):
+    vis = q_crop.copy()
+
+    for reg in verified_regions:
+        y0, x0, y1, x1 = reg["img_bbox"]
+        dist_map = reg["verifier_dist_map"].astype(np.float32)
+
+        if dist_map.size == 0 or (y1 - y0) <= 0 or (x1 - x0) <= 0:
+            continue
+
+        d_vis = np.clip((dist_map - abs_min) / max(abs_max - abs_min, 1e-8), 0.0, 1.0)
+        thr_norm = np.clip((vis_thr_abs - abs_min) / max(abs_max - abs_min, 1e-8), 0.0, 1.0)
+        mask = d_vis >= thr_norm
+        if mask.sum() == 0:
+            continue
+
+        heat = (d_vis * 255).astype(np.uint8)
+        heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+        heat = cv2.resize(heat, (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST)
+        mask_rs = cv2.resize(mask.astype(np.uint8), (x1 - x0, y1 - y0), interpolation=cv2.INTER_NEAREST).astype(bool)
+
+        roi = vis[y0:y1, x0:x1].copy()
+        blended = cv2.addWeighted(roi, 1 - alpha, heat, alpha, 0)
+        roi[mask_rs] = blended[mask_rs]
+        vis[y0:y1, x0:x1] = roi
+
+        cv2.putText(vis, f"{reg['verifier_score']:.3f}", (x0, max(15, y0 - 5)), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (255, 255, 255), 1, cv2.LINE_AA)
+
+    cv2.imwrite(str(case_dir / "stage6_verified_bbox_overlay_abs.png"), vis)
+
+
+# =========================================================
+# engine
+# =========================================================
+def build_engine(cfg, recv_root, device=None):
+    if device is None:
+        device = "cuda" if torch.cuda.is_available() else "cpu"
+
+    global_model, device = load_global_model(device=device)
+
+    local_model = build_local_backbone(
+        backbone_name="resnet18_layer3",
+        img_size=int(cfg.get("embed", {}).get("img_size", 560)),
     )
 
-    sg_raw = cfg["superglue"]
-    sg_cfg = SuperGlueMatchConfig(
-        resize_long_side=sg_raw["resize_long_side"],
-        weights=sg_raw["weights"],
-        max_keypoints=sg_raw["max_keypoints"],
-        keypoint_threshold=sg_raw["keypoint_threshold"],
-        match_threshold=sg_raw["match_threshold"],
-        sinkhorn_iterations=sg_raw["sinkhorn_iterations"],
-    )
-    sg_matcher = SuperGlueMatcher(sg_cfg, device=device)
+    vpr_model = MegaLocWrapper(device=device)
 
-    engine = {
+    sg_matcher = SuperGlueMatcher(...)
+
+    return {
+        "bank_root": str(recv_root),
         "global_model": global_model,
         "local_model": local_model,
         "device": device,
-        "bank_root": recv_root,
         "sg_matcher": sg_matcher,
+        "vpr_model": vpr_model, 
     }
 
-    place_dirs = sorted([p for p in recv_root.iterdir() if p.is_dir()])
-    place_dirs = [
-        p for p in place_dirs
-        if (p / "bank").exists() or (p / "query").exists() or (p / "th_calib").exists()
-    ]
 
-    if target_places is not None and len(target_places) > 0:
-        target_set = set(target_places)
-        place_dirs = [p for p in place_dirs if p.name in target_set]
+# =========================================================
+# visualization from representative frame
+# =========================================================
+def make_case_visualizations(
+    case_dir: Path,
+    cfg: dict,
+    engine: dict,
+    query_paths: List[Path],
+    infer_out: dict,
+):
+    """
+    대표 프레임 1장과 best ref 1장을 가지고
+    ex.py 핵심 시각화(CC heatmap / verifier heatmap)를 다시 계산해 저장.
+    """
+    if len(query_paths) == 0:
+        return
 
-    print(f"[INFO] filtered places: {target_places}")
-    print(f"[INFO] places: {[p.name for p in place_dirs]}")
+    rep_idx = int(infer_out.get("patch_vis", {}).get("frame_idx", 0))
+    rep_idx = max(0, min(rep_idx, len(query_paths) - 1))
+    q_path = query_paths[rep_idx]
+    q_bgr = safe_read_bgr(q_path)
+    if q_bgr is None:
+        return
 
-    try:
-        for place_dir in place_dirs:
-            plc = place_dir.name
-            if args.output_dir:
-                out_dir = Path(args.output_dir) / plc
-            else:
-                out_dir = place_dir / OUT_ROOTNAME
-            out_dir.mkdir(parents=True, exist_ok=True)
-            print(f"\n===== PLACE {plc} =====")
+    topk_json = json.loads(infer_out.get("ref_topk_json", "{}"))
+    topk_paths_all = topk_json.get("topk_paths", [])
+    if rep_idx >= len(topk_paths_all) or len(topk_paths_all[rep_idx]) == 0:
+        return
 
-            sqlite_db.ensure_place(db, plc)
+    best_ref_path = Path(topk_paths_all[rep_idx][0])
+    r_bgr = safe_read_bgr(best_ref_path)
+    if r_bgr is None:
+        return
 
-            try:
-                place_manager.set_place_mode(db, plc, "query")
-            except Exception:
-                pass
+    pcfg = cfg.get("patchcore", {})
+    top_p = float(pcfg.get("top_p", 0.05))
+    alpha = float(pcfg.get("alpha", 0.6))
+    min_cut = float(pcfg.get("min_cut", 0.20))
+    singleton_weight = float(pcfg.get("singleton_weight", 0.25))
+    component_min_area = int(pcfg.get("component_min_area", 2))
 
-            thr, calib_scores, _ = calibrate_place(
-                str(recv_root),
-                plc,
-                engine["global_model"],
-                engine["local_model"],
-                engine["device"],
-                sg_matcher=engine.get("sg_matcher"),
-            )
-            print("[CALIB] thr =", thr, " (#scores=", len(calib_scores), ")")
+    mode_cfg = cfg.get("repr_modes", {}).get("global_patch_with_aligned", {})
+    proposal_cfg = mode_cfg.get("proposal", {})
+    ver_cfg = mode_cfg.get("verifier", {})
 
-            try:
-                place_manager.set_need_calibration(db, plc, False)
-            except Exception:
-                pass
+    proposal_top_k = int(proposal_cfg.get("top_k", 3))
+    patch_margin = int(proposal_cfg.get("patch_margin", 1))
+    crop_margin_ratio = float(proposal_cfg.get("crop_margin_ratio", 0.20))
+    min_patch_area = int(proposal_cfg.get("min_patch_area", 2))
+    min_crop_size = int(proposal_cfg.get("min_crop_size", 96))
+    ver_radius = int(ver_cfg.get("radius", 1))
+    ver_top_p = float(ver_cfg.get("top_p", 0.10))
 
-            calib_scores_arr = np.array(calib_scores, dtype=np.float32)
-            plot_curve(
-                xs=np.arange(len(calib_scores_arr)),
-                ys=calib_scores_arr,
-                thr=thr,
-                title=f"th_calib score curve (place={plc}, thr={thr:.4f})",
-                out_path=out_dir / "calib_score_curve.png",
-            )
-            print("[OK] saved:", out_dir / "calib_score_curve.png")
+    score, debug = score_one_pair(
+        q_bgr=q_bgr,
+        r_bgr=r_bgr,
+        sg=engine["sg_matcher"],
+        backbone=engine["local_model"],
+        device=engine["device"],
+        radius=int(pcfg.get("radius", 1)),
+        top_p=top_p,
+        alpha=alpha,
+        min_cut=min_cut,
+        singleton_weight=singleton_weight,
+        component_min_area=component_min_area,
+    )
+    if score is None:
+        return
 
-            query_batches = collect_batches_for_place(place_dir, mode="query")
-            print(f"[INFO] query batches: {len(query_batches)}")
+    cv2.imwrite(str(case_dir / "rep_query.png"), q_bgr)
+    cv2.imwrite(str(case_dir / "rep_ref.png"), r_bgr)
+    cv2.imwrite(str(case_dir / "q_crop.png"), debug["q_crop"])
+    cv2.imwrite(str(case_dir / "r_crop.png"), debug["r_crop"])
 
-            pair_dir = out_dir / "pairs"
-            pair_dir.mkdir(parents=True, exist_ok=True)
+    save_cc_heatmap(case_dir, debug["q_crop"], debug["dist_map"], debug["valid_mask"])
 
-            y_true: List[int] = []
-            y_pred: List[int] = []
-            event_scores: List[float] = []
-            per_place_results: List[Dict[str, Any]] = []
+    all_comps = debug.get("all_comp_scores", [])
+    topk_comps = sorted(all_comps, key=lambda x: float(x.get("score", 0.0)), reverse=True)[:proposal_top_k]
 
-            for bi, b in enumerate(query_batches):
-                gt = normalize_label(b.label)
-                imgs_bgr = load_imgs_bgr(b.paths)
+    flagged_regions = build_flagged_component_regions(
+        flagged_comps=topk_comps,
+        q_crop=debug["q_crop"],
+        r_crop=debug["r_crop"],
+        valid_mask=debug["valid_mask"],
+        patch_margin=patch_margin,
+        crop_margin_ratio=crop_margin_ratio,
+        min_patch_area=min_patch_area,
+        min_crop_size=min_crop_size,
+    )
 
-                captured_at = safe_ts_to_iso(b.safe_ts)
+    verifier_results = []
+    for reg in flagged_regions:
+        out = verify_bbox_with_local_search(
+            q_region=reg["q_region"],
+            r_region=reg["r_region"],
+            backbone=engine["local_model"],
+            device=engine["device"],
+            radius=ver_radius,
+            top_p=ver_top_p,
+        )
+        verifier_results.append({
+            **reg,
+            "verifier_score": float(out["score"]),
+            "verifier_dist_map": out["dist_map"],
+            "verifier_feat_hw": out["feat_hw"],
+            "verifier_top_p_mask": out["top_p_mask"],
+            "verifier_top_p_thr": out["top_p_thr"],
+            "verifier_top_k": out["top_k"],
+            "verifier_top_p": out["top_p"],
+        })
 
-                event_id = sqlite_db.insert_event(
-                    db=db,
-                    place_id=plc,
-                    captured_at=captured_at,
-                )
+    save_component_summary(case_dir, debug["q_crop"], debug["bin_map"], debug["best_comp_mask"], flagged_regions)
+    save_flagged_region_visuals(case_dir, verifier_results)
+    save_verifier_summary(case_dir, debug["q_crop"], verifier_results)
 
-                sqlite_db.insert_frames(
-                    db=db,
-                    event_id=event_id,
-                    image_paths=[str(p) for p in b.paths],
-                    frame_scores=None,
-                    capture_times=captured_at,
-                )
+    thr = float(infer_out["threshold"])
+    verified_regions = [r for r in verifier_results if r["verifier_score"] > thr]
+    save_verified_bbox_overlay(case_dir, debug["q_crop"], verified_regions, alpha=0.45)
 
-                out = infer_event(
-                    imgs_bgr=imgs_bgr,
-                    bank_root=engine["bank_root"],
-                    plc_idx=plc,
-                    cfg=cfg,
-                    global_model=engine["global_model"],
-                    local_model=engine["local_model"],
-                    device=engine["device"],
-                    sg_matcher=engine.get("sg_matcher"),
-                )
+    meta = {
+        "rep_idx": rep_idx,
+        "query_path": str(q_path),
+        "best_ref_path": str(best_ref_path),
+        "cc_score": float(score),
+        "threshold": float(thr),
+        "num_flagged_regions": len(flagged_regions),
+        "num_verified_regions": len(verified_regions),
+    }
+    dump_json(case_dir / "viz_meta.json", meta)
 
-                pred_flag = int(out["anomaly_flag"])
-                event_score = float(out["event_score"])
-                threshold_used = float(out["threshold"])
 
-                sqlite_db.update_frame_scores(
-                    db,
-                    event_id,
-                    out["frame_scores"],
-                )
-                sqlite_db.update_event_result(
-                    db=db,
-                    event_id=event_id,
-                    anomaly_flag=pred_flag,
-                    anomaly_score=event_score,
-                    threshold_used=threshold_used,
-                    ref_bank_id=out.get("ref_bank_id"),
-                    ref_topk_json=out.get("ref_topk_json"),
-                    summary_text=out.get("summary"),
-                )
+# =========================================================
+# per place evaluation
+# =========================================================
+def evaluate_place(recv_root: Path, out_root: Path, plc: str, engine: dict, cfg: dict):
+    place_root = recv_root / plc
+    bank_dir = place_root / "bank"
+    th_dir = place_root / "th_calib"
+    query_dir = place_root / "query"
 
-                if gt in {"normal", "abnormal"}:
-                    true_flag = 0 if gt == "normal" else 1
-                    y_true.append(true_flag)
-                    y_pred.append(pred_flag)
-                    event_scores.append(event_score)
-                else:
-                    print(
-                        f"[WARN] unlabeled/unknown gt batch -> DB 저장만 수행 "
-                        f"(place={plc}, ts={b.safe_ts}, label={b.label})"
-                    )
+    if not bank_dir.exists() or not th_dir.exists() or not query_dir.exists():
+        print(f"[SKIP] place={plc}: bank/th_calib/query 중 하나가 없음")
+        return
 
-                patch_vis = out.get("patch_vis") or {}
-                rep_idx_patch = int(patch_vis.get("frame_idx", 0))
-                rep_idx_patch = max(0, min(rep_idx_patch, len(b.paths) - 1))
+    out_dir = out_root / plc
+    ensure_dir(out_dir)
 
-                topk_paths, topk_sims, rep_idx = extract_topk_from_out(
-                    out,
-                    engine["bank_root"],
-                    rep_idx_fallback=rep_idx_patch,
-                    k=k_cfg,
-                )
-                rep_idx = max(0, min(rep_idx, len(b.paths) - 1))
-                rep_q = b.paths[rep_idx]
+    # 1) calibration
+    thr, calib_scores, _ = calibrate_place(
+        str(recv_root),
+        plc,
+        engine["global_model"],
+        engine["local_model"],   # cc_backbone
+        engine["local_model"],   # verifier_backbone
+        engine["device"],
+        sg_matcher=engine.get("sg_matcher"),
+        cfg=cfg,
+    )
 
-                if len(topk_paths) > 0:
-                    out_pair = pair_dir / f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}.png"
-                    save_pair_vis_k(
-                        topk_paths=topk_paths[:k_cfg],
-                        query_path=rep_q,
-                        out_path=out_pair,
-                        score=event_score,
-                        topk_sims=topk_sims[:k_cfg],
-                        is_change=bool(pred_flag),
-                        vis_size=384,
-                        model_view_img_size=img_size_cfg,
-                    )
+    plot_calibration_curve(
+        [float(x) for x in calib_scores],
+        float(thr),
+        out_dir / "calib_scores_curve.png",
+        title=f"[CALIB] place={plc}",
+    )
 
-                align_vis = out.get("align_vis")
+    # 2) query events
+    events = build_query_events(query_dir)
+    if len(events) == 0:
+        print(f"[SKIP] place={plc}: query event 없음")
+        return
 
-                if align_vis:
-                    rep_idx_align = int(align_vis.get("frame_idx", rep_idx_patch))
-                    rep_idx_align = max(0, min(rep_idx_align, len(b.paths) - 1))
-                    rep_q_align = b.paths[rep_idx_align]
+    all_results = []
+    y_true, y_pred = [], []
 
-                    out_align_prefix = pair_dir / (
-                        f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_aligned"
-                    )
-                    save_aligned_debug_vis(
-                        query_path=rep_q_align,
-                        align_vis=align_vis,
-                        out_prefix=out_align_prefix,
-                        img_size=img_size_cfg,
-                        patch_size=None,
-                    )
+    for ev_i, ev in enumerate(events):
+        case_dir = out_dir / ev["event_key"]
+        ensure_dir(case_dir)
 
-                    best_ref_img_path = patch_vis.get("best_ref_img_path", None)
-                    if best_ref_img_path:
-                        out_match = pair_dir / (
-                            f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_aligned_matchlines.png"
-                        )
-                        save_patch_match_vis(
-                            query_path=rep_q_align,
-                            ref_path=best_ref_img_path,
-                            patch_vis=patch_vis,
-                            out_path=out_match,
-                        )
+        imgs_bgr = []
+        valid_paths = []
+        for p in ev["paths"]:
+            img = safe_read_bgr(p)
+            if img is None:
+                continue
+            imgs_bgr.append(img)
+            valid_paths.append(p)
 
-                elif patch_vis:
-                    rep_q_patch = b.paths[rep_idx_patch]
-                    out_patch = pair_dir / f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_heatmap.png"
-                    save_top_p_patch_vis(
-                        query_path=rep_q_patch,
-                        patch_vis=patch_vis,
-                        out_path=out_patch,
-                    )
+        if len(imgs_bgr) == 0:
+            continue
 
-                    best_ref_img_path = patch_vis.get("best_ref_img_path", None)
-                    if best_ref_img_path:
-                        out_match = pair_dir / f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_matchlines.png"
-                        save_patch_match_vis(
-                            query_path=rep_q_patch,
-                            ref_path=best_ref_img_path,
-                            patch_vis=patch_vis,
-                            out_path=out_match,
-                        )
+        out = infer_event(
+            imgs_bgr=imgs_bgr,
+            bank_root=engine["bank_root"],
+            plc_idx=plc,
+            cfg=cfg,
+            global_model=engine["global_model"],
+            cc_backbone=engine["local_model"],
+            verifier_backbone=engine["local_model"],
+            device=engine["device"],
+            sg_matcher=engine.get("sg_matcher"),
+        )
 
-                print(
-                    f"[EVAL] ts={b.safe_ts} gt={gt} pred={pred_flag} "
-                    f"score={event_score:.4f} thr={threshold_used:.4f} event_id={event_id}"
-                )
+        plot_event_curve(
+            out["frame_scores"],
+            out["threshold"],
+            case_dir / "event_frame_scores.png",
+            title=f"[EVENT] {ev['event_key']}",
+        )
 
-                loss_vis = out.get("loss_vis")
+        make_case_visualizations(
+            case_dir=case_dir,
+            cfg=cfg,
+            engine=engine,
+            query_paths=valid_paths,
+            infer_out=out,
+        )
 
-                if loss_vis:
-                    rep_idx_loss = int(loss_vis.get("frame_idx", rep_idx_patch))
-                    rep_idx_loss = max(0, min(rep_idx_loss, len(b.paths) - 1))
-                    rep_q_loss = b.paths[rep_idx_loss]
+        result = {
+            "event_key": ev["event_key"],
+            "label": int(ev["label"]),
+            "pred": int(out["anomaly_flag"]),
+            "threshold": float(out["threshold"]),
+            "frame_scores": [float(x) for x in out["frame_scores"]],
+            "frame_change_flags": [int(x) for x in out["frame_change_flags"]],
+            "event_score": float(out["event_score"]),
+            "summary": out.get("summary", ""),
+            "query_paths": [str(p) for p in valid_paths],
+            "ref_topk_json": json.loads(out.get("ref_topk_json", "{}")),
+        }
+        dump_json(case_dir / "result.json", result)
 
-                    out_loss = pair_dir / (
-                        f"{bi:04d}_{plc}_{b.safe_ts}_gt{gt}_pred{pred_flag}_lossmap.png"
-                    )
-                    save_loss_map_vis(
-                        query_path=rep_q_loss,
-                        loss_vis=loss_vis,
-                        out_path=out_loss,
-                        img_size=img_size_cfg,
-                    )
+        all_results.append(result)
+        y_true.append(int(ev["label"]))
+        y_pred.append(int(out["anomaly_flag"]))
 
-                per_place_results.append({
-                    "event_id": event_id,
-                    "place_id": plc,
-                    "safe_ts": b.safe_ts,
-                    "captured_at": captured_at,
-                    "gt": gt,
-                    "pred_flag": pred_flag,
-                    "event_score": event_score,
-                    "threshold": threshold_used,
-                    "ref_bank_id": out.get("ref_bank_id"),
-                    "rep_idx": int(rep_idx),
-                })
+        label_str = "ANOMALY" if result["pred"] == 1 else "NORMAL"
+        gt_str = "abnormal" if ev["label"] == 1 else "normal"
+        print(
+            f"[EVENT] place={plc} {ev_i+1}/{len(events)} "
+            f"gt={gt_str} pred={label_str} "
+            f"score={result['event_score']:.2f}"
+        )
 
-            if event_scores:
-                scores_arr = np.array(event_scores, dtype=np.float32)
-                plot_curve(
-                    xs=np.arange(len(scores_arr)),
-                    ys=scores_arr,
-                    thr=thr,
-                    title=f"query event_score curve (place={plc}, thr={thr:.4f})",
-                    out_path=out_dir / "query_event_score_curve.png",
-                )
-                print("[OK] saved:", out_dir / "query_event_score_curve.png")
+    dump_json(out_dir / "offline_eval_results.json", all_results)
+    save_metrics_report(y_true, y_pred, out_dir / "metrics.txt")
 
-            metrics = compute_metrics(y_true, y_pred) if y_true else {}
-            fps = [
-                r for r, t, p in zip(per_place_results, y_true, y_pred)
-                if (t == 0 and p == 1)
-            ]
-            fns = [
-                r for r, t, p in zip(per_place_results, y_true, y_pred)
-                if (t == 1 and p == 0)
-            ]
 
-            txt_path = out_dir / "metrics.txt"
-            with open(txt_path, "w", encoding="utf-8") as f:
-                f.write(f"place={plc}\n")
-                f.write(f"db_path={str(db_path.resolve())}\n")
-                f.write(f"cfg.calib.k={k_cfg}\n")
-                f.write(f"cfg.calib.percentile={percentile_cfg}\n")
-                f.write(f"cfg.calib.method={method_cfg}\n")
-                f.write(f"cfg.infer.event_rule={event_rule_cfg}\n")
-                f.write(f"cfg.infer.use_two_stage_vlm={use_vlm_cfg}\n")
-                f.write(f"cfg.embed.img_size={img_size_cfg}\n")
-                f.write(f"threshold={thr:.6f}\n\n")
+# =========================================================
+# main
+# =========================================================
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--recv_root", type=str, default=None)
+    parser.add_argument("--out_root", type=str, default=None)
+    parser.add_argument("--places", nargs="*", default=None)
+    parser.add_argument("--seed", type=int, default=0)
+    args = parser.parse_args()
 
-                f.write("=== Metrics ===\n")
-                if metrics:
-                    for kk, vv in metrics.items():
-                        f.write(f"{kk}: {vv}\n")
-                else:
-                    f.write("No labeled query batches.\n")
+    random.seed(args.seed)
+    np.random.seed(args.seed)
+    torch.manual_seed(args.seed)
 
-                f.write("\n=== FP batches ===\n")
-                for r in fps:
-                    f.write(
-                        f"  event_id={r['event_id']} ts={r['safe_ts']} "
-                        f"score={r['event_score']:.6f}\n"
-                    )
+    recv_root = Path(args.recv_root) if args.recv_root is not None else RECV_ROOT
+    out_root = Path(args.out_root) if args.out_root is not None else OUT_ROOT
+    ensure_dir(out_root)
 
-                f.write("\n=== FN batches ===\n")
-                for r in fns:
-                    f.write(
-                        f"  event_id={r['event_id']} ts={r['safe_ts']} "
-                        f"score={r['event_score']:.6f}\n"
-                    )
+    cfg = load_cfg(recv_root)
+    engine = build_engine(cfg, recv_root)
+    cfg["vpr_model"] = engine["vpr_model"] 
 
-            print("[OK] saved:", txt_path)
+    if args.places is not None and len(args.places) > 0:
+        places = [str(x) for x in args.places]
+    else:
+        places = sorted([p.name for p in recv_root.iterdir() if p.is_dir() and p.name.isdigit()])
 
-            out_json = out_dir / "offline_eval_results.json"
-            out_json.write_text(
-                json.dumps(
-                    {
-                        "db_path": str(db_path.resolve()),
-                        "metrics": metrics,
-                        "results": per_place_results,
-                    },
-                    indent=2,
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            print("[OK] saved:", out_json)
+    print(f"[INFO] recv_root={recv_root}")
+    print(f"[INFO] out_root={out_root}")
+    print(f"[INFO] places={places}")
 
-    finally:
-        db.close()
-        print("[DB] closed")
+    for plc in places:
+        print("\n" + "=" * 60)
+        print(f"[PLACE] {plc}")
+        print("=" * 60)
+        try:
+            evaluate_place(recv_root, out_root, plc, engine, cfg)
+        except Exception as e:
+            print(f"[ERROR] place={plc}: {e}")
 
-    print("\nDONE.")
+    print("\n✅ offline_eval done")
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--places", nargs="*", default=None)
-    parser.add_argument("--config", type=str, default=None)
-    parser.add_argument("--bank_root", type=str, default=None)
-    parser.add_argument("--output_dir", type=str, default=None)
-    args = parser.parse_args()
-
-    main(target_places=args.places)
+    main()

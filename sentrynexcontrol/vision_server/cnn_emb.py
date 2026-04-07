@@ -88,8 +88,6 @@ def extract_grid_layers(model, device, x):
     x = x.unsqueeze(0).to(device)      # [1,3,H,W]
     feat = model(x).squeeze(0)         # [C,H,W]
 
+    feat = F.normalize(feat, dim=0)
     C, H, W = feat.shape
-    p = feat.permute(1, 2, 0).reshape(H * W, C)   # [P,D]
-    p = F.normalize(p, dim=-1) # 정규화
-
-    return p, (H, W)
+    return feat, (H, W)

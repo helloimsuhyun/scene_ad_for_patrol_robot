@@ -103,22 +103,63 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
     embs_g = None
     embs_p = None
 
+    preselect_mode = cfg.get("preselect_mode", "dino")
+    vpr_model = cfg.get("vpr_model", None)
+
     for p in img_paths:
         img = Image.open(p).convert("RGB")
-        x = tfm(img)
-
-        out = make_embed(
-            model, device, x,
-            repr_mode=effective_mode,      # global|patch|global_patch|global_patch_poll|global_patch_with_aligned
-            global_mode=global_mode,
-        )
+        img_np = np.array(img)[:, :, ::-1]  # RGB → BGR
 
         paths.append(str(p))
 
-        if "global" in out:
-            global_list.append(out["global"].detach().cpu().numpy().astype(np.float32))  # (D,)
-        if "patch" in out:
-            patch_list.append(out["patch"].detach().cpu().numpy().astype(np.float32))   # (P,D)
+        # -----------------------------
+        # 🔥 global embedding 분기
+        # -----------------------------
+        if preselect_mode == "dino":
+            x = tfm(img)
+
+            out = make_embed(
+                model, device, x,
+                repr_mode=effective_mode,
+                global_mode=global_mode,
+            )
+
+            if "global" in out:
+                global_list.append(
+                    out["global"].detach().cpu().numpy().astype(np.float32)
+                )
+
+            if "patch" in out:
+                patch_list.append(
+                    out["patch"].detach().cpu().numpy().astype(np.float32)
+                )
+
+        elif preselect_mode == "vpr":
+            if vpr_model is None:
+                raise ValueError("vpr_model required")
+
+            # 🔥 VPR embedding (MegaLoc)
+            emb = vpr_model.encode_image(img_np)
+
+            global_list.append(
+                emb.detach().cpu().numpy().astype(np.float32)
+            )
+
+            x = tfm(img)
+
+            out = make_embed(
+                model, device, x,
+                repr_mode="patch",
+                global_mode=global_mode,
+            )
+
+            if "patch" in out:
+                patch_list.append(
+                    out["patch"].detach().cpu().numpy().astype(np.float32)
+                )
+
+    else:
+        raise ValueError(preselect_mode)
 
     # save global
     if global_list:
