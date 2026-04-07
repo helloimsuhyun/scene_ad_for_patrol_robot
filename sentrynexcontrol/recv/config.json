@@ -4,21 +4,59 @@
     "img_size": 560,
     "global_mode": "patch_mean"
   },
-  "repr": {
+
+  "repr": { 
     "repr_mode": "global_patch_with_aligned"
   },
-  "patchcore": {
-    "top_p": 0.05,
-    "preselect_m": 3,
-    "radius": 1,
-    "alpha": 0.6,
-    "min_cut": 0.20,
-    "singleton_weight": 0.25,
-    "component_min_area": 2
+
+  "threshold": {
+    "method": "percentile",
+    "percentile_value": 97,
+    "robust_std_k": 2.5,
+    "gaussian_std_k": 2.5,
+    "topk_neighbors": 3
   },
-  "repr_modes": {
+
+  "infer": {
+    "event_rule": "vote",
+      "use_two_stage_vlm": false
+    },
+
+  "superglue": {
+    "resize_long_side": 640,
+    "weights": "indoor",
+    "max_keypoints": 1024,
+    "keypoint_threshold": 0.003,
+    "match_threshold": 0.2,
+    "sinkhorn_iterations": 20,
+    "min_matches": 10,
+    "min_inliers": 15,
+    "min_inlier_ratio": 0.2,
+    "max_reproj_error": 5.0,
+    "valid_patch_thr": 1.0,
+    "mask_erode_kernel": 3,
+    "mask_erode_iter": 1
+  },
+
+  "modes": {
+    "global_patch": {
+      "preselect": {
+        "mode": "vpr",
+        "top_m": 3
+      },
+      "patch_score": {
+        "top_p": 0.05,
+        "alpha": 0.6
+      },
+      "calibration": {
+        "threshold_param": 97,
+        "threshold_floor": 0.0,
+        "max_calib_images": 100
+      }
+    },
+
     "global_patch_with_aligned": {
-      "global_preselect": {
+      "preselect": {
         "mode": "vpr",
         "top_m": 3
       },
@@ -42,37 +80,10 @@
         "top_p": 0.10
       },
       "calibration": {
-        "cc_k": 97,
-        "final_k": 97,
-        "final_threshold_floor": 0.45,
-        "max_imgs": 100
+        "threshold_param": 97,
+        "threshold_floor": 0.45,
+        "max_calib_images": 100
       }
     }
-  },
-  "calib": {
-    "method": "percentile",
-    "k": 3,
-    "percentile": 97,
-    "robust_k": 2.5,
-    "gaussian_k": 2.5
-  },
-  "infer": {
-    "event_rule": "median",
-    "use_two_stage_vlm": false
-  },
-  "superglue": {
-    "resize_long_side": 640,
-    "weights": "indoor",
-    "max_keypoints": 1024,
-    "keypoint_threshold": 0.003,
-    "match_threshold": 0.2,
-    "sinkhorn_iterations": 20,
-    "min_matches": 10,
-    "min_inliers": 15,
-    "min_inlier_ratio": 0.2,
-    "max_reproj_error": 5.0,
-    "valid_patch_thr": 1.0,
-    "mask_erode_kernel": 3,
-    "mask_erode_iter": 1
   }
 }

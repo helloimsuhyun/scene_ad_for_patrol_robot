@@ -95,7 +95,7 @@ from .backbone_wrapper import build_local_backbone
 from . import place_manager
 from .distance import infer_event, calibrate_place
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
-from vpr_megaloc import MegaLocWrapper, load_megaloc_model
+from .vpr_megaloc import MegaLocWrapper, load_megaloc_model
 
 from .config import load_cfg
 
@@ -168,18 +168,22 @@ async def lifespan(app: FastAPI):
     "current_place_id": None,
     }
 
-    # global preselect model load
+    # global preselect model load - dino / megaloc
     model, device = dino_emb.load_model()
     megaloc = load_megaloc_model(device=device) 
     vpr_model = MegaLocWrapper(megaloc, device=device)
 
     cfg = load_cfg(SAVE_ROOT)
-    sg_raw = cfg["superglue"]
-    cfg["vpr_model"] = vpr_model
+    if "superglue" not in cfg:
+        raise RuntimeError("config에 'superglue' 섹션이 없습니다.")
+    
 
-    # local focus model load
+    # local focus model load ---------------------
     cc_backbone = build_local_backbone("resnet18_layer3", img_size=560)
     verifier_backbone = build_local_backbone("resnet18_layer3", img_size=224)
+
+    # superpoint & superglue load ----------------
+    sg_raw = cfg["superglue"]
 
     sg_cfg = SuperGlueMatchConfig(
         resize_long_side=sg_raw["resize_long_side"],
@@ -189,7 +193,6 @@ async def lifespan(app: FastAPI):
         match_threshold=sg_raw["match_threshold"],
         sinkhorn_iterations=sg_raw["sinkhorn_iterations"],
     )
-
     sg_matcher = SuperGlueMatcher(sg_cfg, device=device)
 
     app.state.engine = {
@@ -230,6 +233,8 @@ app.mount("/audio", StaticFiles(directory=str(AUDIO_ROOT)), name="audio")
 
 def run_inference_event(imgs_bgr, meta_obj, engine):
     place_id = str(meta_obj.get("place_id", "unknown"))
+    cfg = load_cfg(engine["bank_root"])
+
     return infer_event(
         imgs_bgr=imgs_bgr,
         bank_root=engine["bank_root"],
@@ -239,11 +244,14 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         verifier_backbone = engine["verifier_backbone"],
         device=engine["device"],
         sg_matcher=engine.get("sg_matcher"),
-        cfg=load_cfg(engine["bank_root"]),
+        cfg=cfg,
+        vpr_model=engine.get("vpr_model"),
     )
 
 #임계치 업데이트 함수 호출----------------------------------
 def run_threshold_calibration(place_id, engine):
+    cfg = load_cfg(engine["bank_root"])
+                                  
     thr, scores, _ = calibrate_place(
         bank_root=engine["bank_root"],
         plc_idx=place_id,
@@ -252,9 +260,10 @@ def run_threshold_calibration(place_id, engine):
         verifier_backbone = engine["verifier_backbone"],
         device=engine["device"],
         sg_matcher=engine.get("sg_matcher"),
+        cfg=cfg,
+        vpr_model=engine.get("vpr_model"),
     )
     return thr
-
 
 
 # ======== label 관련 gui 함수

@@ -5,55 +5,24 @@ DEFAULT_CFG = {
     "embed": {
         "model_name": "dinov2_vits14",
         "img_size": 560,
-        "global_mode": "cls"
+        "global_mode": "patch_mean"
     },
 
     "repr": {
         "repr_mode": "global_patch_with_aligned"
     },
 
-    "patchcore": {
-        "top_p": 0.05,
-        "preselect_m": 3,
-        "radius": 1,
-        "alpha": 0.6,
-        "min_cut": 0.2,
-        "singleton_weight": 0.25,
-        "component_min_area": 2
+    "threshold": {
+        "method": "percentile",
+        "percentile_value": 97,
+        "robust_std_k": 2.5,
+        "gaussian_std_k": 2.5,
+        "topk_neighbors": 3
     },
 
-    "repr_modes": {
-        "global_patch_with_aligned": {
-            "global_preselect": {
-                "mode": "vpr",
-                "top_m": 3
-            },
-            "cc": {
-                "radius": 1,
-                "top_p": 0.05,
-                "alpha": 0.6,
-                "min_cut": 0.2,
-                "singleton_weight": 0.25,
-                "component_min_area": 2
-            },
-            "proposal": {
-                "top_k": 5,
-                "patch_margin": 1,
-                "crop_margin_ratio": 0.20,
-                "min_patch_area": 2,
-                "min_crop_size": 96
-            },
-            "verifier": {
-                "radius": 1,
-                "top_p": 0.10
-            },
-            "calibration": {
-                "cc_k": 2.5,
-                "final_k": 2.5,
-                "final_threshold_floor": 0.49,
-                "max_imgs": 30
-            }
-        }
+    "infer": {
+        "event_rule": "vote",
+        "use_two_stage_vlm": False
     },
 
     "superglue": {
@@ -67,23 +36,59 @@ DEFAULT_CFG = {
         "min_inliers": 15,
         "min_inlier_ratio": 0.2,
         "max_reproj_error": 5.0,
-        "valid_patch_thr": 0.6,
+        "valid_patch_thr": 1.0,
         "mask_erode_kernel": 3,
         "mask_erode_iter": 1
     },
 
-    "calib": {
-        "k": 3,
-        "method": "robust",
-        "percentile": 97,
-        "robust_k": 2.5,
-        "gaussian_k": 2.5
-    },
+    "modes": {
+        "global_patch": {
+            "preselect": {
+                "mode": "vpr",
+                "top_m": 3
+            },
+            "patch_score": {
+                "top_p": 0.05,
+                "alpha": 0.6
+            },
+            "calibration": {
+                "threshold_param": 97,
+                "threshold_floor": 0.0,
+                "max_calib_images": 100
+            }
+        },
 
-    "infer": {
-        "event_rule": "vote",
-        "use_two_stage_vlm": False
-    },
+        "global_patch_with_aligned": {
+            "preselect": {
+                "mode": "vpr",
+                "top_m": 3
+            },
+            "cc": {
+                "radius": 1,
+                "top_p": 0.05,
+                "alpha": 0.6,
+                "min_cut": 0.20,
+                "singleton_weight": 0.25,
+                "component_min_area": 2
+            },
+            "proposal": {
+                "top_k": 3,
+                "patch_margin": 1,
+                "crop_margin_ratio": 0.20,
+                "min_patch_area": 2,
+                "min_crop_size": 96
+            },
+            "verifier": {
+                "radius": 1,
+                "top_p": 0.10
+            },
+            "calibration": {
+                "threshold_param": 97,
+                "threshold_floor": 0.45,
+                "max_calib_images": 100
+            }
+        }
+    }
 }
 
 
@@ -104,36 +109,22 @@ def load_cfg(bank_root: Path) -> dict:
 
     out = copy.deepcopy(DEFAULT_CFG)
     _deep_update(out, user)
-
-    # 하위호환: patchcore 값들을 repr_modes 쪽 기본값으로 복사
-    gpa = out.setdefault("repr_modes", {}).setdefault("global_patch_with_aligned", {})
-    gpa.setdefault("global_preselect", {}).setdefault(
-        "top_m", out.get("patchcore", {}).get("preselect_m", 3)
-    )
-
-    cc = gpa.setdefault("cc", {})
-    cc.setdefault("radius", out.get("patchcore", {}).get("radius", 1))
-    cc.setdefault("top_p", out.get("patchcore", {}).get("top_p", 0.05))
-    cc.setdefault("alpha", out.get("patchcore", {}).get("alpha", 0.6))
-    cc.setdefault("min_cut", out.get("patchcore", {}).get("min_cut", 0.2))
-    cc.setdefault("singleton_weight", out.get("patchcore", {}).get("singleton_weight", 0.25))
-    cc.setdefault("component_min_area", out.get("patchcore", {}).get("component_min_area", 2))
-
-    proposal = gpa.setdefault("proposal", {})
-    proposal.setdefault("top_k", 5)
-    proposal.setdefault("patch_margin", 1)
-    proposal.setdefault("crop_margin_ratio", 0.20)
-    proposal.setdefault("min_patch_area", 2)
-    proposal.setdefault("min_crop_size", 96)
-
-    verifier = gpa.setdefault("verifier", {})
-    verifier.setdefault("radius", 1)
-    verifier.setdefault("top_p", 0.10)
-
-    calib = gpa.setdefault("calibration", {})
-    calib.setdefault("cc_k", out.get("calib", {}).get("robust_k", 2.5))
-    calib.setdefault("final_k", out.get("calib", {}).get("robust_k", 2.5))
-    calib.setdefault("final_threshold_floor", 0.49)
-    calib.setdefault("max_imgs", 30)
-
     return out
+
+
+def get_cfg_bundle(cfg: dict):
+    repr_mode = str(cfg.get("repr", {}).get("repr_mode", "global"))
+
+    mode_cfg = cfg.get("modes", {}).get(repr_mode, {})
+    threshold_cfg = cfg.get("threshold", {})
+
+    return {
+        "repr_mode": repr_mode,
+        "mode_cfg": mode_cfg,
+        "threshold_cfg": threshold_cfg,
+        "preselect": mode_cfg.get("preselect", {}),
+        "calibration": mode_cfg.get("calibration", {}),
+        "cc": mode_cfg.get("cc", {}),
+        "proposal": mode_cfg.get("proposal", {}),
+        "verifier": mode_cfg.get("verifier", {}),
+    }

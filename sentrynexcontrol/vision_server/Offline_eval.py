@@ -1,7 +1,6 @@
 """
-
-python -m vision_server.offline_eval --places 00
-
+cd sentrynexcontrol
+python -m vision_server.Offline_eval --places 00
 """
 
 import argparse
@@ -16,7 +15,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch
 
-from .config import load_cfg
+from .config import load_cfg, get_cfg_bundle
 from .distance import calibrate_place, infer_event
 from .distance_util import (
     score_one_pair,
@@ -26,7 +25,7 @@ from .distance_util import (
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
 from .dino_emb import load_model as load_global_model
 from .backbone_wrapper import build_local_backbone
-from vpr_megaloc import MegaLocWrapper
+from .vpr_megaloc import MegaLocWrapper
 
 
 
@@ -348,22 +347,39 @@ def build_engine(cfg, recv_root, device=None):
 
     global_model, device = load_global_model(device=device)
 
-    local_model = build_local_backbone(
+    cc_backbone = build_local_backbone(
         backbone_name="resnet18_layer3",
-        img_size=int(cfg.get("embed", {}).get("img_size", 560)),
+        img_size=560,
+    )
+    verifier_backbone = build_local_backbone(
+        backbone_name="resnet18_layer3",
+        img_size=224,
     )
 
+    print("[DEBUG] before MegaLocWrapper")
     vpr_model = MegaLocWrapper(device=device)
+    print("[DEBUG] after MegaLocWrapper:", type(vpr_model))
 
-    sg_matcher = SuperGlueMatcher(...)
+    sg_raw = cfg["superglue"]
+    sg_cfg = SuperGlueMatchConfig(
+        resize_long_side=sg_raw["resize_long_side"],
+        weights=sg_raw["weights"],
+        max_keypoints=sg_raw["max_keypoints"],
+        keypoint_threshold=sg_raw["keypoint_threshold"],
+        match_threshold=sg_raw["match_threshold"],
+        sinkhorn_iterations=sg_raw["sinkhorn_iterations"],
+    )
+
+    sg_matcher = SuperGlueMatcher(sg_cfg, device=device)
 
     return {
         "bank_root": str(recv_root),
         "global_model": global_model,
-        "local_model": local_model,
+        "cc_backbone": cc_backbone,
+        "verifier_backbone": verifier_backbone,
         "device": device,
         "sg_matcher": sg_matcher,
-        "vpr_model": vpr_model, 
+        "vpr_model": vpr_model,
     }
 
 
@@ -379,7 +395,7 @@ def make_case_visualizations(
 ):
     """
     대표 프레임 1장과 best ref 1장을 가지고
-    ex.py 핵심 시각화(CC heatmap / verifier heatmap)를 다시 계산해 저장.
+    CC heatmap / verifier heatmap 시각화를 다시 계산해 저장.
     """
     if len(query_paths) == 0:
         return
@@ -387,6 +403,7 @@ def make_case_visualizations(
     rep_idx = int(infer_out.get("patch_vis", {}).get("frame_idx", 0))
     rep_idx = max(0, min(rep_idx, len(query_paths) - 1))
     q_path = query_paths[rep_idx]
+
     q_bgr = safe_read_bgr(q_path)
     if q_bgr is None:
         return
@@ -401,22 +418,24 @@ def make_case_visualizations(
     if r_bgr is None:
         return
 
-    pcfg = cfg.get("patchcore", {})
-    top_p = float(pcfg.get("top_p", 0.05))
-    alpha = float(pcfg.get("alpha", 0.6))
-    min_cut = float(pcfg.get("min_cut", 0.20))
-    singleton_weight = float(pcfg.get("singleton_weight", 0.25))
-    component_min_area = int(pcfg.get("component_min_area", 2))
+    cfgb = get_cfg_bundle(cfg)
+    cc_cfg = cfgb["cc"]
+    proposal_cfg = cfgb["proposal"]
+    ver_cfg = cfgb["verifier"]
 
-    mode_cfg = cfg.get("repr_modes", {}).get("global_patch_with_aligned", {})
-    proposal_cfg = mode_cfg.get("proposal", {})
-    ver_cfg = mode_cfg.get("verifier", {})
+    cc_radius = int(cc_cfg.get("radius", 1))
+    top_p = float(cc_cfg.get("top_p", 0.05))
+    alpha = float(cc_cfg.get("alpha", 0.6))
+    min_cut = float(cc_cfg.get("min_cut", 0.20))
+    singleton_weight = float(cc_cfg.get("singleton_weight", 0.25))
+    component_min_area = int(cc_cfg.get("component_min_area", 2))
 
     proposal_top_k = int(proposal_cfg.get("top_k", 3))
     patch_margin = int(proposal_cfg.get("patch_margin", 1))
     crop_margin_ratio = float(proposal_cfg.get("crop_margin_ratio", 0.20))
     min_patch_area = int(proposal_cfg.get("min_patch_area", 2))
     min_crop_size = int(proposal_cfg.get("min_crop_size", 96))
+
     ver_radius = int(ver_cfg.get("radius", 1))
     ver_top_p = float(ver_cfg.get("top_p", 0.10))
 
@@ -424,9 +443,9 @@ def make_case_visualizations(
         q_bgr=q_bgr,
         r_bgr=r_bgr,
         sg=engine["sg_matcher"],
-        backbone=engine["local_model"],
+        backbone=engine["cc_backbone"],
         device=engine["device"],
-        radius=int(pcfg.get("radius", 1)),
+        radius=cc_radius,
         top_p=top_p,
         alpha=alpha,
         min_cut=min_cut,
@@ -444,7 +463,11 @@ def make_case_visualizations(
     save_cc_heatmap(case_dir, debug["q_crop"], debug["dist_map"], debug["valid_mask"])
 
     all_comps = debug.get("all_comp_scores", [])
-    topk_comps = sorted(all_comps, key=lambda x: float(x.get("score", 0.0)), reverse=True)[:proposal_top_k]
+    topk_comps = sorted(
+        all_comps,
+        key=lambda x: float(x.get("score", 0.0)),
+        reverse=True,
+    )[:proposal_top_k]
 
     flagged_regions = build_flagged_component_regions(
         flagged_comps=topk_comps,
@@ -462,7 +485,7 @@ def make_case_visualizations(
         out = verify_bbox_with_local_search(
             q_region=reg["q_region"],
             r_region=reg["r_region"],
-            backbone=engine["local_model"],
+            backbone=engine["verifier_backbone"],
             device=engine["device"],
             radius=ver_radius,
             top_p=ver_top_p,
@@ -478,7 +501,13 @@ def make_case_visualizations(
             "verifier_top_p": out["top_p"],
         })
 
-    save_component_summary(case_dir, debug["q_crop"], debug["bin_map"], debug["best_comp_mask"], flagged_regions)
+    save_component_summary(
+        case_dir,
+        debug["q_crop"],
+        debug["bin_map"],
+        debug["best_comp_mask"],
+        flagged_regions,
+    )
     save_flagged_region_visuals(case_dir, verifier_results)
     save_verifier_summary(case_dir, debug["q_crop"], verifier_results)
 
@@ -507,6 +536,8 @@ def evaluate_place(recv_root: Path, out_root: Path, plc: str, engine: dict, cfg:
     th_dir = place_root / "th_calib"
     query_dir = place_root / "query"
 
+    cfg_local = dict(cfg)
+
     if not bank_dir.exists() or not th_dir.exists() or not query_dir.exists():
         print(f"[SKIP] place={plc}: bank/th_calib/query 중 하나가 없음")
         return
@@ -519,11 +550,12 @@ def evaluate_place(recv_root: Path, out_root: Path, plc: str, engine: dict, cfg:
         str(recv_root),
         plc,
         engine["global_model"],
-        engine["local_model"],   # cc_backbone
-        engine["local_model"],   # verifier_backbone
+        engine["cc_backbone"],
+        engine["verifier_backbone"],
         engine["device"],
         sg_matcher=engine.get("sg_matcher"),
-        cfg=cfg,
+        cfg=cfg_local,
+        vpr_model=engine.get("vpr_model"),
     )
 
     plot_calibration_curve(
@@ -562,12 +594,13 @@ def evaluate_place(recv_root: Path, out_root: Path, plc: str, engine: dict, cfg:
             imgs_bgr=imgs_bgr,
             bank_root=engine["bank_root"],
             plc_idx=plc,
-            cfg=cfg,
+            cfg=cfg_local,
             global_model=engine["global_model"],
-            cc_backbone=engine["local_model"],
-            verifier_backbone=engine["local_model"],
+            cc_backbone=engine["cc_backbone"],
+            verifier_backbone=engine["verifier_backbone"],
             device=engine["device"],
             sg_matcher=engine.get("sg_matcher"),
+            vpr_model=engine.get("vpr_model"),
         )
 
         plot_event_curve(
@@ -579,7 +612,7 @@ def evaluate_place(recv_root: Path, out_root: Path, plc: str, engine: dict, cfg:
 
         make_case_visualizations(
             case_dir=case_dir,
-            cfg=cfg,
+            cfg=cfg_local,
             engine=engine,
             query_paths=valid_paths,
             infer_out=out,
@@ -636,7 +669,6 @@ def main():
 
     cfg = load_cfg(recv_root)
     engine = build_engine(cfg, recv_root)
-    cfg["vpr_model"] = engine["vpr_model"] 
 
     if args.places is not None and len(args.places) > 0:
         places = [str(x) for x in args.places]

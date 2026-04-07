@@ -21,6 +21,7 @@ from datetime import datetime
 from PIL import Image
 from typing import Dict, Tuple, Optional, List
 
+from .config import get_cfg_bundle
 from .dino_emb import make_embed , make_transform
 
 
@@ -67,19 +68,7 @@ def load_bank_by_place(save_root, plc_idx, mode="bank"):
     }
 
 #해당 장소의 npz 초기화
-def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
-    
-    #임베딩 추출 cfg ----
-    cfg = cfg or {}
-
-    repr_mode   = str(cfg.get("repr", {}).get("repr_mode", "global"))  # global|patch|global_patch|global_patch_pool
-    global_mode = str(cfg.get("embed", {}).get("global_mode", "patch_mean"))
-    img_size    = int(cfg.get("embed", {}).get("img_size", 560))
-
-    if repr_mode not in {"global", "patch", "global_patch", "global_patch_pool", "global_patch_with_aligned", "global_patch_with_aligned_loss_bank"}:
-        raise ValueError(f"repr_mode must be global|patch|global_patch|global_patch_pool|global_patch_with_aligned, got {repr_mode}")
-    effective_mode = "global_patch" if repr_mode == "patch" else repr_mode
-
+def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None, vpr_model=None):
     save_root = Path(save_root)
     plc_idx = str(plc_idx)
 
@@ -93,9 +82,6 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
         print(f"[rebuild_bank] no images found: {place_dir}")
         return None
 
-    tfm = make_transform(img_size=img_size)
-
-    # emb를 npz로 저장 ---------------------
     paths: List[str] = []
     global_list: List[np.ndarray] = []
     patch_list: List[np.ndarray] = []
@@ -103,21 +89,35 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
     embs_g = None
     embs_p = None
 
-    preselect_mode = cfg.get("preselect_mode", "dino")
-    vpr_model = cfg.get("vpr_model", None)
+    cfg = cfg or {}
+    cfgb = get_cfg_bundle(cfg)
+
+    repr_mode = cfgb["repr_mode"]
+    preselect_mode = str(cfgb["preselect"].get("mode", "dino"))
+
+    global_mode = str(cfg.get("embed", {}).get("global_mode", "patch_mean"))
+    img_size = int(cfg.get("embed", {}).get("img_size", 560))
+    tfm = make_transform(img_size=img_size)
+
+    if repr_mode not in {
+        "global", "patch", "global_patch", "global_patch_pool",
+        "global_patch_with_aligned", "global_patch_with_aligned_loss_bank"
+    }:
+        raise ValueError(f"repr_mode must be global|patch|global_patch|global_patch_pool|global_patch_with_aligned, got {repr_mode}")
+
+    effective_mode = "global_patch" if repr_mode == "patch" else repr_mode
+
+    print(f"[DEBUG][rebuild_bank] mode={mode} preselect_mode={preselect_mode} vpr_model_is_none={vpr_model is None}")
 
     for p in img_paths:
         img = Image.open(p).convert("RGB")
-        img_np = np.array(img)[:, :, ::-1]  # RGB → BGR
+        if preselect_mode == "vpr":
+            img_np = np.array(img)[:, :, ::-1]
 
         paths.append(str(p))
 
-        # -----------------------------
-        # 🔥 global embedding 분기
-        # -----------------------------
         if preselect_mode == "dino":
             x = tfm(img)
-
             out = make_embed(
                 model, device, x,
                 repr_mode=effective_mode,
@@ -125,68 +125,46 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None):
             )
 
             if "global" in out:
-                global_list.append(
-                    out["global"].detach().cpu().numpy().astype(np.float32)
-                )
-
+                global_list.append(out["global"].detach().cpu().numpy().astype(np.float32))
             if "patch" in out:
-                patch_list.append(
-                    out["patch"].detach().cpu().numpy().astype(np.float32)
-                )
+                patch_list.append(out["patch"].detach().cpu().numpy().astype(np.float32))
 
         elif preselect_mode == "vpr":
             if vpr_model is None:
                 raise ValueError("vpr_model required")
 
-            # 🔥 VPR embedding (MegaLoc)
             emb = vpr_model.encode_image(img_np)
-
-            global_list.append(
-                emb.detach().cpu().numpy().astype(np.float32)
-            )
+            global_list.append(emb.detach().cpu().numpy().astype(np.float32))
 
             x = tfm(img)
-
             out = make_embed(
                 model, device, x,
                 repr_mode="patch",
                 global_mode=global_mode,
             )
-
             if "patch" in out:
-                patch_list.append(
-                    out["patch"].detach().cpu().numpy().astype(np.float32)
-                )
+                patch_list.append(out["patch"].detach().cpu().numpy().astype(np.float32))
 
-    else:
-        raise ValueError(preselect_mode)
+        else:
+            raise ValueError(preselect_mode)
 
-    # save global
     if global_list:
-        embs_g = np.stack(global_list, axis=0)  # (N,D)
-
-        # L2 정규화
+        embs_g = np.stack(global_list, axis=0)
         norm_g = np.linalg.norm(embs_g, axis=1, keepdims=True)
         embs_g = embs_g / np.clip(norm_g, 1e-12, None)
-
         np.savez_compressed(place_dir / f"{plc_idx}.npz",
                             embs=embs_g, paths=np.array(paths, dtype=object))
 
-    # save patch
     if patch_list:
-        embs_p = np.stack(patch_list, axis=0)   # (N,P,D)
-
-        # L2 정규화
+        embs_p = np.stack(patch_list, axis=0)
         norm_p = np.linalg.norm(embs_p, axis=2, keepdims=True)
         embs_p = embs_p / np.clip(norm_p, 1e-12, None)
-
         np.savez_compressed(place_dir / f"{plc_idx}_patch_.npz",
                             embs=embs_p, paths=np.array(paths, dtype=object))
 
-    
     return {
         "global": (embs_g if global_list else None),
-        "patch":  (embs_p if patch_list else None),
+        "patch": (embs_p if patch_list else None),
         "paths": paths,
     }
     

@@ -7,11 +7,7 @@ class MegaLocWrapper:
     def __init__(self, device="cuda"):
         self.device = device
 
-        self.model = torch.hub.load(
-            "gmberton/MegaLoc",
-            "resnet18_gem",
-            pretrained=True
-        )
+        self.model = torch.hub.load("gmberton/MegaLoc", "get_trained_model", trust_repo=True)
 
         self.model = self.model.to(device)
         self.model.eval()

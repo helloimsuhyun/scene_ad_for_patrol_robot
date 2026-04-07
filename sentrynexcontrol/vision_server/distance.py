@@ -17,7 +17,7 @@ from typing import List, Dict, Any, Optional
 
 from .banker import load_bank_by_place, BGR_to_RGB, rebuild_bank
 from .dino_emb import make_embed, make_transform
-from .config import load_cfg
+from .config import load_cfg, get_cfg_bundle
 
 import cv2
 
@@ -28,25 +28,19 @@ from .distance_util import (
 )
 
 
-# ----------------------------------------------------
-
-
 # vis helper
 def get_top_p_patch_info(repr_mode: str, debug: dict):
-    if repr_mode == "global_patch_pool":
-        pool_debug = debug["pool_debug"]
-        return pool_debug["top_patch_idx"], pool_debug["top_vals"]
 
-    elif repr_mode in {"global_patch", "global_patch_with_aligned"}:
+    if repr_mode in {"global_patch", "global_patch_with_aligned"}:
         patch_topk = debug["patch_topk"]
         return patch_topk["top_patch_idx"], patch_topk["top_patch_vals"]
 
     else:
         return None, None
 
-# =========================================================================================== dist 계산 함수
+# =========================================================================================== ===dist 계산 함수
 
-# global dist 계산 함수 > 거리와 제일 유사한 k개 유사도, 인덱스 반환
+# 1. global dist 계산 함수 > 거리와 제일 유사한 k개 유사도, 인덱스 반환
 def _dist_global(q: torch.Tensor, ref: torch.Tensor, k: int):
     """
     q: (D,) or (1,D)
@@ -65,6 +59,7 @@ def _dist_global(q: torch.Tensor, ref: torch.Tensor, k: int):
     dist = (1.0 - topk_sim).mean().item()
     return dist, (topk_sim, topk_idx)
 
+# 2. patchcore 스타일 dist 계산
 def _dist_patchcore(
     q_patch: torch.Tensor,      # (P,D)
     ref_patch: torch.Tensor,    # (N,P,D)
@@ -154,34 +149,28 @@ def _dist_patchcore(
     }
     return score, debug
 
-def run_preselect(q_out, q_img_bgr, ref_bank, mode, top_m, vpr_model=None):
-    refg_np, ref_paths = ref_bank["global"]
-    qg = q_out["global"]
+# 3. preselcet > 정합 > local focus위한 함수 
+def run_preselect(q_preselect_emb, ref_bank, mode, top_m):
+
+    ref_embs_np, ref_paths = ref_bank["global"]
 
     if mode == "dino":
-        refg = torch.from_numpy(refg_np).float().to(qg.device)
+        q = q_preselect_emb
+        if isinstance(q, np.ndarray):
+            q = torch.from_numpy(q).float()
 
-        _, (_, topk_idx) = _dist_global(
-            qg,
-            refg,
-            min(top_m, refg.shape[0]),
-        )
-
-        return topk_idx.squeeze(0).tolist()
+        ref = torch.from_numpy(ref_embs_np).float().to(q.device)
+        _, (_, topk_idx) = _dist_global(q, ref, min(top_m, ref.shape[0]))
+        return topk_idx.squeeze(0).tolist(), ref_paths
 
     elif mode == "vpr":
-        if vpr_model is None:
-            raise ValueError("vpr_model required")
+        q = q_preselect_emb
+        if isinstance(q, torch.Tensor):
+            q = q.detach().cpu().numpy()
 
-        ref_embs_np, ref_paths = ref_bank["global"]
-
-        q_emb = vpr_model.encode_image(q_img_bgr)   
-        q_emb = q_emb.detach().cpu().numpy()
-
-        sims = q_emb @ ref_embs_np.T
+        sims = q @ ref_embs_np.T
         idx = np.argsort(-sims)[:top_m]
-
-        return idx.tolist()
+        return idx.tolist(), ref_paths
 
     else:
         raise ValueError(mode)
@@ -189,7 +178,7 @@ def run_preselect(q_out, q_img_bgr, ref_bank, mode, top_m, vpr_model=None):
 @torch.inference_mode()
 def _run_gpa_frame(
     q_bgr: np.ndarray,
-    q_out: dict,
+    q_out: Optional[Dict[str, Any]],
     ref_bank,
     cfg: dict,
     sg_matcher,
@@ -197,12 +186,16 @@ def _run_gpa_frame(
     verifier_backbone,
     device: str,
     k: int,
+    vpr_model=None
 ):
-    mode_cfg = cfg.get("repr_modes", {}).get("global_patch_with_aligned", {})
-    gp_cfg = mode_cfg.get("global_preselect", {})
-    cc_cfg = mode_cfg.get("cc", {})
-    proposal_cfg = mode_cfg.get("proposal", {})
-    ver_cfg = mode_cfg.get("verifier", {})
+    cfgb = get_cfg_bundle(cfg)
+
+    mode_cfg = cfgb["mode_cfg"]
+    gp_cfg = cfgb["preselect"]
+    cc_cfg = cfgb["cc"]
+    proposal_cfg = cfgb["proposal"]
+    ver_cfg = cfgb["verifier"]
+
 
     preselect_m = int(gp_cfg.get("top_m", 5))
 
@@ -222,24 +215,39 @@ def _run_gpa_frame(
     ver_radius = int(ver_cfg.get("radius", 1))
     ver_top_p = float(ver_cfg.get("top_p", 0.10))
 
-    refg_np, ref_paths = ref_bank["global"]
-    qg = q_out["global"]
-    refg = torch.from_numpy(refg_np).float().to(qg.device)
+    tensor_device = torch.device(device)
 
+
+    # 1. preselect 모드에 맞추어 emb를 추출
     preselect_mode = gp_cfg.get("mode", "dino")
 
-    cand_ref_idx = run_preselect(
-        q_out=q_out,
-        q_img_bgr=q_bgr,
+    if preselect_mode == "dino":
+        if q_out is None or "global" not in q_out:
+            raise RuntimeError("DINO preselect인데 q_out['global']이 없습니다.")
+        q_preselect_emb = q_out["global"]
+
+    elif preselect_mode == "vpr":
+        if vpr_model is None:
+            raise RuntimeError("VPR mode인데 vpr_model이 없습니다.")
+        q_preselect_emb = vpr_model.encode_image(q_bgr)
+        if isinstance(q_preselect_emb, torch.Tensor):
+            q_preselect_emb = q_preselect_emb.detach().cpu().numpy()
+
+    else:
+        raise ValueError(f"unknown preselect mode: {preselect_mode}")
+
+    # 2. preselct emb로 상위 유사도 preselect_m개의 inx를 return
+    cand_ref_idx, ref_paths  = run_preselect(
+        q_preselect_emb=q_preselect_emb,
         ref_bank=ref_bank,
         mode=preselect_mode,
         top_m=preselect_m,
-        vpr_model=cfg.get("vpr_model", None),
     )
 
     cand_scores = []
     cand_infos = []
 
+    # 3. preselect된 ref들에 대해서 cc점수화 (각 이미지에서 max cc의 점수를 기준으로 정상 이미지중 max cc가 제일 낮은 이미지를 best ref로 ) ----------------
     for ref_i in cand_ref_idx:
         r_path = ref_paths[ref_i]
         r_bgr = cv2.imread(str(r_path), cv2.IMREAD_COLOR)
@@ -277,7 +285,7 @@ def _run_gpa_frame(
             "ref_paths": ref_paths,
         }
 
-    # 실험용과 동일: argmin 선택
+    # best ref 선택 ( argmin )
     best_idx = int(np.argmin(cand_scores))
     best_score = float(cand_scores[best_idx])
     best_info = cand_infos[best_idx]
@@ -288,8 +296,9 @@ def _run_gpa_frame(
         all_comps,
         key=lambda x: float(x.get("score", 0.0)),
         reverse=True,
-    )[:proposal_top_k]
+    )[:proposal_top_k] # best ref와의 cc 결과에서 proposal_top_k개의 cc를 local verification
 
+    # cc 영역을 bbox crop으로 변환
     flagged_regions = build_flagged_component_regions(
         flagged_comps=topk_comps,
         q_crop=best_debug["q_crop"],
@@ -331,15 +340,19 @@ def _run_gpa_frame(
     topk_infos = cand_infos_sorted[:max(1, min(k, len(cand_infos_sorted)))]
     topk_score = torch.tensor(
         [float(x["score"]) for x in topk_infos],
-        device=qg.device,
+        device=tensor_device,
         dtype=torch.float32,
     )
     topk_idx = torch.tensor(
         [int(x["ref_i"]) for x in topk_infos],
-        device=qg.device,
+        device=tensor_device,
         dtype=torch.long,
     )
-    best_img_idx = torch.tensor(int(best_info["ref_i"]), device=qg.device, dtype=torch.long)
+    best_img_idx = torch.tensor(
+        int(best_info["ref_i"]),
+        device=tensor_device,
+        dtype=torch.long,
+    )
 
     debug = {
         "fallback": False,
@@ -366,10 +379,10 @@ def _run_gpa_frame(
             "topk_score": topk_score,
             "topk_idx": topk_idx,
             "best_img_idx": best_img_idx,
-            "best_patch_dist": torch.empty(0, device=qg.device, dtype=torch.float32),
-            "top_patch_idx": torch.empty(0, device=qg.device, dtype=torch.long),
-            "top_patch_vals": torch.empty(0, device=qg.device, dtype=torch.float32),
-            "top_patch_match_idx": torch.empty(0, device=qg.device, dtype=torch.long),
+            "best_patch_dist": torch.empty(0, device=tensor_device, dtype=torch.float32),
+            "top_patch_idx": torch.empty(0, device=tensor_device, dtype=torch.long),
+            "top_patch_vals": torch.empty(0, device=tensor_device, dtype=torch.float32),
+            "top_patch_match_idx": torch.empty(0, device=tensor_device, dtype=torch.long),
         },
         "align_debug": {
             "crop_bbox": best_debug.get("bbox"),
@@ -397,74 +410,53 @@ def _run_gpa_frame(
 # 각 모드에 맞추어 knn dist를 return
 @torch.inference_mode()
 def compute_knn_dist(
-    q_out,                 # DINO query embedding output
-    ref_bank,              # load_bank_by_place 결과
+    q_out,
+    ref_bank,
     k=3,
     repr_mode="global",
     top_p=0.1,
     preselect_m=10,
     q_img_bgr=None,
-    global_model=None,     # DINO model
-    cc_backbone=None,      # CNN model
+    cc_backbone=None,
     verifier_backbone=None,
-    device=None,           # 하나만 사용
+    device=None,
     sg_matcher=None,
+    vpr_model=None,
     cfg=None,
 ):
-    pcfg = cfg.get("patchcore", {})
-    alpha = float(pcfg.get("alpha", 0.6))
+    if cfg is None:
+        raise ValueError("cfg required")
+
+    cfgb = get_cfg_bundle(cfg)
 
     # ---------------------------------------------------
-    # global
+    # global preselect + patch
     # ---------------------------------------------------
-    if repr_mode == "global":
-        ref_embs_np, ref_paths = ref_bank["global"]
-        q = q_out["global"]
-        ref = torch.from_numpy(ref_embs_np).float().to(q.device)
+    if repr_mode == "global_patch":
+        patch_cfg = cfgb["mode_cfg"].get("patch_score", {})
+        pre_cfg = cfgb["preselect"]
 
-        dist, debug_inner = _dist_global(q, ref, k)
+        alpha = float(patch_cfg.get("alpha", 0.6))
+        top_p = float(patch_cfg.get("top_p", top_p))
+        preselect_m = int(pre_cfg.get("top_m", preselect_m))
 
-        debug = {
-            "inner_debug": debug_inner,
-        }
-        return dist, debug, ref_paths
-
-    # ---------------------------------------------------
-    # patch
-    # ---------------------------------------------------
-    elif repr_mode == "patch":
-        ref_patch_np, ref_paths = ref_bank["patch"]
-        q_patch = q_out["patch"]
-        ref_patch = torch.from_numpy(ref_patch_np).float().to(q_patch.device)
-
-        score, debug = _dist_patchcore(
-            q_patch,
-            ref_patch,
-            top_p=top_p,
-            k=k,
-            alpha=alpha,
-            )
-
-        return score, debug, ref_paths
-
-    # ---------------------------------------------------
-    # global + patch
-    # ---------------------------------------------------
-    elif repr_mode == "global_patch":
-        refg_np, ref_paths = ref_bank["global"]
         refp_np, _ = ref_bank["patch"]
 
-        qg = q_out["global"]
         qp = q_out["patch"]
+        q_preselect_emb = q_out["global"]
 
-        refg = torch.from_numpy(refg_np).float().to(qg.device)
-
-        _, (topk_sim, topk_idx) = _dist_global(
-            qg,
-            refg,
-            min(preselect_m, refg.shape[0]),
+        cand_ref_idx, ref_paths = run_preselect(
+            q_preselect_emb=q_preselect_emb,
+            ref_bank=ref_bank,
+            mode=pre_cfg.get("mode", "dino"),
+            top_m=preselect_m,
         )
-        idx = topk_idx.squeeze(0)
+
+        idx = torch.tensor(
+            cand_ref_idx,
+            device=qp.device,
+            dtype=torch.long,
+        )
 
         refp = torch.from_numpy(refp_np).float().to(qp.device)
         refp_sel = refp[idx]
@@ -475,13 +467,14 @@ def compute_knn_dist(
             top_p=top_p,
             k=min(k, refp_sel.shape[0]),
             alpha=alpha,
-            )
+        )
 
-        topk_idx_global = idx[patch_debug_local["topk_idx"]]
+        topk_idx_local = patch_debug_local["topk_idx"]
+        topk_idx_global = idx[topk_idx_local]
         best_img_idx_global = idx[patch_debug_local["best_img_idx"]]
 
         debug = {
-            "global_topk": (topk_sim, idx),
+            "global_topk": (None, idx),
             "patch_topk": {
                 "best_ref_img_path": str(ref_paths[int(best_img_idx_global.item())]),
                 "top_patch_match_idx": patch_debug_local["best_patch_match_idx"][patch_debug_local["top_patch_idx"]],
@@ -498,10 +491,7 @@ def compute_knn_dist(
 
     # ---------------------------------------------------
     # global + aligned local CNN
-
-# ---------------------------------------------------
-# global + aligned local CNN
-# ---------------------------------------------------
+    # ---------------------------------------------------
     elif repr_mode == "global_patch_with_aligned":
         if sg_matcher is None:
             raise ValueError("sg_matcher required")
@@ -520,6 +510,7 @@ def compute_knn_dist(
             sg_matcher=sg_matcher,
             cc_backbone=cc_backbone,
             verifier_backbone=verifier_backbone,
+            vpr_model=vpr_model,
             device=device,
             k=k,
         )
@@ -547,7 +538,10 @@ def compute_knn_dist(
 
         return float(out["score"]), out["debug"], out["ref_paths"]
 
+    else:
+        raise ValueError(f"Unknown repr_mode: {repr_mode}")
 
+# ====================================================================================== threshold
 
 def th_percentile(scores, percentile):
     return float(np.percentile(scores, percentile))
@@ -563,17 +557,16 @@ def th_robust(scores, k=3.0):
     return float(med + k * mad * 1.4826)
 
 
-def calibrate_place(bank_root, plc_idx, global_model, cc_backbone, verifier_backbone ,device, sg_matcher=None, cfg=None):
+def calibrate_place(bank_root, plc_idx, global_model, cc_backbone, verifier_backbone ,device, sg_matcher=None, cfg=None, vpr_model=None):
     bank_root = Path(bank_root)
     plc_idx = str(plc_idx)
 
     if cfg is None:
         cfg = load_cfg(bank_root)
 
-    # bank rebuild → DINO 기준
-    rebuild_bank(bank_root, plc_idx, global_model, device, mode="bank", cfg=cfg)
-
-    rebuild_bank(bank_root, plc_idx, global_model, device, mode="th_calib", cfg=cfg)
+    # bank rebuild 
+    rebuild_bank(bank_root, plc_idx, global_model, device, mode="bank", cfg=cfg, vpr_model=vpr_model)
+    rebuild_bank(bank_root, plc_idx, global_model, device, mode="th_calib", cfg=cfg, vpr_model=vpr_model)
 
     # threshold 계산
     thr, scores, thr_path = compute_and_save_threshold(
@@ -585,6 +578,7 @@ def calibrate_place(bank_root, plc_idx, global_model, cc_backbone, verifier_back
         verifier_backbone=verifier_backbone,     
         device=device,
         sg_matcher=sg_matcher,
+        vpr_model = vpr_model
         )
 
     print("[CALIB-RAW] n =", len(scores))
@@ -603,74 +597,71 @@ def compute_and_save_threshold(
     bank_root,
     plc_idx,
     cfg: dict,
-    global_model=None,   # DINO
-    cc_backbone=None,    # CNN
+    global_model=None,
+    cc_backbone=None,
     verifier_backbone=None,
     device=None,
     sg_matcher=None,
+    vpr_model=None,
 ):
     bank_root = Path(bank_root)
     plc_idx = str(plc_idx)
 
+    cfgb = get_cfg_bundle(cfg)
 
-    r = cfg.get("repr", {})
-    c = cfg.get("calib", {})
+    repr_mode = cfgb["repr_mode"]
+    threshold_cfg = cfgb["threshold_cfg"]
+    calib_cfg = cfgb["calibration"]
+    mode_cfg = cfgb["mode_cfg"]
+    pre_cfg = cfgb["preselect"]
 
-    pcfg = cfg.get("patchcore", {})
-    top_p = float(pcfg.get("top_p", 0.1))
-    preselect_m = int(pcfg.get("preselect_m", 10))
-    alpha = float(pcfg.get("alpha", 0.6))
+    method = str(threshold_cfg.get("method", "percentile")).lower()
+    k = int(threshold_cfg.get("topk_neighbors", 3))
 
+    percentile_value = float(threshold_cfg.get("percentile_value", 97))
+    robust_std_k = float(threshold_cfg.get("robust_std_k", 2.5))
+    gaussian_std_k = float(threshold_cfg.get("gaussian_std_k", 2.5))
 
-    repr_mode = str(r.get("repr_mode", "global"))
+    if method == "percentile":
+        default_param = percentile_value
+    elif method == "robust":
+        default_param = robust_std_k
+    elif method == "gaussian":
+        default_param = gaussian_std_k
+    else:
+        raise ValueError(method)
 
-    k          = int(c.get("k", 3))
-    method     = str(c.get("method", "robust"))
-    robust_k   = float(c.get("robust_k", 2.5))
+    threshold_param = float(calib_cfg.get("threshold_param", default_param))
+    threshold_floor = float(calib_cfg.get("threshold_floor", 0.0))
+    max_imgs = int(calib_cfg.get("max_calib_images", 0))
 
-    if repr_mode == "global":
-        bank_npz = bank_root / plc_idx / "bank" / f"{plc_idx}.npz"
-        th_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}.npz"
-        bank = torch.from_numpy(np.load(bank_npz, allow_pickle=True)["embs"]).float()
-        th   = torch.from_numpy(np.load(th_npz, allow_pickle=True)["embs"]).float()
-        th   = F.normalize(th, dim=1)
+    # ---------------------------------------------------
+    # global_patch
+    # ---------------------------------------------------
+    if repr_mode == "global_patch":
+        patch_cfg = mode_cfg.get("patch_score", {})
+        top_p = float(patch_cfg.get("top_p", 0.1))
+        alpha = float(patch_cfg.get("alpha", 0.6))
+        preselect_m = int(pre_cfg.get("top_m", 10))
+        preselect_mode = str(pre_cfg.get("mode", "dino"))
 
-        k2 = min(k, bank.shape[0])
-        sim = th @ bank.T
-        topk_sim, _ = torch.topk(sim, k=k2, dim=1)
-        scores = (1.0 - topk_sim).mean(dim=1).numpy()
-
-    elif repr_mode == "patch":
-        bank_npz = bank_root / plc_idx / "bank" / f"{plc_idx}_patch_.npz"
-        th_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}_patch_.npz"
-
-        bank = torch.from_numpy(np.load(bank_npz, allow_pickle=True)["embs"]).float()
-        th   = torch.from_numpy(np.load(th_npz,   allow_pickle=True)["embs"]).float()
-
-        scores = []
-        for i in range(th.shape[0]):
-            q_patch = th[i]
-            s, _ = _dist_patchcore(
-                q_patch,
-                bank,
-                top_p=top_p,
-                k=k,
-                alpha=alpha,
-            )
-            scores.append(s)
-
-    elif repr_mode == "global_patch":
         bank_g_npz = bank_root / plc_idx / "bank" / f"{plc_idx}.npz"
         th_g_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}.npz"
         bank_p_npz = bank_root / plc_idx / "bank" / f"{plc_idx}_patch_.npz"
         th_p_npz   = bank_root / plc_idx / "th_calib" / f"{plc_idx}_patch_.npz"
 
         bank_g = torch.from_numpy(np.load(bank_g_npz, allow_pickle=True)["embs"]).float()
-        th_g   = torch.from_numpy(np.load(th_g_npz,   allow_pickle=True)["embs"]).float()
+        th_g   = torch.from_numpy(np.load(th_g_npz, allow_pickle=True)["embs"]).float()
         bank_p = torch.from_numpy(np.load(bank_p_npz, allow_pickle=True)["embs"]).float()
-        th_p   = torch.from_numpy(np.load(th_p_npz,   allow_pickle=True)["embs"]).float()
+        th_p   = torch.from_numpy(np.load(th_p_npz, allow_pickle=True)["embs"]).float()
 
+        # dino preselect만 여기선 지원
+        if preselect_mode != "dino":
+            raise ValueError(f"global_patch calibration currently supports only dino preselect, got: {preselect_mode}")
+
+        bank_g = F.normalize(bank_g, dim=1)
         th_g = F.normalize(th_g, dim=1)
+
         scores = []
         for i in range(th_g.shape[0]):
             sim = th_g[i:i+1] @ bank_g.T
@@ -685,23 +676,28 @@ def compute_and_save_threshold(
                 top_p=top_p,
                 k=k,
                 alpha=alpha,
-                )
-            scores.append(s)
+            )
+            scores.append(float(s))
 
-        scores = np.array(scores, dtype=np.float32)
+        scores = np.asarray(scores, dtype=np.float32)
 
+        if method == "robust":
+            thr = max(th_robust(scores, k=threshold_param), threshold_floor)
+        elif method == "gaussian":
+            thr = max(th_gaussian(scores, k=threshold_param), threshold_floor)
+        elif method == "percentile":
+            thr = max(th_percentile(scores, threshold_param), threshold_floor)
+        else:
+            raise ValueError(method)
+
+    # ---------------------------------------------------
+    # global_patch_with_aligned
+    # ---------------------------------------------------
     elif repr_mode == "global_patch_with_aligned":
         if sg_matcher is None:
             raise ValueError("sg_matcher required")
         if global_model is None or cc_backbone is None or verifier_backbone is None or device is None:
             raise ValueError("global_model/cc_backbone/verifier_backbone/device required")
-
-        mode_cfg = cfg.get("repr_modes", {}).get("global_patch_with_aligned", {})
-        calib_cfg = mode_cfg.get("calibration", {})
-
-        final_k = float(calib_cfg.get("final_k", robust_k))
-        final_threshold_floor = float(calib_cfg.get("final_threshold_floor", 0.0))
-        max_imgs = int(calib_cfg.get("max_imgs", 0))
 
         e = cfg.get("embed", {})
         img_size = int(e.get("img_size", 560))
@@ -719,6 +715,7 @@ def compute_and_save_threshold(
         if max_imgs > 0:
             th_imgs = th_imgs[:max_imgs]
 
+        preselect_mode = str(pre_cfg.get("mode", "dino"))
         final_scores = []
 
         for q_path in th_imgs:
@@ -726,14 +723,16 @@ def compute_and_save_threshold(
             if q_bgr is None:
                 continue
 
-            x = tfm(BGR_to_RGB(q_bgr))
-            q_out = make_embed(
-                global_model,
-                device,
-                x,
-                repr_mode="global",
-                global_mode=global_mode,
-            )
+            q_out = None
+            if preselect_mode == "dino":
+                x = tfm(BGR_to_RGB(q_bgr))
+                q_out = make_embed(
+                    global_model,
+                    device,
+                    x,
+                    repr_mode="global",
+                    global_mode=global_mode,
+                )
 
             out = _run_gpa_frame(
                 q_bgr=q_bgr,
@@ -743,6 +742,7 @@ def compute_and_save_threshold(
                 sg_matcher=sg_matcher,
                 cc_backbone=cc_backbone,
                 verifier_backbone=verifier_backbone,
+                vpr_model=vpr_model,
                 device=device,
                 k=1,
             )
@@ -752,7 +752,6 @@ def compute_and_save_threshold(
 
             final_scores.append(float(out["score"]))
 
-            # (옵션) 로그
             ver_scores = out["debug"].get("verifier_scores", [])
             flagged_regions = out["debug"].get("flagged_regions", [])
 
@@ -766,38 +765,38 @@ def compute_and_save_threshold(
         if len(final_scores) == 0:
             raise RuntimeError("aligned calib failed: no scores collected")
 
-        final_scores = np.asarray(final_scores, dtype=np.float32)
+        scores = np.asarray(final_scores, dtype=np.float32)
 
-        # ✅ threshold 계산
         if method == "robust":
-            thr = max(th_robust(final_scores, k=final_k), final_threshold_floor)
+            thr = max(th_robust(scores, k=threshold_param), threshold_floor)
         elif method == "gaussian":
-            thr = max(th_gaussian(final_scores, k=final_k), final_threshold_floor)
+            thr = max(th_gaussian(scores, k=threshold_param), threshold_floor)
         elif method == "percentile":
-            thr = max(th_percentile(final_scores, final_k), final_threshold_floor)
+            thr = max(th_percentile(scores, threshold_param), threshold_floor)
         else:
             raise ValueError(method)
 
-        scores = final_scores
-        created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
+    else:
+        raise ValueError(f"Unknown repr_mode: {repr_mode}")
 
-        # ✅ 깔끔한 threshold.json
-        out = {
-            "plc_idx": plc_idx,
-            "repr_mode": repr_mode,
-            "k": k,
-            "method": method,
-            "threshold": float(thr),
-            "num_th": int(len(scores)),
-            "created_at": created_at,
-        }
+    created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
 
-        thr_path = bank_root / plc_idx / "threshold.json"
-        thr_path.write_text(
-            json.dumps(out, indent=2, ensure_ascii=False),
-            encoding="utf-8"
-        )
-        
+    out = {
+        "plc_idx": plc_idx,
+        "repr_mode": repr_mode,
+        "k": k,
+        "method": method,
+        "threshold": float(thr),
+        "num_th": int(len(scores)),
+        "created_at": created_at,
+    }
+
+    thr_path = bank_root / plc_idx / "threshold.json"
+    thr_path.write_text(
+        json.dumps(out, indent=2, ensure_ascii=False),
+        encoding="utf-8"
+    )
+
     return float(thr), scores, thr_path
 
 # ================================================================================= 추론
@@ -805,49 +804,31 @@ def compute_and_save_threshold(
 # event 단위 이상감지
 @torch.inference_mode()
 def infer_event(
-    imgs_bgr,
+    imgs_bgr: List[np.ndarray],
+    plc_idx: str,
     bank_root,
-    plc_idx,
-    cfg: dict = None,
-    global_model=None,
-    cc_backbone=None,
-    verifier_backbone=None,
-    device=None,
+    global_model,
+    cc_backbone,
+    verifier_backbone,
+    device,
     sg_matcher=None,
+    vpr_model=None,
+    cfg=None,
 ):
-    """
-    repr_mode: "global" | "patch" | "global_patch" | "global_patch_with_aligned"
-    - global: global feature kNN
-    - patch: PatchCore-style
-    - global_patch: global preselect 후 image-level patchcore
-    - global_patch_with_aligned: global preselect 후 각 이미지에 대해 정합 -> local patch별 비교 -> dist
-    """
-
-    plc_idx = str(plc_idx)
     bank_root = Path(bank_root)
+    plc_idx = str(plc_idx)
 
-    if not imgs_bgr:
-        raise ValueError("imgs_bgr is empty")
-
-
-    # -------------------------
-    # cfg
-    # -------------------------
     if cfg is None:
         cfg = load_cfg(bank_root)
 
-    infer_cfg = cfg.get("infer", {})
-    event_rule = str(infer_cfg.get("event_rule", "max"))
-    use_two_stage_vlm = bool(infer_cfg.get("use_two_stage_vlm", False))
+    cfgb = get_cfg_bundle(cfg)
 
-    e = cfg.get("embed", {})
-    img_size = int(e.get("img_size", 560))
-    global_mode = str(e.get("global_mode", "patch_mean"))
-    tfm = make_transform(img_size=img_size)
+    img_size = int(cfg.get("embed", {}).get("img_size", 560))
+    global_mode = str(cfg.get("embed", {}).get("global_mode", "patch_mean"))
+    event_rule = str(cfg.get("infer", {}).get("event_rule", "max")).lower()
+    use_two_stage_vlm = bool(cfg.get("infer", {}).get("use_two_stage_vlm", False))
 
-    pcfg = cfg.get("patchcore", {})
-    top_p = float(pcfg.get("top_p", 0.1))
-    preselect_m = int(pcfg.get("preselect_m", 10))
+    tfm = make_transform(img_size)
 
     # -------------------------
     # threshold meta
@@ -861,14 +842,24 @@ def infer_event(
     k = int(meta.get("k", 3))
     ref_bank_id = str(meta.get("ref_bank_id", ""))
 
-    repr_mode = str(meta.get("repr_mode", "global")).lower()
-    if repr_mode in {"patch_global"}:
-        repr_mode = "global_patch"
-    if repr_mode not in {"global", "patch", "global_patch", "global_patch_with_aligned"}:
+    repr_mode = str(meta.get("repr_mode", cfgb["repr_mode"])).lower()
+    if repr_mode not in {"global_patch", "global_patch_with_aligned"}:
         raise ValueError(
             f"Unknown repr_mode={repr_mode} "
-            "(use global|patch|global_patch|global_patch_with_aligned)"
+            "(use global_patch|global_patch_with_aligned)"
         )
+
+    mode_cfg = cfg.get("modes", {}).get(repr_mode, {})
+    pre_cfg = mode_cfg.get("preselect", {})
+
+    top_p = 0.1
+    preselect_m = int(pre_cfg.get("top_m", 10))
+
+    if repr_mode == "global_patch":
+        patch_cfg = mode_cfg.get("patch_score", {})
+        top_p = float(patch_cfg.get("top_p", 0.1))
+
+    preselect_mode = str(pre_cfg.get("mode", "dino"))
 
     # -------------------------
     # bank load
@@ -886,19 +877,23 @@ def infer_event(
     align_vis_all: List[Optional[Dict[str, Any]]] = []
 
     for fi, img_bgr in enumerate(imgs_bgr):
+        q_out = None
 
-        x = tfm(BGR_to_RGB(img_bgr))
-
-        # global embedding은 DINO
-        q_out = make_embed(
-            global_model,
-            device,
-            x,
-            repr_mode=repr_mode,
-            global_mode=global_mode,
+        # aligned + vpr 일 때만 DINO query embedding 생략
+        need_query_embed = not (
+            repr_mode == "global_patch_with_aligned" and preselect_mode == "vpr"
         )
 
-        # distance 계산: global=DINO, local aligned=CNN
+        if need_query_embed:
+            x = tfm(BGR_to_RGB(img_bgr))
+            q_out = make_embed(
+                global_model,
+                device,
+                x,
+                repr_mode=repr_mode if repr_mode == "global_patch" else "global",
+                global_mode=global_mode,
+            )
+
         dist, debug, ref_paths = compute_knn_dist(
             q_out,
             ref_bank,
@@ -911,6 +906,7 @@ def infer_event(
             verifier_backbone=verifier_backbone,
             device=device,
             sg_matcher=sg_matcher,
+            vpr_model=vpr_model,
             cfg=cfg,
         )
 
@@ -918,79 +914,45 @@ def infer_event(
         frame_scores.append(float(dist))
         frame_change_flags.append(1 if is_change else 0)
 
-        # aligned vis logging -------------------------------------
         if repr_mode == "global_patch_with_aligned":
             align_vis_all.append(debug.get("align_debug", None))
         else:
             align_vis_all.append(None)
 
-        # topk logging ------------------------------------- 
-        if repr_mode == "global":
-            topk_sim, topk_idx = debug["inner_debug"]
-            idx = topk_idx.squeeze(0).tolist()
-            sims = topk_sim.squeeze(0).tolist()
-            paths = [ref_paths[i] for i in idx]
-
-        elif repr_mode == "patch":
-            topk_score = debug["topk_score"]
-            topk_idx = debug["topk_idx"]
+        if repr_mode in {"global_patch", "global_patch_with_aligned"}:
+            topk_score = debug["patch_topk"]["topk_score"]
+            topk_idx = debug["patch_topk"]["topk_idx"]
             idx = topk_idx.tolist()
             paths = [ref_paths[i] for i in idx]
             sims = (-topk_score).tolist()
-
-        elif repr_mode == "global_patch":
-            patch_topk = debug["patch_topk"]
-            topk_score = patch_topk["topk_score"]
-            topk_idx = patch_topk["topk_idx"]
-            idx = topk_idx.tolist()
-            paths = [ref_paths[i] for i in idx]
-            sims = (-topk_score).tolist()
-
-        elif repr_mode == "global_patch_with_aligned":
-            patch_topk = debug["patch_topk"]
-            topk_score = patch_topk["topk_score"]
-            topk_idx = patch_topk["topk_idx"]
-            idx = topk_idx.tolist()
-            paths = [ref_paths[i] for i in idx]
-            sims = [float(x) for x in topk_score.tolist()]
-
         else:
-            raise ValueError(f"Unknown repr_mode={repr_mode}")
+            idx, sims, paths = [], [], []
 
         topk_paths_all.append([str(p) for p in paths])
         topk_sims_all.append([float(s) for s in sims])
 
-        top_patch_idx, top_patch_vals = get_top_p_patch_info(repr_mode, debug)
+        if repr_mode in {"global_patch", "global_patch_with_aligned"}:
+            top_patch_idx, top_patch_vals = get_top_p_patch_info(repr_mode, debug)
 
-        if top_patch_idx is not None and top_patch_vals is not None:
-            align_debug = debug.get("align_debug", None) if isinstance(debug, dict) else None
-            align_data = align_debug if isinstance(align_debug, dict) else {}
+            align_data = debug.get("align_debug", {}) if repr_mode == "global_patch_with_aligned" else {}
 
             patch_vis_all.append({
                 "top_patch_idx": top_patch_idx.detach().cpu().tolist()
-                if hasattr(top_patch_idx, "detach") else list(top_patch_idx),
-
+                if isinstance(top_patch_idx, torch.Tensor) else [],
                 "top_patch_vals": top_patch_vals.detach().cpu().tolist()
-                if hasattr(top_patch_vals, "detach") else list(top_patch_vals),
-
+                if isinstance(top_patch_vals, torch.Tensor) else [],
                 "top_patch_match_idx": (
                     debug["patch_topk"]["top_patch_match_idx"].detach().cpu().tolist()
                     if "patch_topk" in debug and "top_patch_match_idx" in debug["patch_topk"]
-                    and hasattr(debug["patch_topk"]["top_patch_match_idx"], "detach")
-                    else list(debug["patch_topk"]["top_patch_match_idx"])
-                    if "patch_topk" in debug and "top_patch_match_idx" in debug["patch_topk"]
+                    and isinstance(debug["patch_topk"]["top_patch_match_idx"], torch.Tensor)
                     else []
                 ),
-
                 "best_ref_img_path": (
                     debug["patch_topk"].get("best_ref_img_path", None)
                     if "patch_topk" in debug else None
                 ),
-
                 "repr_mode": repr_mode,
                 "img_size": img_size,
-
-                # aligned 시각화용 metadata
                 "H": align_data.get("H", None),
                 "crop_bbox": align_data.get("crop_bbox", None),
                 "grid_hw": align_data.get("grid_hw", None),
@@ -1004,40 +966,36 @@ def infer_event(
     # -------------------------
     # event aggregation
     # -------------------------
-        if event_rule == "mean":
-            decision_score = float(np.mean(frame_scores))
-            anomaly_flag = 1 if decision_score > thr else 0
+    if event_rule == "mean":
+        decision_score = float(np.mean(frame_scores))
+        anomaly_flag = 1 if decision_score > thr else 0
 
-        elif event_rule == "max":
-            decision_score = float(np.max(frame_scores))
-            anomaly_flag = 1 if decision_score > thr else 0
+    elif event_rule == "max":
+        decision_score = float(np.max(frame_scores))
+        anomaly_flag = 1 if decision_score > thr else 0
 
-        elif event_rule == "median":
-            decision_score = float(np.median(frame_scores))
-            anomaly_flag = 1 if decision_score > thr else 0
+    elif event_rule == "median":
+        decision_score = float(np.median(frame_scores))
+        anomaly_flag = 1 if decision_score > thr else 0
 
-        elif event_rule == "vote":
-            n_ab = int(sum(frame_change_flags))
-            n = int(len(frame_change_flags))
-            anomaly_flag = 1 if n_ab > (n / 2) else 0
-            decision_score = float(n_ab / max(n, 1))
+    elif event_rule == "vote":
+        n_ab = int(sum(frame_change_flags))
+        n = int(len(frame_change_flags))
+        anomaly_flag = 1 if n_ab > (n / 2) else 0
+        decision_score = float(n_ab / max(n, 1))
 
-        else:
-            raise ValueError(f"Unknown event_rule: {event_rule}")
+    else:
+        raise ValueError(f"Unknown event_rule: {event_rule}")
 
-        margin = decision_score - thr
+    margin = decision_score - thr
+    event_score = float(np.clip(
+        50.0 + 50.0 * (margin / max(thr, 1e-8)),
+        0.0,
+        100.0
+    ))
 
-        event_score = float(np.clip(
-            50.0 + 50.0 * (margin / max(thr, 1e-8)),
-            0.0,
-            100.0
-        ))
+    rep_idx = int(np.argmax(frame_scores)) if len(frame_scores) > 0 else 0
 
-        rep_idx = int(np.argmax(frame_scores)) if len(frame_scores) > 0 else 0
-
-    # -------------------------
-    # optional: VLM gate
-    # -------------------------
     if anomaly_flag == 1:
         rep, summary = None, "anomaly detect"
     else:
@@ -1046,14 +1004,10 @@ def infer_event(
     if use_two_stage_vlm and anomaly_flag == 1:
         pass
 
-    # -------------------------
-    # pack
-    # -------------------------
     ref_topk_json = json.dumps(
         {"topk_paths": topk_paths_all, "topk_sims": topk_sims_all, "rep": rep},
         ensure_ascii=False,
     )
-
 
     return {
         "threshold": float(thr),
@@ -1068,11 +1022,7 @@ def infer_event(
             "frame_idx": rep_idx,
             "repr_mode": repr_mode,
             "img_size": img_size,
-
-            # DINO 계열일 때만 사용
-            "patch_size": (
-                14 if repr_mode != "global_patch_with_aligned" else None
-            ),
+            "patch_size": (14 if repr_mode != "global_patch_with_aligned" else None),
 
             "top_patch_idx": (
                 patch_vis_all[rep_idx]["top_patch_idx"]
@@ -1096,8 +1046,6 @@ def infer_event(
                 and "best_ref_img_path" in patch_vis_all[rep_idx]
                 else None
             ),
-
-            # aligned 전용 메타데이터
             "grid_hw": (
                 align_vis_all[rep_idx]["grid_hw"]
                 if repr_mode == "global_patch_with_aligned"
@@ -1114,35 +1062,5 @@ def infer_event(
                 and "crop_bbox" in align_vis_all[rep_idx]
                 else None
             ),
-            "crop_shape": (
-                align_vis_all[rep_idx]["crop_shape"]
-                if repr_mode == "global_patch_with_aligned"
-                and len(align_vis_all) > rep_idx
-                and align_vis_all[rep_idx] is not None
-                and "crop_shape" in align_vis_all[rep_idx]
-                else None
-            ),
-            "vis_query_bgr": (
-                patch_vis_all[rep_idx]["vis_query_bgr"]
-                if len(patch_vis_all) > rep_idx and patch_vis_all[rep_idx] is not None
-                and "vis_query_bgr" in patch_vis_all[rep_idx]
-                else None
-            ),
-            "vis_ref_bgr": (
-                patch_vis_all[rep_idx]["vis_ref_bgr"]
-                if len(patch_vis_all) > rep_idx and patch_vis_all[rep_idx] is not None
-                and "vis_ref_bgr" in patch_vis_all[rep_idx]
-                else None
-            ),
         },
-        "align_vis": (
-            {
-                "frame_idx": rep_idx,
-                "data": align_vis_all[rep_idx],
-            }
-            if repr_mode == "global_patch_with_aligned"
-            and len(align_vis_all) > rep_idx
-            and align_vis_all[rep_idx] is not None
-            else None
-        ),
     }
