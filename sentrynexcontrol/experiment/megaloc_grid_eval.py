@@ -1,4 +1,37 @@
-import os
+
+"""
+MegaLoc:
+
+python megaloc_grid_eval.py eval \
+  --manifest-csv ./grid_data/manifest.csv \
+  --out-dir ./grid_result_megaloc \
+  --device cuda \
+  --topk 3 \
+  --backbone megaloc
+
+DINO patch mean:
+
+python megaloc_grid_eval.py eval \
+  --manifest-csv ./grid_data/manifest.csv \
+  --out-dir ./grid_result_dino_patch_mean \
+  --device cuda \
+  --topk 3 \
+  --backbone dino_patch_mean \
+  --dino-model-name dinov2_vits14
+
+RealSense collect 예시:
+
+python megaloc_grid_eval.py collect \
+  --save-root ./grid_data \
+  --mode BANK \
+  --camera-id /dev/video6 \
+  --width 1280 \
+  --height 720
+
+
+
+"""
+
 import re
 import cv2
 import uuid
@@ -50,6 +83,62 @@ class MegaLocWrapper:
 
 
 # =========================================================
+# DINO Patch-Mean Wrapper
+# =========================================================
+class DINOPatchMeanWrapper:
+    def __init__(self, device="cuda", model_name="dinov2_vits14"):
+        self.device = device
+
+        self.model = torch.hub.load(
+            "facebookresearch/dinov2",
+            model_name
+        )
+        self.model = self.model.to(device)
+        self.model.eval()
+
+        self.tfm = T.Compose([
+            T.ToTensor(),
+            T.Resize((224, 224)),
+            T.Normalize(mean=[0.485, 0.456, 0.406],
+                        std=[0.229, 0.224, 0.225]),
+        ])
+
+    @torch.no_grad()
+    def encode_image(self, img_bgr):
+        img = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
+        x = self.tfm(img).unsqueeze(0).to(self.device)
+
+        feats = self.model.forward_features(x)
+
+        if "x_norm_patchtokens" not in feats:
+            raise RuntimeError("DINO forward_features output missing x_norm_patchtokens")
+
+        patch_tokens = feats["x_norm_patchtokens"]   # [1, N, C]
+        feat = patch_tokens.mean(dim=1)              # [1, C]
+        feat = torch.nn.functional.normalize(feat, dim=1)
+
+        return feat.squeeze(0)
+
+
+def build_global_model(args, device):
+    backbone = args.backbone.lower()
+
+    if backbone == "megaloc":
+        print("[INFO] backbone = MegaLoc")
+        return MegaLocWrapper(device=device)
+
+    elif backbone == "dino_patch_mean":
+        print(f"[INFO] backbone = DINO patch mean ({args.dino_model_name})")
+        return DINOPatchMeanWrapper(
+            device=device,
+            model_name=args.dino_model_name
+        )
+
+    else:
+        raise ValueError(f"unknown backbone: {args.backbone}")
+
+
+# =========================================================
 # Utils
 # =========================================================
 IMG_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
@@ -83,6 +172,12 @@ def cosine_search(query_feats, db_feats, topk=5):
     return topk_idx, topk_sims
 
 
+def parse_camera_source(camera_id):
+    if isinstance(camera_id, str) and camera_id.isdigit():
+        return int(camera_id)
+    return camera_id
+
+
 # =========================================================
 # Collect mode
 # =========================================================
@@ -95,7 +190,9 @@ def run_collect(args):
     out_dir = save_root / mode
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    cap = cv2.VideoCapture(args.camera_id)
+    cam_src = parse_camera_source(args.camera_id)
+    cap = cv2.VideoCapture(cam_src, cv2.CAP_V4L2)
+
     if not cap.isOpened():
         raise RuntimeError(f"cannot open camera: {args.camera_id}")
 
@@ -109,6 +206,7 @@ def run_collect(args):
 
     print("=" * 60)
     print(f"[COLLECT MODE] {mode}")
+    print(f"[INFO] camera={args.camera_id}")
     print("조작법:")
     print("  c : 현재 프레임 저장")
     print("  g : 좌표 다시 입력")
@@ -119,20 +217,23 @@ def run_collect(args):
 
     while True:
         ret, frame = cap.read()
-        if not ret:
+        if not ret or frame is None:
             print("[WARN] camera frame read failed")
             continue
 
         vis = frame.copy()
         text1 = f"MODE: {mode}"
         text2 = f"GRID: x={current_x}, y={current_y}"
-        text3 = "c=capture | g=input grid | w/a/s/d=move | q=quit"
+        text3 = f"CAM: {args.camera_id}"
+        text4 = "c=capture | g=input grid | w/a/s/d=move | q=quit"
 
         cv2.putText(vis, text1, (20, 30),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 0), 2)
         cv2.putText(vis, text2, (20, 65),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.9, (0, 255, 255), 2)
         cv2.putText(vis, text3, (20, 100),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 200, 0), 2)
+        cv2.putText(vis, text4, (20, 135),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         cv2.imshow("collect", vis)
@@ -212,6 +313,7 @@ def run_build_manifest(args):
     out_csv = Path(args.out_csv)
     out_csv.parent.mkdir(parents=True, exist_ok=True)
     df.to_csv(out_csv, index=False)
+
     print(f"[OK] manifest saved: {out_csv}")
     print(df["mode"].value_counts())
 
@@ -275,19 +377,25 @@ def run_eval(args):
         device = "cpu"
 
     print(f"[INFO] device={device}")
+    print(f"[INFO] backbone={args.backbone}")
     print(f"[INFO] num_bank={len(bank_df)}")
     print(f"[INFO] num_query={len(query_df)}")
 
-    model = MegaLocWrapper(device=device)
+    model = build_global_model(args, device)
 
     bank_feats, bank_df = extract_features(model, bank_df)
     query_feats, query_df = extract_features(model, query_df)
 
-    topk = args.topk
+    topk = min(args.topk, len(bank_df))
     topk_idx, topk_sims = cosine_search(query_feats, bank_feats, topk=topk)
 
     per_query_rows = []
-    success = {k: 0 for k in range(1, topk + 1)}
+    success_tol1 = {k: 0 for k in range(1, topk + 1)}
+    success_strict = {k: 0 for k in range(1, topk + 1)}
+
+    top1_manhattan_list = []
+    top1_euclidean_list = []
+    within_top1 = {0: 0, 1: 0, 2: 0}
 
     for qi in range(len(query_df)):
         qrow = query_df.iloc[qi]
@@ -295,7 +403,8 @@ def run_eval(args):
         qy = int(qrow["grid_y"])
 
         candidates = []
-        hit_rank = None
+        hit_rank_tol1 = None
+        hit_rank_strict = None
 
         for rank in range(topk):
             bi = topk_idx[qi, rank]
@@ -305,9 +414,19 @@ def run_eval(args):
             by = int(brow["grid_y"])
             sim = float(topk_sims[qi, rank])
 
-            is_match = (qx == bx) and (qy == by)
-            if is_match and hit_rank is None:
-                hit_rank = rank + 1
+            dx = bx - qx
+            dy = by - qy
+            manhattan_dist = int(abs(dx) + abs(dy))
+            euclidean_dist = float(np.sqrt(dx * dx + dy * dy))
+
+            is_strict_match = (qx == bx) and (qy == by)
+            is_match_tol1 = (abs(dx) <= 1) and (abs(dy) <= 1)
+
+            if is_strict_match and hit_rank_strict is None:
+                hit_rank_strict = rank + 1
+
+            if is_match_tol1 and hit_rank_tol1 is None:
+                hit_rank_tol1 = rank + 1
 
             candidates.append({
                 "rank": rank + 1,
@@ -315,35 +434,78 @@ def run_eval(args):
                 "bank_grid_x": bx,
                 "bank_grid_y": by,
                 "sim": sim,
-                "is_match": is_match,
+                "dx": int(dx),
+                "dy": int(dy),
+                "manhattan_dist": manhattan_dist,
+                "euclidean_dist": euclidean_dist,
+                "is_strict_match": is_strict_match,
+                "is_match_tol1": is_match_tol1,
             })
 
-        if hit_rank is not None:
-            for k in range(hit_rank, topk + 1):
-                success[k] += 1
+        if hit_rank_tol1 is not None:
+            for k in range(hit_rank_tol1, topk + 1):
+                success_tol1[k] += 1
+
+        if hit_rank_strict is not None:
+            for k in range(hit_rank_strict, topk + 1):
+                success_strict[k] += 1
 
         top1 = candidates[0]
+        top1_manhattan = int(top1["manhattan_dist"])
+        top1_euclidean = float(top1["euclidean_dist"])
+
+        top1_manhattan_list.append(top1_manhattan)
+        top1_euclidean_list.append(top1_euclidean)
+
+        for cell_thr in [0, 1, 2]:
+            if top1_manhattan <= cell_thr:
+                within_top1[cell_thr] += 1
+
         per_query_rows.append({
             "query_image_path": qrow["image_path"],
             "query_grid_x": qx,
             "query_grid_y": qy,
+
             "top1_bank_image_path": top1["bank_image_path"],
             "top1_bank_grid_x": top1["bank_grid_x"],
             "top1_bank_grid_y": top1["bank_grid_y"],
             "top1_sim": top1["sim"],
-            "top1_is_match": top1["is_match"],
-            "hit_rank": hit_rank if hit_rank is not None else -1,
+
+            "top1_dx": top1["dx"],
+            "top1_dy": top1["dy"],
+            "top1_manhattan_dist": top1_manhattan,
+            "top1_euclidean_dist": top1_euclidean,
+
+            "top1_is_strict_match": top1["is_strict_match"],
+            "top1_is_match_tol1": top1["is_match_tol1"],
+
+            "hit_rank_strict": hit_rank_strict if hit_rank_strict is not None else -1,
+            "hit_rank_tol1": hit_rank_tol1 if hit_rank_tol1 is not None else -1,
+
             "topk_candidates": json.dumps(candidates, ensure_ascii=False),
         })
 
     num_query = len(query_df)
+    denom = max(num_query, 1)
+
     summary = {
+        "backbone": args.backbone,
+        "dino_model_name": args.dino_model_name if args.backbone == "dino_patch_mean" else None,
         "num_bank": int(len(bank_df)),
         "num_query": int(num_query),
+
+        "mean_manhattan_distance": float(np.mean(top1_manhattan_list)),
+        "median_manhattan_distance": float(np.median(top1_manhattan_list)),
+        "mean_euclidean_distance": float(np.mean(top1_euclidean_list)),
+
+        "top1_within_0_cells": float(within_top1[0] / denom),
+        "top1_within_1_cells": float(within_top1[1] / denom),
+        "top1_within_2_cells": float(within_top1[2] / denom),
     }
 
     for k in range(1, topk + 1):
-        summary[f"Recall@{k}"] = float(success[k] / max(num_query, 1))
+        summary[f"Recall@{k}_strict"] = float(success_strict[k] / denom)
+        summary[f"Recall@{k}_tol1"] = float(success_tol1[k] / denom)
 
     out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -409,7 +571,10 @@ def run_vis(args):
             "TOP1 BANK",
             f"x={row['top1_bank_grid_x']} y={row['top1_bank_grid_y']}",
             f"sim={row['top1_sim']:.4f}",
-            f"match={row['top1_is_match']}",
+            f"strict={row['top1_is_strict_match']}",
+            f"tol1={row['top1_is_match_tol1']}",
+            f"manhattan={row['top1_manhattan_dist']}",
+            f"euclid={row['top1_euclidean_dist']:.3f}",
         ])
 
         canvas = np.concatenate([qimg, bimg], axis=1)
@@ -423,13 +588,13 @@ def run_vis(args):
 # Main
 # =========================================================
 def build_parser():
-    parser = argparse.ArgumentParser("MegaLoc grid retrieval eval")
+    parser = argparse.ArgumentParser("Grid retrieval eval")
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("collect", help="interactive capture for BANK/QUERY")
     p.add_argument("--save-root", type=str, required=True)
     p.add_argument("--mode", type=str, required=True, choices=["BANK", "QUERY", "bank", "query"])
-    p.add_argument("--camera-id", type=int, default=0)
+    p.add_argument("--camera-id", type=str, default="0")
     p.add_argument("--width", type=int, default=1280)
     p.add_argument("--height", type=int, default=720)
     p.add_argument("--start-x", type=int, default=0)
@@ -441,11 +606,14 @@ def build_parser():
     p.add_argument("--out-csv", type=str, required=True)
     p.set_defaults(func=run_build_manifest)
 
-    p = sub.add_parser("eval", help="MegaLoc retrieval evaluation")
+    p = sub.add_parser("eval", help="retrieval evaluation")
     p.add_argument("--manifest-csv", type=str, required=True)
     p.add_argument("--out-dir", type=str, required=True)
     p.add_argument("--device", type=str, default="cuda", choices=["cuda", "cpu"])
     p.add_argument("--topk", type=int, default=5)
+    p.add_argument("--backbone", type=str, default="megaloc",
+                   choices=["megaloc", "dino_patch_mean"])
+    p.add_argument("--dino-model-name", type=str, default="dinov2_vits14")
     p.set_defaults(func=run_eval)
 
     p = sub.add_parser("vis", help="save simple query/top1 visualization")

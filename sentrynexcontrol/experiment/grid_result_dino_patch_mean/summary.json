@@ -1,0 +1,18 @@
+{
+  "backbone": "dino_patch_mean",
+  "dino_model_name": "dinov2_vits14",
+  "num_bank": 27,
+  "num_query": 18,
+  "mean_manhattan_distance": 1.0555555555555556,
+  "median_manhattan_distance": 1.0,
+  "mean_euclidean_distance": 0.8857928838888421,
+  "top1_within_0_cells": 0.3888888888888889,
+  "top1_within_1_cells": 0.7777777777777778,
+  "top1_within_2_cells": 0.7777777777777778,
+  "Recall@1_strict": 0.3888888888888889,
+  "Recall@1_tol1": 0.7777777777777778,
+  "Recall@2_strict": 0.4444444444444444,
+  "Recall@2_tol1": 0.8888888888888888,
+  "Recall@3_strict": 0.5,
+  "Recall@3_tol1": 0.8888888888888888
+}
