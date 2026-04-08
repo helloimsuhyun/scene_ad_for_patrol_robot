@@ -42,3 +42,42 @@ class RobotPoseNotifier extends StateNotifier<RobotPose?> {
 final robotPoseProvider = StateNotifierProvider<RobotPoseNotifier, RobotPose?>((ref) {
   return RobotPoseNotifier();
 });
+
+class RobotGoalNotifier extends StateNotifier<RobotGoal?> {
+  Timer? _timer;
+
+  RobotGoalNotifier() : super(null) {
+    _startPolling();
+  }
+
+  void _startPolling() {
+    _timer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      fetchRobotGoal();
+    });
+    fetchRobotGoal();
+  }
+
+  Future<void> fetchRobotGoal() async {
+    try {
+      final response = await http.get(Uri.parse('http://127.0.0.1:8000/robot/goal'));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['ok'] == true && data['goal'] != null) {
+          state = RobotGoal.fromJson(data['goal']);
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+}
+
+final robotGoalProvider = StateNotifierProvider<RobotGoalNotifier, RobotGoal?>((ref) {
+  return RobotGoalNotifier();
+});

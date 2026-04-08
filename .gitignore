@@ -70,3 +70,5 @@ SuperGluePretrainedNetwork/
 debug_out/.dart_tool/
 build/
 *.log
+.dart_tool/
+build/

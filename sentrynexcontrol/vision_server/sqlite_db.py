@@ -147,6 +147,28 @@ def init_db(db: sqlite3.Connection) -> None:
         );
 
         -- =========================
+        -- patrol_presets: 순찰 루트 프리셋
+        -- =========================
+        CREATE TABLE IF NOT EXISTS patrol_presets (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name TEXT NOT NULL,
+            routes TEXT NOT NULL, -- JSON formatted list of place_ids
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- =========================
+        -- patrol_schedules: 타임라인 자동 스케줄
+        -- =========================
+        CREATE TABLE IF NOT EXISTS patrol_schedules (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            preset_id INTEGER NOT NULL,
+            time_str TEXT NOT NULL, -- "HH:MM"
+            is_active INTEGER NOT NULL DEFAULT 1,
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY (preset_id) REFERENCES patrol_presets(id) ON DELETE CASCADE
+        );
+
+        -- =========================
         -- 인덱스 (GUI/조회 성능)
         -- =========================
         CREATE INDEX IF NOT EXISTS idx_events_place_time
@@ -728,3 +750,69 @@ def list_audio_events(db: sqlite3.Connection, unchecked_only: bool = False) -> L
             """
         ).fetchall()
     return [dict(r) for r in rows]
+
+# ======================================= 순찰 프리셋 및 스케줄 관련 함수
+
+def create_preset(db: sqlite3.Connection, name: str, routes_json: str) -> int:
+    cur = db.cursor()
+    cur.execute(
+        "INSERT INTO patrol_presets (name, routes) VALUES (?, ?)",
+        (name, routes_json)
+    )
+    db.commit()
+    return cur.lastrowid
+
+def update_preset(db: sqlite3.Connection, preset_id: int, name: str, routes_json: str) -> None:
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE patrol_presets SET name = ?, routes = ? WHERE id = ?",
+        (name, routes_json, preset_id)
+    )
+    db.commit()
+
+def get_preset(db: sqlite3.Connection, preset_id: int) -> Optional[Dict[str, Any]]:
+    cur = db.cursor()
+    row = cur.execute("SELECT * FROM patrol_presets WHERE id = ?", (preset_id,)).fetchone()
+    return dict(row) if row else None
+
+def list_presets(db: sqlite3.Connection) -> List[Dict[str, Any]]:
+    cur = db.cursor()
+    rows = cur.execute("SELECT * FROM patrol_presets ORDER BY id ASC").fetchall()
+    return [dict(r) for r in rows]
+
+def delete_preset(db: sqlite3.Connection, preset_id: int) -> None:
+    cur = db.cursor()
+    cur.execute("DELETE FROM patrol_presets WHERE id = ?", (preset_id,))
+    db.commit()
+
+def create_schedule(db: sqlite3.Connection, preset_id: int, time_str: str, is_active: int = 1) -> int:
+    cur = db.cursor()
+    cur.execute(
+        "INSERT INTO patrol_schedules (preset_id, time_str, is_active) VALUES (?, ?, ?)",
+        (preset_id, time_str, is_active)
+    )
+    db.commit()
+    return cur.lastrowid
+
+def update_schedule(db: sqlite3.Connection, schedule_id: int, preset_id: int, time_str: str, is_active: int) -> None:
+    cur = db.cursor()
+    cur.execute(
+        "UPDATE patrol_schedules SET preset_id = ?, time_str = ?, is_active = ? WHERE id = ?",
+        (preset_id, time_str, is_active, schedule_id)
+    )
+    db.commit()
+
+def get_schedule(db: sqlite3.Connection, schedule_id: int) -> Optional[Dict[str, Any]]:
+    cur = db.cursor()
+    row = cur.execute("SELECT * FROM patrol_schedules WHERE id = ?", (schedule_id,)).fetchone()
+    return dict(row) if row else None
+
+def list_schedules(db: sqlite3.Connection) -> List[Dict[str, Any]]:
+    cur = db.cursor()
+    rows = cur.execute("SELECT * FROM patrol_schedules ORDER BY time_str ASC").fetchall()
+    return [dict(r) for r in rows]
+
+def delete_schedule(db: sqlite3.Connection, schedule_id: int) -> None:
+    cur = db.cursor()
+    cur.execute("DELETE FROM patrol_schedules WHERE id = ?", (schedule_id,))
+    db.commit()

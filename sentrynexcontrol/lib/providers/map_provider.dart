@@ -6,11 +6,13 @@ import '../features/dashboard/dashboard_provider.dart';
 String _getYamlPath(String locationName) {
   switch (locationName) {
     case '데이터센터 3층 전산실':
-      return 'assets/map_metadata/map_v1_debug.yaml';
+      return 'assets/map_metadata/final_map1.yaml';
     case '데이터센터 2층 서버룸':
       return 'assets/map_metadata/map_test_ss.yaml';
-    default:
+    case '제1 센터 외부 구역':
       return 'assets/map_metadata/map_v1_debug.yaml';
+    default:
+      return 'assets/map_metadata/final_map1.yaml';
   }
 }
 

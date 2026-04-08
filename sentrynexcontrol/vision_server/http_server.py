@@ -207,7 +207,12 @@ async def lifespan(app: FastAPI):
 
     print(" ------------Server startup complete")
 
+    app.state.scheduler_task = asyncio.create_task(run_scheduler_daemon(app))
+
     yield  # ------------- 
+
+    if app.state.scheduler_task:
+        app.state.scheduler_task.cancel()
 
     # 서버 종료 시 (shutdown)
     print(" ------------ Server shutting down")
@@ -1204,6 +1209,105 @@ async def update_audio_event_label(audio_event_id: str, req: UpdateAudioLabelReq
         "ok": True,
         "audio_event": updated,
     }
+
+# ======================================= 순찰 프리셋 및 스케줄링 엔드포인트
+
+class CreatePresetReq(BaseModel):
+    name: str
+    routes: List[str]
+
+@app.get("/patrol/presets")
+async def get_presets():
+    async with app.state.db_lock:
+        presets = sqlite_db.list_presets(app.state.db)
+    return {"ok": True, "presets": presets}
+
+@app.post("/patrol/presets")
+async def add_preset(req: CreatePresetReq):
+    async with app.state.db_lock:
+        pid = sqlite_db.create_preset(app.state.db, req.name, json.dumps(req.routes))
+    return {"ok": True, "preset_id": pid}
+
+@app.delete("/patrol/presets/{preset_id}")
+async def del_preset(preset_id: int):
+    async with app.state.db_lock:
+        sqlite_db.delete_preset(app.state.db, preset_id)
+    return {"ok": True}
+
+class CreateScheduleReq(BaseModel):
+    preset_id: int
+    time_str: str # "HH:MM"
+    is_active: int = 1
+
+@app.get("/patrol/schedules")
+async def get_schedules():
+    async with app.state.db_lock:
+        schedules = sqlite_db.list_schedules(app.state.db)
+    return {"ok": True, "schedules": schedules}
+
+@app.post("/patrol/schedules")
+async def add_schedule(req: CreateScheduleReq):
+    async with app.state.db_lock:
+        sid = sqlite_db.create_schedule(app.state.db, req.preset_id, req.time_str, req.is_active)
+    return {"ok": True, "schedule_id": sid}
+
+@app.delete("/patrol/schedules/{schedule_id}")
+async def del_schedule(schedule_id: int):
+    async with app.state.db_lock:
+        sqlite_db.delete_schedule(app.state.db, schedule_id)
+    return {"ok": True}
+
+@app.patch("/patrol/schedules/{schedule_id}/toggle")
+async def toggle_schedule(schedule_id: int):
+    async with app.state.db_lock:
+        sched = sqlite_db.get_schedule(app.state.db, schedule_id)
+        if sched:
+            new_val = 0 if sched['is_active'] == 1 else 1
+            sqlite_db.update_schedule(app.state.db, schedule_id, sched['preset_id'], sched['time_str'], new_val)
+    return {"ok": True}
+
+# ----------------- Timeline Scheduler Daemon
+
+async def _apply_preset_and_start(app: FastAPI, routes: List[str]):
+    all_places = sqlite_db.list_places(app.state.db, active_only=True)
+    for p in all_places:
+        pid = p['place_id']
+        if pid in routes:
+            sqlite_db.set_place_patrol_enabled(app.state.db, pid, True)
+            sqlite_db.set_place_patrol_order(app.state.db, pid, routes.index(pid))
+        else:
+            sqlite_db.set_place_patrol_enabled(app.state.db, pid, False)
+    
+    app.state.robot_command = {
+        "command": "start",
+        "timestamp": datetime.now().isoformat()
+    }
+
+async def run_scheduler_daemon(app: FastAPI):
+    while True:
+        try:
+            now = datetime.now()
+            now_str = now.strftime("%H:%M")
+            async with app.state.db_lock:
+                schedules = sqlite_db.list_schedules(app.state.db)
+                matched = [s for s in schedules if s['is_active'] == 1 and s['time_str'] == now_str]
+                if matched:
+                    sched = matched[0]
+                    preset = sqlite_db.get_preset(app.state.db, sched['preset_id'])
+                    if preset:
+                        routes = json.loads(preset['routes'])
+                        await _apply_preset_and_start(app, routes)
+                        print(f"[SCHEDULER] Auto-triggered patrol preset {preset['name']} at {now_str}")
+            
+            now = datetime.now()
+            sleep_sec = 60.1 - now.second 
+            await asyncio.sleep(sleep_sec)
+        except asyncio.CancelledError:
+            break
+
+        except Exception as e:
+            print(f"[SCHEDULER ERROR] {e}")
+            await asyncio.sleep(60)
 
 
 

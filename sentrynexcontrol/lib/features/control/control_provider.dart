@@ -7,7 +7,14 @@ final String baseUrl = 'http://127.0.0.1:8000';
 final placesProvider = FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
   final response = await http.get(Uri.parse('$baseUrl/places'));
   if (response.statusCode == 200) {
-    return jsonDecode(response.body);
+    final data = jsonDecode(response.body);
+    final List<dynamic> places = data['places'] ?? [];
+    places.sort((a, b) {
+      final orderA = a['patrol_order'] as int? ?? 999;
+      final orderB = b['patrol_order'] as int? ?? 999;
+      return orderA.compareTo(orderB);
+    });
+    return data;
   } else {
     throw Exception('Failed to load places');
   }
@@ -33,6 +40,8 @@ class ControlActions {
     );
     if (response.statusCode == 200) {
       ref.invalidate(placesProvider);
+    } else {
+      throw Exception('Failed to update display name: ${response.statusCode}');
     }
   }
 
@@ -44,6 +53,8 @@ class ControlActions {
     );
     if (response.statusCode == 200) {
       ref.invalidate(placesProvider);
+    } else {
+      throw Exception('Failed to update patrol enabled: ${response.statusCode}');
     }
   }
 
@@ -96,8 +107,8 @@ class ControlActions {
       final pid = p['place_id'].toString();
       final enabled = selectedPlaceIds.contains(pid);
       
-      // Optimization
-      final currentEnabled = p['patrol_enabled'] == 1 || p['patrol_enabled'] == true;
+      // Optimization with robust boolean parsing
+      final currentEnabled = p['patrol_enabled'] == 1 || p['patrol_enabled'] == true || p['patrol_enabled'] == '1' || p['patrol_enabled'] == 'true';
       if (currentEnabled != enabled) {
         await http.patch(
           Uri.parse('$baseUrl/places/$pid/patrol_enabled'),
@@ -131,4 +142,72 @@ class ControlActions {
     ref.read(patrolStatusProvider.notifier).state = true;
     ref.invalidate(placesProvider);
   }
+
+  static Future<void> savePreset(WidgetRef ref, String name, List<String> routes) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/patrol/presets'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'name': name, 'routes': routes}),
+    );
+    if (response.statusCode == 200) {
+      ref.invalidate(presetsProvider);
+    }
+  }
+
+  static Future<void> deletePreset(WidgetRef ref, int presetId) async {
+    final response = await http.delete(Uri.parse('$baseUrl/patrol/presets/$presetId'));
+    if (response.statusCode == 200) {
+      ref.invalidate(presetsProvider);
+      ref.invalidate(schedulesProvider);
+    }
+  }
+
+  static Future<void> addSchedule(WidgetRef ref, int presetId, String timeStr) async {
+    final response = await http.post(
+      Uri.parse('$baseUrl/patrol/schedules'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({'preset_id': presetId, 'time_str': timeStr, 'is_active': 1}),
+    );
+    if (response.statusCode == 200) {
+      ref.invalidate(schedulesProvider);
+    }
+  }
+
+  static Future<void> deleteSchedule(WidgetRef ref, int scheduleId) async {
+    final response = await http.delete(Uri.parse('$baseUrl/patrol/schedules/$scheduleId'));
+    if (response.statusCode == 200) {
+      ref.invalidate(schedulesProvider);
+    }
+  }
+
+  static Future<void> toggleSchedule(WidgetRef ref, int scheduleId) async {
+    final response = await http.patch(Uri.parse('$baseUrl/patrol/schedules/$scheduleId/toggle'));
+    if (response.statusCode == 200) {
+      ref.invalidate(schedulesProvider);
+    }
+  }
 }
+
+final presetsProvider = FutureProvider<List<dynamic>>((ref) async {
+  try {
+    final response = await http.get(Uri.parse('$baseUrl/patrol/presets'));
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body)['presets'] ?? [];
+    }
+  } catch (e) {
+    //
+  }
+  return [];
+});
+
+final schedulesProvider = FutureProvider<List<dynamic>>((ref) async {
+  try {
+    final response = await http.get(Uri.parse('$baseUrl/patrol/schedules'));
+    if (response.statusCode == 200) {
+      return jsonDecode(response.body)['schedules'] ?? [];
+    }
+  } catch (e) {
+    //
+  }
+  return [];
+});

@@ -1,9 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'dart:math' show pi;
+import 'dart:ui' as ui;
 import '../providers/event_provider.dart';
 import '../providers/map_provider.dart';
 import '../providers/robot_provider.dart';
+import '../features/control/control_provider.dart'; // placesProvider 추가
+import '../providers/audio_provider.dart'; // audioEventListProvider 추가
 import '../models/robot_state.dart';
 import '../models/event_model.dart';
 import '../utils/map_transformer.dart';
@@ -20,9 +23,12 @@ class DataCenterMap extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final alerts = ref.watch(eventListProvider);
+    final placesAsync = ref.watch(placesProvider);
+    final audioEvents = ref.watch(audioEventListProvider);
     final mapImagePathAsync = ref.watch(mapImagePathProvider);
     final mapTransformerAsync = ref.watch(mapTransformerProvider);
     final robotPose = ref.watch(robotPoseProvider);
+    final robotGoal = ref.watch(robotGoalProvider);
 
     //---------- 맵에 표시할 고유한 장소별 최신 이벤트 필터링 ----------
     final Map<String, Event> latestEventsByPlace = {};
@@ -65,11 +71,19 @@ class DataCenterMap extends ConsumerWidget {
                             children: [
                               //---------- 맵 배경 이미지 렌더링 ----------
                               Image.asset(imagePath),
-                              //---------- 각 장소별 최신 이벤트 마커 표시 ----------
-                              ...latestEventsByPlace.values.map((event) => _EventMarker(event: event, transformer: transformer)),
+                              //---------- 장소 마커 표시 ----------
+                              if (placesAsync.value != null && placesAsync.value!['places'] != null)
+                                ...((placesAsync.value!['places'] as List).map((p) {
+                                  final pid = p['place_id'].toString();
+                                  return _PlaceMarker(place: p, latestEvent: latestEventsByPlace[pid], transformer: transformer);
+                                }).toList()),
                               //---------- 로봇 실시간 마커 렌더링 ----------
                               if (robotPose != null && robotPose.x != null && robotPose.y != null)
                                 _RobotMarker(pose: robotPose, transformer: transformer),
+                              //---------- 오디오 이벤트 마커 표시 ----------
+                              ...audioEvents.where((e) => e.adminChecked == 0 && e.x != null && e.y != null).map((audio) {
+                                return _AudioMarker(audio: audio, transformer: transformer);
+                              }),
                             ],
                           ),
                         ),
@@ -130,28 +144,33 @@ class _RobotMarker extends StatelessWidget {
   }
 }
 
-class _EventMarker extends ConsumerWidget {
-  final Event event;
+class _PlaceMarker extends ConsumerWidget {
+  final dynamic place;
+  final Event? latestEvent;
   final MapTransformer transformer;
-  const _EventMarker({required this.event, required this.transformer});
+  const _PlaceMarker({required this.place, required this.latestEvent, required this.transformer});
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
-    final isAnomaly = event.anomalyFlag == 1;
+    final isAnomaly = latestEvent?.anomalyFlag == 1;
+    final isPatrolEnabled = place['patrol_enabled'] == 1 || place['patrol_enabled'] == true || place['patrol_enabled'] == '1' || place['patrol_enabled'] == 'true';
+    final placeId = place['place_id'].toString();
+    final displayName = place['display_name']?.toString() ?? placeId;
+    
     final selectedId = ref.watch(_selectedMapEventProvider);
-    final isSelected = selectedId == event.eventId;
+    final isSelected = selectedId == placeId;
 
     //---------- 실제 DB 좌표 기반 맵 픽셀 매핑 ----------
     double px = 0;
     double py = 0;
 
-    if (event.x != null && event.y != null) {
-      final transformed = transformer.transform(event.x!, event.y!, event.yaw ?? 0);
+    if (place['x'] != null && place['y'] != null) {
+      final transformed = transformer.transform(place['x'], place['y'], place['yaw'] ?? 0);
       px = transformed['px']!;
       py = transformed['py']!;
     } else {
-      // Fallback: 좌표가 없는 예전 데이터들의 경우 해시를 이용한 임의 배치
-      final hash = event.placeId.hashCode;
+      // Fallback
+      final hash = placeId.hashCode;
       px = (hash % 1000) + 100.0;
       py = ((hash ~/ 1000) % 1000) + 100.0;
     }
@@ -175,7 +194,13 @@ class _EventMarker extends ConsumerWidget {
               Positioned(
                 bottom: (markerHeight / 2) + 15,
                 child: GestureDetector(
-                  onTap: () => showEventDetailDialog(context, ref, event),
+                  onTap: () {
+                    if (latestEvent != null) {
+                      showEventDetailDialog(context, ref, latestEvent!);
+                    } else {
+                      ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('\'$displayName\'에서의 최신 이벤트 기록이 없습니다.')));
+                    }
+                  },
                   child: Container(
                     width: 210,
                     padding: const EdgeInsets.all(10),
@@ -199,36 +224,37 @@ class _EventMarker extends ConsumerWidget {
                           children: [
                             Expanded(
                               child: Text(
-                                event.summaryText ?? '이벤트 발생',
+                                latestEvent?.summaryText ?? '기록된 이벤트 없음',
                                 style: const TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.bold),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                               ),
                             ),
-                            const Icon(Icons.open_in_new, color: Colors.white54, size: 14),
+                            if (latestEvent != null) const Icon(Icons.open_in_new, color: Colors.white54, size: 14),
                           ],
                         ),
                         const SizedBox(height: 8),
                         // 이미지 영역
-                        ClipRRect(
-                          borderRadius: BorderRadius.circular(8),
-                          child: Container(
-                            height: 110,
-                            width: double.infinity,
-                            decoration: const BoxDecoration(color: Color(0xFF11121A)),
-                            child: event.frames.isNotEmpty
-                                ? Image.network(
-                                    'http://localhost:8000/images/${event.frames.first.imagePath.replaceFirst("recv/", "")}',
-                                    fit: BoxFit.cover,
-                                    errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.grey, size: 24),
-                                  )
-                                : const Icon(Icons.image_not_supported, color: Colors.grey, size: 24),
+                        if (latestEvent != null)
+                          ClipRRect(
+                            borderRadius: BorderRadius.circular(8),
+                            child: Container(
+                              height: 110,
+                              width: double.infinity,
+                              decoration: const BoxDecoration(color: Color(0xFF11121A)),
+                              child: latestEvent!.frames.isNotEmpty
+                                  ? Image.network(
+                                      'http://localhost:8000/images/${latestEvent!.frames.first.imagePath.replaceFirst("recv/", "")}',
+                                      fit: BoxFit.cover,
+                                      errorBuilder: (_, __, ___) => const Icon(Icons.broken_image, color: Colors.grey, size: 24),
+                                    )
+                                  : const Icon(Icons.image_not_supported, color: Colors.grey, size: 24),
+                            ),
                           ),
-                        ),
                         const SizedBox(height: 6),
                         const Center(
                           child: Text(
-                            '클릭하여 상세 정보 확인',
+                            '클릭하여 정보 확인',
                             style: TextStyle(color: Colors.white38, fontSize: 10, fontStyle: FontStyle.italic),
                           ),
                         ),
@@ -255,10 +281,10 @@ class _EventMarker extends ConsumerWidget {
                               ).then((value) {
                                 if (value != null) {
                                   http.post(
-                                    Uri.parse('http://127.0.0.1:8000/places/${event.placeId}/config'),
+                                    Uri.parse('http://127.0.0.1:8000/places/$placeId/config'),
                                     body: {'mode': value},
                                   ).then((_) {
-                                    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('${event.placeId} 구역 모드 변경: $value')));
+                                    if (context.mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('$placeId 구역 모드 변경: $value')));
                                   });
                                 }
                               });
@@ -272,26 +298,48 @@ class _EventMarker extends ConsumerWidget {
                 ),
               ),
             
-            // 마커 본체
+            // 마커 본체 및 구역명 텍스트
             GestureDetector(
               onTap: () {
                 final notifier = ref.read(_selectedMapEventProvider.notifier);
-                notifier.state = (notifier.state == event.eventId) ? null : event.eventId;
+                notifier.state = (notifier.state == placeId) ? null : placeId;
               },
-              child: isAnomaly
-                  ? const _PulsingDot(color: Color(0xFFFF4B5C), size: 24)
-                  : Container(
-                      width: 16,
-                      height: 16,
-                      decoration: BoxDecoration(
-                        color: const Color(0xFF38BDF8),
-                        shape: BoxShape.circle,
-                        border: Border.all(color: Colors.white, width: 2),
-                        boxShadow: const [
-                          BoxShadow(color: Color(0x6638BDF8), blurRadius: 10, spreadRadius: 2)
-                        ],
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  isAnomaly
+                      ? const _PulsingDot(color: Color(0xFFFF4B5C), size: 24)
+                      : Container(
+                          width: 16,
+                          height: 16,
+                          decoration: BoxDecoration(
+                            color: isPatrolEnabled ? const Color(0xFF38BDF8) : const Color(0xFF6B7280),
+                            shape: BoxShape.circle,
+                            border: Border.all(color: Colors.white, width: 2),
+                            boxShadow: [
+                              if (isPatrolEnabled)
+                                const BoxShadow(color: Color(0x6638BDF8), blurRadius: 10, spreadRadius: 2)
+                            ],
+                          ),
+                        ),
+                  const SizedBox(height: 4),
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                    decoration: BoxDecoration(
+                      color: Colors.black87,
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      displayName,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 9,
+                        fontWeight: FontWeight.bold,
                       ),
                     ),
+                  ),
+                ],
+              ),
             ),
           ],
         ),
@@ -359,5 +407,89 @@ class _PulsingDotState extends State<_PulsingDot> with SingleTickerProviderState
         ],
       ),
     );
+  }
+}
+
+class _AudioMarker extends ConsumerWidget {
+  final dynamic audio;
+  final MapTransformer transformer;
+  const _AudioMarker({required this.audio, required this.transformer});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (audio.x == null || audio.y == null) return const SizedBox.shrink();
+    
+    final transformed = transformer.transform(audio.x!, audio.y!, audio.yaw ?? 0);
+    final px = transformed['px']!;
+    final py = transformed['py']!;
+
+    return Positioned(
+      left: px - 12,
+      top: py - 12,
+      child: Stack(
+        clipBehavior: Clip.none,
+        alignment: Alignment.center,
+        children: [
+          const _PulsingDot(color: Color(0xFFBA68C8), size: 18),
+          const Icon(Icons.volume_up, size: 10, color: Colors.white),
+        ],
+      ),
+    );
+  }
+}
+
+class _GoalPathPainter extends CustomPainter {
+  final RobotPose robotPose;
+  final RobotGoal robotGoal;
+  final MapTransformer transformer;
+
+  _GoalPathPainter({
+    required this.robotPose,
+    required this.robotGoal,
+    required this.transformer,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    if (robotPose.x == null || robotPose.y == null || robotGoal.x == null || robotGoal.y == null) return;
+    
+    final p1 = transformer.transform(robotPose.x!, robotPose.y!, robotPose.yaw ?? 0);
+    final p2 = transformer.transform(robotGoal.x!, robotGoal.y!, robotGoal.yaw ?? 0);
+
+    final paint = Paint()
+      ..color = const Color(0xFF4ADE80).withOpacity(0.5)
+      ..strokeWidth = 2.0
+      ..strokeCap = StrokeCap.round
+      ..style = PaintingStyle.stroke;
+
+    final path = Path()
+      ..moveTo(p1['px']!, p1['py']!)
+      ..lineTo(p2['px']!, p2['py']!);
+
+    // Dashed line drawing
+    const dashWidth = 5.0;
+    const dashSpace = 5.0;
+    double distance = 0.0;
+    for (ui.PathMetric measurePath in path.computeMetrics()) {
+      while (distance < measurePath.length) {
+        final extractPath = measurePath.extractPath(distance, distance + dashWidth);
+        canvas.drawPath(extractPath, paint);
+        distance += dashWidth + dashSpace;
+      }
+    }
+    
+    // Draw goal circle
+    final targetPaint = Paint()
+      ..color = const Color(0xFF4ADE80)
+      ..style = PaintingStyle.fill;
+    canvas.drawCircle(Offset(p2['px']!, p2['py']!), 6, targetPaint);
+  }
+
+  @override
+  bool shouldRepaint(covariant _GoalPathPainter oldDelegate) {
+    return oldDelegate.robotPose.x != robotPose.x ||
+           oldDelegate.robotPose.y != robotPose.y ||
+           oldDelegate.robotGoal.x != robotGoal.x ||
+           oldDelegate.robotGoal.y != robotGoal.y;
   }
 }
