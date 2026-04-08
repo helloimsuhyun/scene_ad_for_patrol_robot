@@ -201,7 +201,6 @@ def init_db(db: sqlite3.Connection) -> None:
             yolo_event_id TEXT PRIMARY KEY,
             timestamp TEXT NOT NULL,
             image_path TEXT,
-            place_id TEXT,
 
             x REAL,
             y REAL,
@@ -926,7 +925,6 @@ def insert_yolo_event(
     db,
     timestamp,
     image_path=None,
-    place_id=None,
     x=None,
     y=None,
     yaw=None,
@@ -943,17 +941,16 @@ def insert_yolo_event(
     cur.execute(
         """
         INSERT INTO yolo_events
-        (yolo_event_id, timestamp, image_path, place_id,
+        (yolo_event_id, timestamp, image_path,
          x, y, yaw,
          person_count, event_type,
          source_region_id, source_region_name, dwell_time_sec)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?,  ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             yeid,
             timestamp,
             image_path,
-            place_id,
             x,
             y,
             yaw,

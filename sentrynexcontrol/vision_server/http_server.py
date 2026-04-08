@@ -1369,7 +1369,7 @@ async def upload_person_event(
 
     region_id = None
     region_name = None
-    
+
     async with app.state.db_lock:
         if x is not None and y is not None:
             region_id, region_name = find_region_from_pose(app.state.db, x, y)
@@ -1379,7 +1379,6 @@ async def upload_person_event(
             yolo_event_id=yolo_event_id,
             timestamp=ts,
             image_path=str(save_path),
-            place_id=event_obj.get("place_id"),
             x=pose.get("x"),
             y=pose.get("y"),
             yaw=pose.get("yaw"),
