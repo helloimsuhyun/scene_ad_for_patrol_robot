@@ -95,15 +95,20 @@ from .backbone_wrapper import build_local_backbone
 from . import place_manager
 from .distance import infer_event, calibrate_place
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
-from .vpr_megaloc import MegaLocWrapper, load_megaloc_model
+from .vpr_megaloc import MegaLocWrapper
+from .yolo_server_util import push_yolo_config_to_robot
+
 
 from .config import load_cfg
 
 # path 
 SAVE_ROOT = Path("./recv")  # 이미지저장 root
 AUDIO_ROOT = Path("./recv_audio") # 오디오 저장 root
+PERSON_EVENT_ROOT = Path("./recv_person") # person event 저장 root
+
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
+PERSON_EVENT_ROOT.mkdir(parents=True, exist_ok=True)
 
 DB_PATH = Path("./recv/events.db") # db root
 
@@ -136,6 +141,9 @@ async def lifespan(app: FastAPI):
 
     # GT
     app.state.query_capture_label = None
+
+    # YOLO MODE
+    app.state.yolo_mode = 0
 
     #robot 현재 / 목표 position
     app.state.robot_pose = {
@@ -206,6 +214,7 @@ async def lifespan(app: FastAPI):
 
     print(" ------------Server startup complete")
 
+    asyncio.create_task(push_yolo_config_to_robot(app, sqlite_db))
     app.state.scheduler_task = asyncio.create_task(run_scheduler_daemon(app))
 
     yield  # ------------- 
@@ -230,6 +239,7 @@ app.add_middleware(
 
 app.mount("/images", StaticFiles(directory=str(SAVE_ROOT)), name="images")
 app.mount("/audio", StaticFiles(directory=str(AUDIO_ROOT)), name="audio")
+app.mount("/person_images", StaticFiles(directory=str(PERSON_EVENT_ROOT)), name="person_images")
 
 # --------------------------------------------------------------------------------------------------------
 # 추론함수 호출 ------------------------------------------------
@@ -1308,6 +1318,339 @@ async def run_scheduler_daemon(app: FastAPI):
             print(f"[SCHEDULER ERROR] {e}")
             await asyncio.sleep(60)
 
+
+# =============================================================== YOLO 관련 이벤트 ( 이벤트 수신 / 풀링 / 라벨링 )
+
+def find_region_from_pose(db, x, y):
+    cur = db.cursor()
+    rows = cur.execute(
+        """
+        SELECT * FROM yolo_regions
+        WHERE is_enabled=1
+        """
+    ).fetchall()
+
+    for r in rows:
+        if (
+            x >= r["x_min"] and x <= r["x_max"] and
+            y >= r["y_min"] and y <= r["y_max"]
+        ):
+            return r["region_id"], r["name"]
+
+    return None, None
+
+@app.post("/person_event")
+async def upload_person_event(
+    image: UploadFile = File(...),
+    event_json: str = Form(...),
+):
+    try:
+        event_obj = json.loads(event_json)
+    except Exception:
+        raise HTTPException(status_code=400, detail="invalid event_json")
+
+    yolo_event_id = str(uuid4())
+    ts = event_obj.get("event_time") or datetime.now().isoformat()
+    safe_ts = ts.replace(":", "-")
+
+    ext = Path(image.filename or "").suffix.lower() or ".jpg"
+    save_path = PERSON_EVENT_ROOT / f"{safe_ts}_{yolo_event_id}{ext}"
+
+    data = await image.read()
+    if not data:
+        raise HTTPException(status_code=400, detail="empty image")
+
+    save_path.write_bytes(data)
+
+    pose = event_obj.get("robot_pose") or {}
+
+    x = pose.get("x")
+    y = pose.get("y")
+
+    region_id = None
+    region_name = None
+    
+    async with app.state.db_lock:
+        if x is not None and y is not None:
+            region_id, region_name = find_region_from_pose(app.state.db, x, y)
+
+        sqlite_db.insert_yolo_event(
+            db=app.state.db,
+            yolo_event_id=yolo_event_id,
+            timestamp=ts,
+            image_path=str(save_path),
+            place_id=event_obj.get("place_id"),
+            x=pose.get("x"),
+            y=pose.get("y"),
+            yaw=pose.get("yaw"),
+            person_count=int(event_obj.get("num_persons", 0)),
+            event_type=str(event_obj.get("event_type", "person_present")),
+            source_region_id=region_id,
+            source_region_name=region_name,
+            dwell_time_sec=event_obj.get("dwell_time_sec"),
+        )
+
+    return {
+        "ok": True,
+        "yolo_event_id": yolo_event_id,
+        "image_url": f"/person_images/{save_path.name}",
+    }
+    
+@app.get("/yolo_events")
+async def get_yolo_events(
+    since: Optional[str] = None,
+    limit: int = 50,
+    unchecked_only: bool = False,
+):
+    async with app.state.db_lock:
+        rows = sqlite_db.list_yolo_events(
+            app.state.db,
+            since=since,
+            limit=limit,
+            unchecked_only=unchecked_only,
+        )
+
+    out = []
+    for r in rows:
+        item = dict(r)
+        if item.get("image_path"):
+            item["image_url"] = f"/person_images/{Path(item['image_path']).name}"
+        else:
+            item["image_url"] = None
+        out.append(item)
+
+    return {"ok": True, "yolo_events": out}
+
+# 이벤트 상세 조회
+@app.get("/yolo_events/{yolo_event_id}")
+async def get_yolo_event_detail(yolo_event_id: str):
+    async with app.state.db_lock:
+        row = sqlite_db.get_yolo_event(app.state.db, yolo_event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="not found")
+
+    item = dict(row)
+    if item.get("image_path"):
+        item["image_url"] = f"/person_images/{Path(item['image_path']).name}"
+
+    return {
+        "ok": True,
+        "yolo_event": item,
+    }
+    
+    
+class UpdateYoloEventLabelReq(BaseModel):
+    admin_label: Optional[str] = None
+
+
+@app.patch("/yolo_events/{yolo_event_id}/label")
+async def update_yolo_event_label(yolo_event_id: str, req: UpdateYoloEventLabelReq):
+    async with app.state.db_lock:
+        row = sqlite_db.get_yolo_event(app.state.db, yolo_event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="not found")
+
+        sqlite_db.set_yolo_event_admin_label(
+            app.state.db,
+            yolo_event_id,
+            req.admin_label,
+        )
+        updated = sqlite_db.get_yolo_event(app.state.db, yolo_event_id)
+
+    return {"ok": True, "yolo_event": updated}
+
+
+# ======================================================= YOLO GUI 관련 구역제어, 모드 관리
+
+# =========================
+# Pydantic models
+# =========================
+
+class CreateYoloRegionReq(BaseModel):
+    name: str
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    is_enabled: bool = True
+
+
+class UpdateYoloRegionReq(BaseModel):
+    name: str
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+
+
+class UpdateYoloRegionEnabledReq(BaseModel):
+    is_enabled: bool
+
+
+# 현재 YOLO 모드 조회
+@app.get("/robot/yolo_mode")
+async def get_yolo_mode():
+    return {"ok": True, "yolo_mode": int(getattr(app.state, "yolo_mode", 0))}
+
+
+# 전체 구역 조회
+@app.get("/robot/yolo_regions")
+async def get_yolo_regions():
+    async with app.state.db_lock:
+        rows = sqlite_db.list_yolo_regions(app.state.db)
+    return {"ok": True, "regions": [dict(r) for r in rows]}
+
+
+# 활성 구역만 조회
+@app.get("/robot/yolo_regions_enabled")
+async def get_yolo_regions_enabled():
+    async with app.state.db_lock:
+        rows = sqlite_db.list_yolo_regions(app.state.db, enabled_only=True)
+    return {"ok": True, "regions": [dict(r) for r in rows]}
+
+
+# 구역 생성
+@app.post("/robot/yolo_regions")
+async def create_yolo_region(req: CreateYoloRegionReq):
+    try:
+        async with app.state.db_lock:
+            rid = sqlite_db.insert_yolo_region(
+                app.state.db,
+                req.name,
+                req.x_min,
+                req.x_max,
+                req.y_min,
+                req.y_max,
+                req.is_enabled,
+            )
+            row = sqlite_db.get_yolo_region(app.state.db, rid)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[YOLO PUSH FAIL]", err)
+
+    return {"ok": True, "region": dict(row)}
+
+
+# 구역 수정
+@app.patch("/robot/yolo_regions/{region_id}")
+async def update_yolo_region(region_id: int, req: UpdateYoloRegionReq):
+    try:
+        async with app.state.db_lock:
+            row = sqlite_db.get_yolo_region(app.state.db, region_id)
+            if row is None:
+                raise HTTPException(status_code=404, detail="not found")
+
+            sqlite_db.update_yolo_region(
+                app.state.db,
+                region_id,
+                req.name,
+                req.x_min,
+                req.x_max,
+                req.y_min,
+                req.y_max,
+            )
+
+            row = sqlite_db.get_yolo_region(app.state.db, region_id)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+
+    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[YOLO PUSH FAIL]", err)
+
+    return {"ok": True, "region": dict(row)}
+
+
+# 개별 구역 활성/비활성
+@app.patch("/robot/yolo_regions/{region_id}/enabled")
+async def set_yolo_region_enabled(region_id: int, req: UpdateYoloRegionEnabledReq):
+    async with app.state.db_lock:
+        row = sqlite_db.get_yolo_region(app.state.db, region_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="not found")
+
+        sqlite_db.set_yolo_region_enabled(
+            app.state.db,
+            region_id,
+            req.is_enabled,
+        )
+
+        row = sqlite_db.get_yolo_region(app.state.db, region_id)
+
+    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[YOLO PUSH FAIL]", err)
+    return {"ok": True, "region": dict(row)}
+
+
+# 전체 구역 활성/비활성
+@app.patch("/robot/yolo_regions/enabled")
+async def set_all_yolo_regions_enabled(req: UpdateYoloRegionEnabledReq):
+    async with app.state.db_lock:
+        affected = sqlite_db.set_all_yolo_regions_enabled(
+            app.state.db,
+            req.is_enabled,
+        )
+
+    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[YOLO PUSH FAIL]", err)
+    return {"ok": True, "affected": affected}
+
+
+# 개별 구역 삭제
+@app.delete("/robot/yolo_regions/{region_id}")
+async def delete_yolo_region(region_id: int):
+    async with app.state.db_lock:
+        row = sqlite_db.get_yolo_region(app.state.db, region_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="not found")
+
+        sqlite_db.delete_yolo_region(app.state.db, region_id)
+
+    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[YOLO PUSH FAIL]", err)
+    return {"ok": True, "region_id": region_id}
+
+
+# 전체 구역 삭제
+@app.delete("/robot/yolo_regions")
+async def delete_all_yolo_regions():
+    async with app.state.db_lock:
+        affected = sqlite_db.delete_all_yolo_regions(app.state.db)
+
+    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[YOLO PUSH FAIL]", err)
+    return {"ok": True, "deleted_count": affected}
+
+
+# YOLO MODE 변경
+class UpdateYoloModeReq(BaseModel):
+    yolo_mode: int
+
+@app.patch("/robot/yolo_mode")
+async def set_yolo_mode(req: UpdateYoloModeReq):
+    mode = int(req.yolo_mode)
+    if mode not in (0, 1, 2):
+        raise HTTPException(status_code=400, detail="invalid mode")
+
+    app.state.yolo_mode = mode
+
+    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[YOLO PUSH FAIL]", err)
+
+    return {
+        "ok": True,
+        "yolo_mode": app.state.yolo_mode,
+    }
+
+# ============================================================== 
 
 
 if __name__ == "__main__":
