@@ -1,0 +1,13 @@
+{
+  "num_bank": 27,
+  "num_query": 18,
+  "mean_manhattan_distance": 0.5555555555555556,
+  "median_manhattan_distance": 0.5,
+  "mean_euclidean_distance": 0.5230118645762831,
+  "top1_within_0_cells": 0.5,
+  "top1_within_1_cells": 0.9444444444444444,
+  "top1_within_2_cells": 1.0,
+  "Recall@1_tol1": 1.0,
+  "Recall@2_tol1": 1.0,
+  "Recall@3_tol1": 1.0
+}
