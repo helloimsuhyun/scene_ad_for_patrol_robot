@@ -170,8 +170,7 @@ async def lifespan(app: FastAPI):
 
     # global preselect model load - dino / megaloc
     model, device = dino_emb.load_model()
-    megaloc = load_megaloc_model(device=device) 
-    vpr_model = MegaLocWrapper(megaloc, device=device)
+    vpr_model = MegaLocWrapper(device=device)
 
     cfg = load_cfg(SAVE_ROOT)
     if "superglue" not in cfg:
