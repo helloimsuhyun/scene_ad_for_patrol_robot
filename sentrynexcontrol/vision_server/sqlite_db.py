@@ -62,6 +62,54 @@ def init_db(db: sqlite3.Connection) -> None:
             cur.execute("ALTER TABLE places ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
         except:
             pass
+    # 3. yolo_events 테이블 마이그레이션
+    try:
+        cur.execute("SELECT event_type FROM yolo_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE yolo_events ADD COLUMN event_type TEXT")
+        except:
+            pass
+
+    try:
+        cur.execute("SELECT dwell_time_sec FROM yolo_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE yolo_events ADD COLUMN dwell_time_sec REAL")
+        except:
+            pass
+
+    try:
+        cur.execute("SELECT source_region_id FROM yolo_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE yolo_events ADD COLUMN source_region_id INTEGER")
+        except:
+            pass
+
+    try:
+        cur.execute("SELECT source_region_name FROM yolo_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE yolo_events ADD COLUMN source_region_name TEXT")
+        except:
+            pass
+
+    try:
+        cur.execute("SELECT admin_checked FROM yolo_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE yolo_events ADD COLUMN admin_checked INTEGER NOT NULL DEFAULT 0")
+        except:
+            pass
+
+    try:
+        cur.execute("SELECT admin_label FROM yolo_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE yolo_events ADD COLUMN admin_label TEXT")
+        except:
+            pass
 
     cur.executescript(
         """
@@ -147,6 +195,53 @@ def init_db(db: sqlite3.Connection) -> None:
         );
 
         -- =========================
+        -- yolo_events
+        -- =========================
+        CREATE TABLE IF NOT EXISTS yolo_events (
+            yolo_event_id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            image_path TEXT,
+
+            x REAL,
+            y REAL,
+            yaw REAL,
+
+            person_count INTEGER NOT NULL DEFAULT 0,
+            event_type TEXT,
+
+            source_region_id INTEGER,
+            source_region_name TEXT,
+
+            dwell_time_sec REAL,
+
+
+            admin_checked INTEGER NOT NULL DEFAULT 0,
+            admin_label TEXT,
+
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- =========================
+        -- yolo 구역
+        -- =========================
+
+        CREATE TABLE IF NOT EXISTS yolo_regions (
+            region_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            name          TEXT NOT NULL,
+
+            x_min         REAL NOT NULL,
+            x_max         REAL NOT NULL,
+            y_min         REAL NOT NULL,
+            y_max         REAL NOT NULL,
+
+            is_enabled    INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0,1)),
+
+            updated_at    TEXT NOT NULL
+        );
+
+
+        -- =========================
         -- patrol_presets: 순찰 루트 프리셋
         -- =========================
         CREATE TABLE IF NOT EXISTS patrol_presets (
@@ -204,6 +299,12 @@ def init_db(db: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_audio_events_model_label
         ON audio_events(model_label);
+
+        CREATE INDEX IF NOT EXISTS idx_yolo_events_time
+        ON yolo_events(timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_yolo_regions_enabled
+        ON yolo_regions(is_enabled);
         """
     )
     db.commit()
@@ -815,4 +916,258 @@ def list_schedules(db: sqlite3.Connection) -> List[Dict[str, Any]]:
 def delete_schedule(db: sqlite3.Connection, schedule_id: int) -> None:
     cur = db.cursor()
     cur.execute("DELETE FROM patrol_schedules WHERE id = ?", (schedule_id,))
-    db.commit()
+    db.commit()
+
+
+# ================= YOLO EVENT =====================================================================
+
+def insert_yolo_event(
+    db,
+    timestamp,
+    image_path=None,
+    x=None,
+    y=None,
+    yaw=None,
+    person_count=0,
+    event_type="person_present",
+    source_region_id=None,
+    source_region_name=None,
+    dwell_time_sec=None,
+    yolo_event_id=None,
+):
+    yeid = yolo_event_id or _uuid()
+
+    cur = db.cursor()
+    cur.execute(
+        """
+        INSERT INTO yolo_events
+        (yolo_event_id, timestamp, image_path,
+         x, y, yaw,
+         person_count, event_type,
+         source_region_id, source_region_name, dwell_time_sec)
+        VALUES (?, ?,  ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            yeid,
+            timestamp,
+            image_path,
+            x,
+            y,
+            yaw,
+            int(person_count),
+            event_type,          
+            source_region_id,
+            source_region_name,
+            dwell_time_sec,      
+        ),
+    )
+    db.commit()
+    return yeid
+
+
+def get_yolo_event(db, yolo_event_id):
+    cur = db.cursor()
+    row = cur.execute(
+        "SELECT * FROM yolo_events WHERE yolo_event_id=?",
+        (yolo_event_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def list_yolo_events(db, since=None, limit=50, unchecked_only=False):
+    cur = db.cursor()
+
+    if since is None:
+        if unchecked_only:
+            rows = cur.execute(
+                "SELECT * FROM yolo_events WHERE admin_checked=0 ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        else:
+            rows = cur.execute(
+                "SELECT * FROM yolo_events ORDER BY timestamp DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    else:
+        if unchecked_only:
+            rows = cur.execute(
+                "SELECT * FROM yolo_events WHERE timestamp>? AND admin_checked=0 ORDER BY timestamp DESC LIMIT ?",
+                (since, limit),
+            ).fetchall()
+        else:
+            rows = cur.execute(
+                "SELECT * FROM yolo_events WHERE timestamp>? ORDER BY timestamp DESC LIMIT ?",
+                (since, limit),
+            ).fetchall()
+
+    return [dict(r) for r in rows]
+
+
+def set_yolo_event_admin_label(db, yolo_event_id, admin_label):
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE yolo_events
+        SET admin_checked=1, admin_label=?
+        WHERE yolo_event_id=?
+        """,
+        (admin_label, yolo_event_id),
+    )
+    db.commit()
+
+
+# ============ YOLO 구역관리 , 제어  ======================================================
+
+
+
+# yolo 구역 전체 조회 (enabled_only=True면 활성 구역만 반환)
+def list_yolo_regions(db, enabled_only: bool = False):
+    cur = db.cursor()
+    if enabled_only:
+        cur.execute(
+            """
+            SELECT * FROM yolo_regions
+            WHERE is_enabled = 1
+            ORDER BY region_id ASC
+            """
+        )
+    else:
+        cur.execute(
+            """
+            SELECT * FROM yolo_regions
+            ORDER BY region_id ASC
+            """
+        )
+    return cur.fetchall()
+
+
+# 한개 구역 생성 (bbox + 이름 + on/off 상태 저장)
+def insert_yolo_region(db, name, x_min, x_max, y_min, y_max, is_enabled=True):
+    name = name.strip()
+    if not name:
+        raise ValueError("name empty")
+    now = datetime.now().isoformat()
+
+    x1 = min(x_min, x_max)
+    x2 = max(x_min, x_max)
+    y1 = min(y_min, y_max)
+    y2 = max(y_min, y_max)
+
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO yolo_regions (
+            name, x_min, x_max, y_min, y_max, is_enabled, updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+    """, (
+        name,
+        x1, x2, y1, y2,   
+        int(is_enabled),
+        now,
+    ))
+    db.commit()
+    return cur.lastrowid
+
+
+# 한개 구역 조회 (region_id 기준)
+def get_yolo_region(db, region_id: int):
+    cur = db.cursor()
+    cur.execute(
+        "SELECT * FROM yolo_regions WHERE region_id = ?",
+        (region_id,),
+    )
+    return cur.fetchone()
+
+
+# 한개 구역 수정 (이름 + bbox 좌표 업데이트)
+def update_yolo_region(db, region_id, name, x_min, x_max, y_min, y_max):
+    name = name.strip()
+    if not name:
+        raise ValueError("name empty")
+    now = datetime.now().isoformat()
+
+    x1 = min(x_min, x_max)
+    x2 = max(x_min, x_max)
+    y1 = min(y_min, y_max)
+    y2 = max(y_min, y_max)
+
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE yolo_regions
+        SET name=?, x_min=?, x_max=?, y_min=?, y_max=?, updated_at=?
+        WHERE region_id=?
+        """,
+        (name, x1, x2, y1, y2, now, region_id),
+    )
+    db.commit()
+    return cur.rowcount
+
+
+# 개별 구역 on/off (특정 region 활성화 상태 변경)
+def set_yolo_region_enabled(db, region_id, is_enabled):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE yolo_regions
+        SET is_enabled=?, updated_at=?
+        WHERE region_id=?
+        """,
+        (int(is_enabled), now, region_id),
+    )
+    db.commit()
+    return cur.rowcount
+
+
+# 전체 구역 on/off (모든 region 활성화 상태 일괄 변경)
+def set_all_yolo_regions_enabled(db, is_enabled):
+    now = datetime.now().isoformat()
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE yolo_regions
+        SET is_enabled=?, updated_at=?
+        """,
+        (int(is_enabled), now),
+    )
+    db.commit()
+    return cur.rowcount
+
+
+# 한개 구역 삭제 (region_id 기준)
+def delete_yolo_region(db, region_id):
+    cur = db.cursor()
+    cur.execute(
+        "DELETE FROM yolo_regions WHERE region_id=?",
+        (region_id,),
+    )
+    db.commit()
+    return cur.rowcount
+
+
+# 전체 구역 삭제 (모든 region 제거)
+def delete_all_yolo_regions(db):
+    cur = db.cursor()
+    cur.execute("DELETE FROM yolo_regions")
+    db.commit()
+    return cur.rowcount
+
+
+# 활성 구역 존재 여부 확인 (region mode에서 실행 판단용)
+def has_enabled_yolo_region(db):
+    cur = db.cursor()
+    cur.execute(
+        "SELECT 1 FROM yolo_regions WHERE is_enabled=1 LIMIT 1"
+    )
+    return cur.fetchone() is not None
+
+
+# 활성 구역 개수 반환 (GUI/로봇 상태 표시용)
+def count_enabled_yolo_regions(db):
+    cur = db.cursor()
+    cur.execute(
+        "SELECT COUNT(*) AS cnt FROM yolo_regions WHERE is_enabled=1"
+    )
+    row = cur.fetchone()
+    return int(row["cnt"]) if row else 0
