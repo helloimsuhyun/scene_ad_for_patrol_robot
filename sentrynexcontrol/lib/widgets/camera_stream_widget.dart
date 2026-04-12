@@ -109,6 +109,11 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
       if (localDesc == null) {
         throw Exception('localDescription is null');
       }
+      
+      debugPrint(
+        '[WebRTC] sending viewer_offer type=${localDesc.type}, '
+        'sdp_len=${localDesc.sdp?.length ?? 0}',
+      );
 
       // 시그널링 서버에 Offer 전송 → Answer 수신
       final resp = await http.post(
