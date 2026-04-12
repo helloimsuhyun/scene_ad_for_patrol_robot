@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
@@ -35,6 +36,31 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
     _peerConnection?.close();
     super.dispose();
   }
+
+    Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
+    if (pc.iceGatheringState ==
+        RTCIceGatheringState.RTCIceGatheringStateComplete) {
+      return;
+    }
+
+    final completer = Completer<void>();
+
+    pc.onIceGatheringState = (state) {
+      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        if (!completer.isCompleted) {
+          completer.complete();
+        }
+      }
+    };
+
+    await completer.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () {
+        debugPrint('[WebRTC] ICE gathering timeout');
+      },
+    );
+  }
+
 
   // ─── WebRTC 연결 시작 ───
   Future<void> _connect() async {
@@ -76,11 +102,22 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      // ICE candidate 수집 완료까지 대기
+      await _waitIceGatheringComplete(pc);
+
+      final localDesc = await pc.getLocalDescription();
+      if (localDesc == null) {
+        throw Exception('localDescription is null');
+      }
+
       // 시그널링 서버에 Offer 전송 → Answer 수신
       final resp = await http.post(
         Uri.parse('$_signalingUrl/viewer_offer'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'sdp': offer.sdp, 'type': offer.type}),
+        body: jsonEncode({
+          'sdp': localDesc.sdp,
+          'type': localDesc.type,
+        }),
       );
 
       if (resp.statusCode != 200) {
