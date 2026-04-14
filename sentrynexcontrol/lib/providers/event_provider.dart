@@ -3,12 +3,11 @@ import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import '../models/event_model.dart';
-
-// 파이썬 서버 주소 (FastAPI uvicorn 기본 8000 포트)
-const String _baseUrl = 'http://127.0.0.1:8000';
+import 'server_config_provider.dart';
 
 class EventListNotifier extends StateNotifier<List<Event>> {
-  EventListNotifier() : super([]);
+  final Ref ref;
+  EventListNotifier(this.ref) : super([]);
 
   Timer? _pollingTimer;
   String? _lastCapturedAt;
@@ -27,10 +26,11 @@ class EventListNotifier extends StateNotifier<List<Event>> {
   Future<void> _fetchEvents() async {
     if (_isDisposed) return;
 
+    final config = ref.read(serverConfigProvider);
     try {
       final uri = _lastCapturedAt != null
-          ? Uri.parse('$_baseUrl/events?since=$_lastCapturedAt')
-          : Uri.parse('$_baseUrl/events');
+          ? Uri.parse('${config.baseUrl}/events?since=$_lastCapturedAt')
+          : Uri.parse('${config.baseUrl}/events');
 
       final response = await http.get(uri);
 
@@ -69,8 +69,9 @@ class EventListNotifier extends StateNotifier<List<Event>> {
 
   /// 더미 이벤트 생성
   Future<void> generateMockEvent() async {
+    final config = ref.read(serverConfigProvider);
     try {
-      final uri = Uri.parse('$_baseUrl/test/create_event');
+      final uri = Uri.parse('${config.baseUrl}/test/create_event');
 
       await http.post(
         uri,
@@ -94,8 +95,9 @@ class EventListNotifier extends StateNotifier<List<Event>> {
     required List<({String filename, List<int> bytes})> images,
     String? label,
   }) async {
+    final config = ref.read(serverConfigProvider);
     try {
-      final uri = Uri.parse('$_baseUrl/place_imgs');
+      final uri = Uri.parse('${config.baseUrl}/place_imgs');
 
       final meta = {
         "place_id": placeId,
@@ -148,7 +150,7 @@ class EventListNotifier extends StateNotifier<List<Event>> {
 // Event 상태를 전역으로 제공하는 Provider 선언부
 final eventListProvider =
     StateNotifierProvider<EventListNotifier, List<Event>>((ref) {
-  final notifier = EventListNotifier();
+  final notifier = EventListNotifier(ref);
   notifier.startPolling();
   return notifier;
 });
