@@ -3,7 +3,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import httpx
 
+<<<<<<< HEAD
 # 🔥 여기에 로봇 주소 고정
+=======
+# 🔥 여기에 로봇 주소
+>>>>>>> origin/ant_branch
 ROBOT_URL = "http://192.168.0.10:8091"  
 
 
@@ -58,7 +62,11 @@ async def push_yolo_config_to_robot(app, sqlite_db) -> Tuple[bool, Optional[str]
     payload = await build_robot_yolo_config_payload(app, sqlite_db)
 
     try:
+<<<<<<< HEAD
         async with httpx.AsyncClient(timeout=5.0) as client:
+=======
+        async with httpx.AsyncClient(timeout=2.0) as client:
+>>>>>>> origin/ant_branch
             resp = await client.post(
                 f"{ROBOT_URL.rstrip('/')}/robot/yolo_config",
                 json=payload
@@ -71,5 +79,9 @@ async def push_yolo_config_to_robot(app, sqlite_db) -> Tuple[bool, Optional[str]
     except Exception as e:
         return False, str(e), {
             "request_payload": payload
+<<<<<<< HEAD
         }
     
+=======
+        }
+>>>>>>> origin/ant_branch

@@ -15,12 +15,26 @@ class AlertList extends ConsumerWidget {
     final allEvents = ref.watch(eventListProvider);
     
     // 조건에 따른 필터링 (showOnlyUnchecked 가 true 일 때만 필터링)
-    final alerts = showOnlyUnchecked
+    final alerts = List<Event>.from(showOnlyUnchecked
         ? allEvents.where((e) {
             final bool isChecked = (e.adminChecked == 1) || (e.adminLabel != null && e.adminLabel!.isNotEmpty);
             return !isChecked;
-          }).toList()
-        : allEvents;
+          })
+        : allEvents);
+
+    // 미확인 먼저, 동일 그룹 내에선 최신순(시간 역순) 정렬
+    alerts.sort((a, b) {
+      bool aChecked = (a.adminChecked == 1) || (a.adminLabel != null && a.adminLabel!.isNotEmpty);
+      bool bChecked = (b.adminChecked == 1) || (b.adminLabel != null && b.adminLabel!.isNotEmpty);
+      
+      if (aChecked != bChecked) {
+        return aChecked ? 1 : -1;
+      }
+      
+      final tA = DateTime.parse(a.capturedAt).toLocal();
+      final tB = DateTime.parse(b.capturedAt).toLocal();
+      return tB.compareTo(tA);
+    });
 
     return Container(
       decoration: BoxDecoration(
@@ -82,7 +96,7 @@ class AlertList extends ConsumerWidget {
                 : ListView.separated(
                     itemBuilder: (context, index) {
                       final event = alerts[index];
-                      return _AlertTile(event: event, isCompact: isCompact);
+                      return _AlertTile(event: event, isCompact: isCompact, showOnlyUnchecked: showOnlyUnchecked);
                     },
                     separatorBuilder: (_, __) => const SizedBox(height: 10),
                     itemCount: alerts.length,
@@ -97,8 +111,22 @@ class AlertList extends ConsumerWidget {
 class _AlertTile extends ConsumerWidget {
   final Event event;
   final bool isCompact;
+  final bool showOnlyUnchecked;
 
-  const _AlertTile({required this.event, this.isCompact = false});
+  const _AlertTile({required this.event, this.isCompact = false, this.showOnlyUnchecked = false});
+
+  String formatLocalTime(String ts) {
+    try {
+      final dt = DateTime.parse(ts).toLocal();
+      final timeStr = '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}:${dt.second.toString().padLeft(2, '0')}';
+      if (showOnlyUnchecked) return timeStr;
+      
+      final dateStr = '${dt.year.toString().substring(2)}/${dt.month.toString().padLeft(2, '0')}/${dt.day.toString().padLeft(2, '0')}';
+      return '$dateStr $timeStr';
+    } catch (_) {
+      return '--:--:--';
+    }
+  }
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
@@ -131,7 +159,7 @@ class _AlertTile extends ConsumerWidget {
             border: Border.all(
               color: isChecked
                   ? const Color(0xFF2D3041)
-                  : (isAnomaly ? const Color(0x33EF4444) : const Color(0xFF2E3244)),
+                  : badgeColor.withOpacity(0.5),
             ),
           ),
           child: Column(
@@ -196,7 +224,7 @@ class _AlertTile extends ConsumerWidget {
                       const Icon(Icons.access_time, size: 10, color: Color(0xFF757B92)),
                       const SizedBox(width: 4),
                       Text(
-                        formatEventTime(event.capturedAt),
+                        formatLocalTime(event.capturedAt),
                         style: TextStyle(
                           color: const Color(0xFF757B92),
                           fontSize: isCompact ? 9 : 11,

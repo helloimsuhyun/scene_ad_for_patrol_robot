@@ -1,8 +1,8 @@
 import 'package:flutter/material.dart';
 import 'sidebar_menu.dart';
-import '../widgets/alert_list.dart';
+import '../widgets/combined_event_list.dart';
 
-enum Pages { dashboard, map, logs, control, settings }
+enum Pages { dashboard, logs, analytics, control, settings }
 
 class Sidebar extends StatelessWidget {
   final Pages currentPage;
@@ -70,8 +70,8 @@ class Sidebar extends StatelessWidget {
           SidebarMenu(
             title: '분석',
             icon: Icons.bar_chart,
-            isSelected: currentPage == Pages.map,
-            onTap: () => onPageSelected(Pages.map),
+            isSelected: currentPage == Pages.analytics,
+            onTap: () => onPageSelected(Pages.analytics),
           ),
           const SizedBox(height: 6),
           SidebarMenu(
@@ -88,9 +88,13 @@ class Sidebar extends StatelessWidget {
             onTap: () => onPageSelected(Pages.settings),
           ),
           //---------- 메뉴 아래: 실시간 경보 로그 ----------
-          const SizedBox(height: 16),
-          const Expanded(child: AlertList(isCompact: true)),
-          const SizedBox(height: 16),
+          const SizedBox(height: 36),
+          const Divider(height: 1, color: Color(0xFF2D3041)),
+          const SizedBox(height: 20),
+          const Expanded(
+            child: CombinedEventList(showOnlyUnchecked: true, title: '실시간 로그'),
+          ),
+          const SizedBox(height: 36),
           //---------- 카메라 아래: 수동 조작 컨트롤러 (UI 임시 제거) ----------
           // const ManualControllerPanel(),
           // const SizedBox(height: 16),

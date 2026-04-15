@@ -499,8 +499,8 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                             1;
 
                                         return Positioned(
-                                          left: px - 20,
-                                          top: py - 20,
+                                          left: px - 36,
+                                          top: py - 36,
                                           child: GestureDetector(
                                             behavior: HitTestBehavior.opaque,
                                             onTap: () async {
@@ -606,8 +606,8 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                         MainAxisSize.min,
                                                     children: [
                                                       Container(
-                                                        width: 32,
-                                                        height: 32,
+                                                        width: 48,
+                                                        height: 48,
                                                         decoration: BoxDecoration(
                                                           color: Colors
                                                               .transparent,
@@ -617,7 +617,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                             color: const Color(
                                                               0xFF7F7CFF,
                                                             ),
-                                                            width: 2,
+                                                            width: 3,
                                                           ),
                                                           boxShadow: isSelected
                                                               ? const [
@@ -636,8 +636,8 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                         child: Center(
                                                           child: isSelected
                                                               ? Container(
-                                                                  width: 25,
-                                                                  height: 25,
+                                                                  width: 38,
+                                                                  height: 38,
                                                                   decoration: BoxDecoration(
                                                                     color: const Color(
                                                                       0xFF7F7CFF,
@@ -654,7 +654,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                                         fontWeight:
                                                                             FontWeight.bold,
                                                                         fontSize:
-                                                                            11,
+                                                                            16,
                                                                       ),
                                                                     ),
                                                                   ),
@@ -662,17 +662,17 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                               : const SizedBox.shrink(),
                                                         ),
                                                       ),
-                                                      const SizedBox(height: 4),
+                                                      const SizedBox(height: 2),
                                                       Container(
                                                         // 노드 이름표
                                                         padding:
                                                             const EdgeInsets.symmetric(
                                                               horizontal: 6,
-                                                              vertical:
-                                                                  4, // 2 -> 4로 확대
+                                                              vertical: 4,
                                                             ),
                                                         decoration: BoxDecoration(
-                                                          color: Colors.black87,
+                                                          color: Colors
+                                                              .transparent,
                                                           borderRadius:
                                                               BorderRadius.circular(
                                                                 4,
@@ -684,7 +684,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                               const TextStyle(
                                                                 color: Colors
                                                                     .white,
-                                                                fontSize: 10,
+                                                                fontSize: 16,
                                                                 fontWeight:
                                                                     FontWeight
                                                                         .w600,
@@ -715,7 +715,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                                 ),
                                                               ),
                                                               content: Text(
-                                                                "'$displayName' 노드를 DB에서 영구적으로 삭제하겠습니까?",
+                                                                "'$displayName' 노드를 영구적으로 삭제하겠습니까?",
                                                                 style: const TextStyle(
                                                                   color: Colors
                                                                       .white70,
@@ -784,7 +784,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                                 color: Colors
                                                                     .redAccent
                                                                     .withAlpha(
-                                                                      70,
+                                                                      90,
                                                                     ),
                                                                 shape: BoxShape
                                                                     .circle,
@@ -792,8 +792,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                                           child: const Icon(
                                                             Icons.close,
                                                             size: 14,
-                                                            color: Colors
-                                                                .redAccent,
+                                                            color: Colors.white,
                                                           ),
                                                         ),
                                                       ),
@@ -906,7 +905,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                         fontSize: 12,
                       ),
                     ),
-                    const SizedBox(height: 16),
+                    const SizedBox(height: 24),
                     // 프리셋 컴포넌트 추가
                     _buildPresetSlots(),
                     const SizedBox(height: 8),
@@ -1099,7 +1098,7 @@ class _DottedLinePainter extends CustomPainter {
     if (points.length < 2) return;
     final paint = Paint()
       ..color = const Color(0xFF7F7CFF)
-      ..strokeWidth = 2
+      ..strokeWidth = 3
       ..style = PaintingStyle.stroke;
 
     for (int i = 0; i < points.length - 1; i++) {
@@ -1108,8 +1107,8 @@ class _DottedLinePainter extends CustomPainter {
   }
 
   void _drawDottedLine(Canvas canvas, Offset p1, Offset p2, Paint paint) {
-    const double dashWidth = 5;
-    const double dashSpace = 5;
+    const double dashWidth = 8;
+    const double dashSpace = 8;
     double startX = p1.dx;
     double startY = p1.dy;
     final double distance = (p2 - p1).distance;

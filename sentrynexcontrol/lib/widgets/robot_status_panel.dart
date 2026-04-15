@@ -511,6 +511,51 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
               const SizedBox(height: 10),
             ],
             const SizedBox(height: 10),
+            //---------- YOLO 사람 감지 모드 제어 ----------
+            Row(
+              mainAxisAlignment: MainAxisAlignment.spaceBetween,
+              children: [
+                const Text(
+                  '사람 감지 (YOLO)',
+                  style: TextStyle(color: Color(0xFF9FA4B9), fontSize: 11),
+                ),
+                Consumer(
+                  builder: (context, ref, _) {
+                    final yoloMode = ref.watch(yoloModeProvider);
+
+                    return Container(
+                      height: 38,
+                      padding: const EdgeInsets.symmetric(horizontal: 12),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFF26293A),
+                        borderRadius: BorderRadius.circular(4),
+                        border: Border.all(color: const Color(0xFF2D3041)),
+                      ),
+                      child: DropdownButtonHideUnderline(
+                        child: DropdownButton<int>(
+                          value: yoloMode,
+                          dropdownColor: const Color(0xFF1C1E2B),
+                          icon: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 16),
+                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                          items: const [
+                            DropdownMenuItem(value: 0, child: Text('OFF', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(value: 1, child: Text('GLOBAL', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(value: 2, child: Text('REGION', style: TextStyle(fontSize: 12))),
+                          ],
+                          onChanged: (val) {
+                            if (val != null) {
+                              ref.read(yoloModeProvider.notifier).setMode(val);
+                            }
+                          },
+                        ),
+                      ),
+                    );
+                  },
+                ),
+              ],
+            ),
+            const SizedBox(height: 14),
+
             //---------- 순찰 루트 및 타임라인 제어 ----------
             Row(
               children: [
@@ -650,13 +695,22 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                     );
                   });
 
-                  // 첫 번째 노드를 현재 목표로 보여줌 (디자인 확인용)
-                  final firstId = patrolList.isNotEmpty
-                      ? patrolList.first['place_id'].toString()
-                      : null;
-                  final firstName = patrolList.isNotEmpty
-                      ? (patrolList.first['display_name']?.toString() ??
-                            firstId!)
+                  final robotGoal = ref.watch(robotGoalProvider);
+                  final currentTargetId = robotGoal?.nextPlaceId;
+
+                  Map<String, dynamic>? currentPlace;
+                  if (currentTargetId != null) {
+                    try {
+                      currentPlace = patrolList.firstWhere((p) => p['place_id'].toString() == currentTargetId);
+                    } catch (_) {}
+                  }
+                  if (currentPlace == null && patrolList.isNotEmpty) {
+                    currentPlace = patrolList.first;
+                  }
+
+                  final firstId = currentPlace != null ? currentPlace['place_id'].toString() : null;
+                  final firstName = currentPlace != null
+                      ? (currentPlace['display_name']?.toString() ?? firstId!)
                       : '노드 없음';
 
                   return Column(
