@@ -397,11 +397,12 @@ def make_case_visualizations(
     대표 프레임 1장과 best ref 1장을 가지고
     CC heatmap / verifier heatmap 시각화를 다시 계산해 저장.
     """
+    
     if len(query_paths) == 0:
         return
 
-    rep_idx = int(infer_out.get("patch_vis", {}).get("frame_idx", 0))
-    rep_idx = max(0, min(rep_idx, len(query_paths) - 1))
+    patch_vis = infer_out.get("patch_vis") or {}
+    rep_idx = int(patch_vis.get("frame_idx", 0))
     q_path = query_paths[rep_idx]
 
     q_bgr = safe_read_bgr(q_path)
@@ -418,10 +419,10 @@ def make_case_visualizations(
     if r_bgr is None:
         return
 
-    cfgb = get_cfg_bundle(cfg)
-    cc_cfg = cfgb["cc"]
-    proposal_cfg = cfgb["proposal"]
-    ver_cfg = cfgb["verifier"]
+    cfgb = get_cfg_bundle(cfg) or {}
+    cc_cfg = cfgb.get("cc") or {}
+    proposal_cfg = cfgb.get("proposal") or {}
+    ver_cfg = cfgb.get("verifier") or {}
 
     cc_radius = int(cc_cfg.get("radius", 1))
     top_p = float(cc_cfg.get("top_p", 0.05))

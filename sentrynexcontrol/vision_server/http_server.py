@@ -262,7 +262,8 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         vpr_model=engine.get("vpr_model"),
     )
 
-#임계치 업데이트 함수 호출----------------------------------
+
+# 임계치 업데이트 함수 호출----------------------------------
 def run_threshold_calibration(place_id, engine):
     cfg = load_cfg(engine["bank_root"])
                                   

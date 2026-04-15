@@ -44,7 +44,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
           : null;
 
       final response = await http.post(
-        Uri.parse('http://192.168.0.88:8090/patrol/$endpoint'),
+        Uri.parse('http://192.168.0.24:8090/patrol/$endpoint'),
         headers: body != null ? {'Content-Type': 'application/json'} : null,
         body: body,
       );
@@ -154,13 +154,23 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
   Future<void> _toggleQueryLabel(WidgetRef ref) async {
     final current = ref.read(_queryLabelProvider);
     final next = current == 'normal' ? 'abnormal' : 'normal';
+
     try {
-      await http.post(
-        Uri.parse('http://192.168.0.88:8090/patrol/query_gt'),
+      final res = await http.post(
+        Uri.parse('http://127.0.0.1:8000/query_capture_label'),
         headers: {'Content-Type': 'application/json'},
-        body: '{"label": "$next"}',
+        body: jsonEncode({'label': next}),
       );
-      ref.read(_queryLabelProvider.notifier).state = next;
+
+      if (res.statusCode != 200) {
+        throw Exception('failed: ${res.statusCode} ${res.body}');
+      }
+
+      final data = jsonDecode(res.body) as Map<String, dynamic>;
+      final serverLabel = (data['query_capture_label'] ?? next).toString();
+
+      ref.read(_queryLabelProvider.notifier).state = serverLabel;
+      debugPrint('[LABEL] updated -> $serverLabel');
     } catch (e) {
       debugPrint('Error toggling label: $e');
     }
