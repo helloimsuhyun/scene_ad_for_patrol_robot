@@ -55,3 +55,20 @@ conda activate capston_server
 ### 서버 실행 방법
 1. [run_servers.sh](file:///home/choisuhyun/scene_ad_for_patrol_robot/run_servers.sh) 실행 시 포트 8000, 8001이 정상적으로 열리는지 확인.
 2. `sentrynexcontrol`에서 `flutter run` 실행 시 빌드 오류가 없는지 확인.
+
+# 오프라인 실행 가이드
+플러터 사전 빌드
+cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
+flutter pub get
+flutter build web
+
+
+cd ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
+python3 -m http.server 8080
+
+같은 pc
+http://localhost:8080 
+
+
+다른 pc
+http://서버PC_IP:8080
