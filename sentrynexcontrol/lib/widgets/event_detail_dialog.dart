@@ -76,30 +76,46 @@ void showEventDetailDialog(BuildContext context, WidgetRef ref, Event event) {
                 decoration: BoxDecoration(
                   border: Border.all(color: const Color(0xFF2D3041)),
                 ),
-                child: Image.network(
-                  event.frames.isNotEmpty
-                      ? '${config.baseUrl}/images/${event.frames.first.imagePath.replaceFirst("recv/", "")}'
-                      : 'https://via.placeholder.com/500x300.png?text=No+Image',
-                  width: double.infinity,
-                  height: 300,
-                  fit: BoxFit.cover,
-                  errorBuilder: (context, error, stackTrace) {
-                    return Container(
+                // 장소 이벤트 이미지: frames 리스트의 첫 번째 이미지 경로로 URL 조합
+              // 서버가 "recv/" 이후 경로만 내려주므로 /images/ 엔드포인트에 붙여 사용
+              child: event.frames.isNotEmpty
+                  ? Image.network(
+                      '${config.baseUrl}/images/${event.frames.first.imagePath.replaceFirst("recv/", "")}',
+                      width: double.infinity,
+                      height: 300,
+                      fit: BoxFit.cover,
+                      errorBuilder: (context, error, stackTrace) {
+                        return Container(
+                          width: double.infinity,
+                          height: 300,
+                          color: const Color(0xFF1C1E2B),
+                          child: const Center(
+                            child: Text(
+                              '이미지 연결 실패',
+                              style: TextStyle(
+                                color: Color(0xFFEF4444),
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ),
+                        );
+                      },
+                    )
+                  // frames가 없으면 외부 요청 없이 로컬 박스로 대체
+                  : Container(
                       width: double.infinity,
                       height: 300,
                       color: const Color(0xFF1C1E2B),
                       child: const Center(
                         child: Text(
-                          '이미지 연결 실패',
+                          '이미지 없음',
                           style: TextStyle(
-                            color: Color(0xFFEF4444),
+                            color: Color(0xFF4A4E63),
                             fontWeight: FontWeight.bold,
                           ),
                         ),
                       ),
-                    );
-                  },
-                ),
+                    ),
               ),
               const SizedBox(height: 16),
               Text(
@@ -448,8 +464,12 @@ void showYoloEventDetailDialog(
                     border: Border.all(color: const Color(0xFF2D3041)),
                   ),
                   child: Image.network(
-                    event.imageUrl ??
-                        '${config.baseUrl}/person_images/${event.imagePath!.replaceFirst("recv_person/", "")}',
+                    // 서버가 imageUrl을 "/person_images/파일명.jpg" 형태(상대경로)로 보내므로
+                    // baseUrl을 앞에 붙여 완전한 URL로 만들어야 함
+                    // imagePath가 있으면 직접 조합하는 방식으로도 대응
+                    event.imageUrl != null
+                        ? '${config.baseUrl}${event.imageUrl}'
+                        : '${config.baseUrl}/person_images/${event.imagePath!.replaceFirst("recv_person/", "")}',
                     width: double.infinity,
                     height: 300,
                     fit: BoxFit.cover,
