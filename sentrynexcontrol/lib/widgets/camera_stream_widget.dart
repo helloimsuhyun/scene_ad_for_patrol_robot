@@ -2,18 +2,19 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/server_config_provider.dart';
 
-// 시그널링 서버 주소 (signaling_server.py - 포트 8001)
-const String _signalingUrl = 'http://127.0.0.1:8001';
+// 시그널링 서버 주소는 이제 ServerConfig를 통해 동적으로 결정됩니다.
 
-class CameraStreamWidget extends StatefulWidget {
+class CameraStreamWidget extends ConsumerStatefulWidget {
   const CameraStreamWidget({super.key});
 
   @override
-  State<CameraStreamWidget> createState() => _CameraStreamWidgetState();
+  ConsumerState<CameraStreamWidget> createState() => _CameraStreamWidgetState();
 }
 
-class _CameraStreamWidgetState extends State<CameraStreamWidget> {
+class _CameraStreamWidgetState extends ConsumerState<CameraStreamWidget> {
   // WebRTC 렌더러 (영상을 화면에 그려주는 역할)
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
 
@@ -76,9 +77,22 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
+      // 시그널링 서버 주소 동적 결정 (ngrok 주소면 그 주소를 쓰고, 아니면 IP:8001 로직 사용)
+      final serverConfig = ref.read(serverConfigProvider);
+      
+      // ngrok 주소인 경우, 시그널링 서버도 동일한 도메인으로 시도할 수 없으므로 
+      // (무료 ngrok은 포트당 1개 도메인)
+      // 만약 고정 IP를 사용 중이라면 IP:8001을 우선합니다.
+      String sigUrl = 'http://${serverConfig.serverIp}:8001';
+      if (serverConfig.serverIp.contains('ngrok-free.app')) {
+        // ngrok 사용 시에는 일단 현재 베이스 주소를 사용하되 
+        // 팁: ngrok 주소 하나로 여러 포트를 쓰려면 유료거나 별도 설정이 필요하므로 안내가 필요함
+        sigUrl = serverConfig.baseUrl; 
+      }
+
       // 시그널링 서버에 Offer 전송 → Answer 수신
       final resp = await http.post(
-        Uri.parse('$_signalingUrl/viewer_offer'),
+        Uri.parse('$sigUrl/viewer_offer'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'sdp': offer.sdp, 'type': offer.type}),
       );
