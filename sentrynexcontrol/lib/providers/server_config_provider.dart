@@ -7,19 +7,10 @@ class ServerConfig {
 
   ServerConfig({required this.serverIp, this.port = '8000'});
 
-  // ngrok 주소면 https를 쓰고 포트 생략, 아니면 기존 http://$ip:$port 사용
-  bool get _isExternal => serverIp.contains('ngrok-free.app') || serverIp.startsWith('http');
-
-  String get _formattedBase {
-    if (serverIp.startsWith('http')) return serverIp;
-    if (serverIp.contains('ngrok-free.app')) return 'https://$serverIp';
-    return 'http://$serverIp:$port';
-  }
-
-  String get baseUrl => _formattedBase;
-  String get imageUrlBase => '$_formattedBase/images/';
-  String get audioUrlBase => '$_formattedBase/audio/';
-  String get yoloImageUrlBase => '$_formattedBase/person_images/';
+  String get baseUrl => 'http://$serverIp:$port';
+  String get imageUrlBase => 'http://$serverIp:$port/images/';
+  String get audioUrlBase => 'http://$serverIp:$port/audio/';
+  String get yoloImageUrlBase => 'http://$serverIp:$port/person_images/';
 
   ServerConfig copyWith({String? serverIp, String? port}) {
     return ServerConfig(
@@ -30,7 +21,7 @@ class ServerConfig {
 }
 
 class ServerConfigNotifier extends StateNotifier<ServerConfig> {
-  ServerConfigNotifier() : super(ServerConfig(serverIp: 'hungrily-pasted-pursuant.ngrok-free.app')) {
+  ServerConfigNotifier() : super(ServerConfig(serverIp: '127.0.0.1')) {
     _loadConfig();
   }
 
