@@ -57,6 +57,7 @@ conda activate capston_server
 2. `sentrynexcontrol`에서 `flutter run` 실행 시 빌드 오류가 없는지 확인.
 
 # 오프라인 실행 가이드
+
 플러터 사전 빌드
 cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
 flutter pub get
