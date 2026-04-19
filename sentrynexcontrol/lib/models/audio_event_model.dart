@@ -40,4 +40,32 @@ class AudioEvent {
       adminChecked: json['admin_checked'] ?? 0,
     );
   }
+
+  AudioEvent copyWith({
+    String? audioEventId,
+    String? timestamp,
+    String? audioPath,
+    String? audioUrl,
+    double? x,
+    double? y,
+    double? yaw,
+    double? doa,
+    String? modelLabel,
+    String? adminLabel,
+    int? adminChecked,
+  }) {
+    return AudioEvent(
+      audioEventId: audioEventId ?? this.audioEventId,
+      timestamp: timestamp ?? this.timestamp,
+      audioPath: audioPath ?? this.audioPath,
+      audioUrl: audioUrl ?? this.audioUrl,
+      x: x ?? this.x,
+      y: y ?? this.y,
+      yaw: yaw ?? this.yaw,
+      doa: doa ?? this.doa,
+      modelLabel: modelLabel ?? this.modelLabel,
+      adminLabel: adminLabel ?? this.adminLabel,
+      adminChecked: adminChecked ?? this.adminChecked,
+    );
+  }
 }

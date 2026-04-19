@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
@@ -14,19 +15,24 @@ class CameraStreamWidget extends StatefulWidget {
 }
 
 class _CameraStreamWidgetState extends State<CameraStreamWidget> {
-  // WebRTC 렌더러 (영상을 화면에 그려주는 역할)
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
-
   RTCPeerConnection? _peerConnection;
 
-  // 연결 상태: idle / connecting / connected / error
   _Status _status = _Status.idle;
+  bool _rendererReady = false;
 
   @override
   void initState() {
     super.initState();
-    // 렌더러를 초기화해야만 영상이 제대로 표시됨
-    _remoteRenderer.initialize();
+    _initRenderer();
+  }
+
+  Future<void> _initRenderer() async {
+    await _remoteRenderer.initialize();
+    _remoteRenderer.srcObject = null;
+    if (mounted) {
+      setState(() => _rendererReady = true);
+    }
   }
 
   @override
@@ -36,29 +42,88 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
     super.dispose();
   }
 
-  // ─── WebRTC 연결 시작 ───
+  Future<void> _waitIceGatheringComplete(RTCPeerConnection pc) async {
+    if (pc.iceGatheringState ==
+        RTCIceGatheringState.RTCIceGatheringStateComplete) {
+      return;
+    }
+
+    final completer = Completer<void>();
+
+    pc.onIceGatheringState = (state) {
+      debugPrint('[WebRTC] iceGatheringState=$state');
+      if (state == RTCIceGatheringState.RTCIceGatheringStateComplete) {
+        if (!completer.isCompleted) {
+          completer.complete();
+        }
+      }
+    };
+
+    await completer.future.timeout(
+      const Duration(seconds: 5),
+      onTimeout: () {
+        debugPrint('[WebRTC] ICE gathering timeout');
+      },
+    );
+  }
+
   Future<void> _connect() async {
     setState(() => _status = _Status.connecting);
 
     try {
-      // STUN 서버 설정 (로컬이라도 ICE 후보 수집에 필요)
+      if (!_rendererReady) {
+        await _initRenderer();
+      }
+
       final pc = await createPeerConnection({
         'iceServers': [
           {'urls': 'stun:stun.l.google.com:19302'},
         ],
       });
+
       _peerConnection = pc;
 
-      // 원격(로봇)에서 보내오는 영상 트랙을 렌더러에 연결
-      pc.onTrack = (event) {
+      pc.onTrack = (event) async {
+        debugPrint(
+          '[WebRTC] onTrack kind=${event.track.kind}, streams=${event.streams.length}',
+        );
+
+        if (event.track.kind != 'video') return;
+
+        MediaStream? stream;
+
         if (event.streams.isNotEmpty) {
-          _remoteRenderer.srcObject = event.streams.first;
-          if (mounted) setState(() => _status = _Status.connected);
+          stream = event.streams.first;
+        } else {
+          stream = await createLocalMediaStream('remote_stream');
+          await stream.addTrack(event.track);
+        }
+
+        _remoteRenderer.srcObject = stream;
+
+        Future.delayed(const Duration(seconds: 1), () {
+          debugPrint(
+            '[WebRTC] renderer size: '
+            '${_remoteRenderer.videoWidth} x ${_remoteRenderer.videoHeight}',
+          );
+        });
+
+        if (mounted) {
+          setState(() => _status = _Status.connected);
         }
       };
 
-      // 연결 끊어지면 상태를 idle로 복귀
+      pc.onAddStream = (stream) {
+        debugPrint('[WebRTC] onAddStream id=${stream.id}');
+        _remoteRenderer.srcObject = stream;
+        if (mounted) {
+          setState(() => _status = _Status.connected);
+        }
+      };
+
       pc.onConnectionState = (state) {
+        debugPrint('[WebRTC] connectionState=$state');
+
         if (state == RTCPeerConnectionState.RTCPeerConnectionStateFailed ||
             state ==
                 RTCPeerConnectionState.RTCPeerConnectionStateDisconnected) {
@@ -66,21 +131,37 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
         }
       };
 
-      // 영상 수신 전용 트랜시버 추가 (sendrecv 대신 recvonly)
+      pc.onIceConnectionState = (state) {
+        debugPrint('[WebRTC] iceConnectionState=$state');
+      };
+
       await pc.addTransceiver(
         kind: RTCRtpMediaType.RTCRtpMediaTypeVideo,
         init: RTCRtpTransceiverInit(direction: TransceiverDirection.RecvOnly),
       );
 
-      // SDP Offer 생성
       final offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
 
-      // 시그널링 서버에 Offer 전송 → Answer 수신
+      await _waitIceGatheringComplete(pc);
+
+      final localDesc = await pc.getLocalDescription();
+      if (localDesc == null) {
+        throw Exception('localDescription is null');
+      }
+
+      debugPrint(
+        '[WebRTC] sending viewer_offer type=${localDesc.type}, '
+        'sdp_len=${localDesc.sdp?.length ?? 0}',
+      );
+
       final resp = await http.post(
         Uri.parse('$_signalingUrl/viewer_offer'),
         headers: {'Content-Type': 'application/json'},
-        body: jsonEncode({'sdp': offer.sdp, 'type': offer.type}),
+        body: jsonEncode({
+          'sdp': localDesc.sdp,
+          'type': localDesc.type,
+        }),
       );
 
       if (resp.statusCode != 200) {
@@ -92,14 +173,14 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
         answerJson['sdp'],
         answerJson['type'],
       );
+
       await pc.setRemoteDescription(answer);
     } catch (e) {
-      debugPrint('[WebRTC] Error: $e');
+      debugPrint('[WebRTC] ERROR: $e');
       if (mounted) setState(() => _status = _Status.error);
     }
   }
 
-  // ─── 연결 종료 ───
   Future<void> _disconnect() async {
     await _peerConnection?.close();
     _peerConnection = null;
@@ -109,7 +190,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
 
   @override
   Widget build(BuildContext context) {
-    //---------- 사이드바 하단 카메라 스트림 영역 ----------
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF0D0E16),
@@ -120,7 +200,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          //---------- 카메라 헤더 ----------
           Row(
             children: [
               const Icon(
@@ -139,7 +218,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
                   ),
                 ),
               ),
-              // 전체화면 버튼
               IconButton(
                 padding: EdgeInsets.zero,
                 constraints: const BoxConstraints(),
@@ -151,13 +229,10 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
                 onPressed: () => _showFullScreen(context),
               ),
               const SizedBox(width: 8),
-              // 연결 상태 표시 점
               _StatusDot(status: _status),
             ],
           ),
           const SizedBox(height: 10),
-
-          //---------- 영상 뷰어 영역 ----------
           AspectRatio(
             aspectRatio: 16 / 9,
             child: ClipRRect(
@@ -165,27 +240,21 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
               child: _buildVideoArea(),
             ),
           ),
-
           const SizedBox(height: 10),
-
-          //---------- 연결 / 끊기 버튼 ----------
           SizedBox(width: double.infinity, child: _buildConnectButton()),
         ],
       ),
     );
   }
 
-  // ─── 영상 뷰 또는 상태 안내 화면 표시 ───
   Widget _buildVideoArea() {
     if (_status == _Status.connected) {
-      // 영상이 연결된 경우: WebRTC 렌더러
       return RTCVideoView(
         _remoteRenderer,
         objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
       );
     }
 
-    // 영상이 없는 경우: 안내 화면
     return Container(
       color: const Color(0xFF181924),
       child: Center(
@@ -211,7 +280,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
     );
   }
 
-  // ─── 연결 / 끊기 버튼 ───
   Widget _buildConnectButton() {
     final bool isIdle = _status == _Status.idle || _status == _Status.error;
 
@@ -224,7 +292,7 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
         padding: const EdgeInsets.symmetric(vertical: 8),
       ),
       onPressed: _status == _Status.connecting
-          ? null // 연결 중에는 버튼 비활성화
+          ? null
           : (isIdle ? _connect : _disconnect),
       child: _status == _Status.connecting
           ? const SizedBox(
@@ -247,7 +315,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
     );
   }
 
-  // ─── 상태별 안내 문구 ───
   String _statusLabel() {
     switch (_status) {
       case _Status.idle:
@@ -274,13 +341,12 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
     }
   }
 
-  // ─── 전체화면 확대 보기 ───
   void _showFullScreen(BuildContext context) {
     showGeneralDialog(
       context: context,
       barrierDismissible: true,
       barrierLabel: 'Close',
-      barrierColor: Colors.black.withValues(alpha: 0.85), // 주변 어둡게 처리
+      barrierColor: Colors.black.withValues(alpha: 0.85),
       transitionDuration: const Duration(milliseconds: 200),
       pageBuilder: (context, anim1, anim2) {
         return Center(
@@ -290,7 +356,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                // 닫기 버튼
                 Align(
                   alignment: Alignment.topRight,
                   child: IconButton(
@@ -302,7 +367,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
                     onPressed: () => Navigator.pop(context),
                   ),
                 ),
-                // 영상 영역
                 AspectRatio(
                   aspectRatio: 16 / 9,
                   child: Container(
@@ -333,10 +397,8 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
   }
 }
 
-// ─── 연결 상태 enum ───
 enum _Status { idle, connecting, connected, error }
 
-// ─── 우측 상단 상태 표시 컬러 점 ───
 class _StatusDot extends StatelessWidget {
   final _Status status;
   const _StatusDot({required this.status, super.key});
@@ -346,16 +408,16 @@ class _StatusDot extends StatelessWidget {
     Color color;
     switch (status) {
       case _Status.connected:
-        color = const Color(0xFF22C55E); // 초록
+        color = const Color(0xFF22C55E);
         break;
       case _Status.connecting:
-        color = const Color(0xFFEAB308); // 노랑
+        color = const Color(0xFFEAB308);
         break;
       case _Status.error:
-        color = const Color(0xFFEF4444); // 빨강
+        color = const Color(0xFFEF4444);
         break;
       case _Status.idle:
-        color = const Color(0xFF4A4E63); // 회색
+        color = const Color(0xFF4A4E63);
         break;
     }
     return Container(

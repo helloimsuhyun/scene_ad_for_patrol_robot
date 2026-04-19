@@ -307,6 +307,54 @@ def init_db(db: sqlite3.Connection) -> None:
         ON yolo_regions(is_enabled);
         """
     )
+    cur.executescript('''
+        -- =========================
+        -- yolo_events
+        -- =========================
+        CREATE TABLE IF NOT EXISTS yolo_events (
+            yolo_event_id TEXT PRIMARY KEY,
+            timestamp TEXT NOT NULL,
+            image_path TEXT,
+
+            x REAL,
+            y REAL,
+            yaw REAL,
+
+            person_count INTEGER NOT NULL DEFAULT 0,
+            event_type TEXT,
+
+            source_region_id INTEGER,
+            source_region_name TEXT,
+
+            dwell_time_sec REAL,
+
+
+            admin_checked INTEGER NOT NULL DEFAULT 0,
+            admin_label TEXT,
+
+            created_at TEXT DEFAULT CURRENT_TIMESTAMP
+        );
+
+        -- =========================
+        -- yolo 구역
+        -- =========================
+
+        CREATE TABLE IF NOT EXISTS yolo_regions (
+            region_id     INTEGER PRIMARY KEY AUTOINCREMENT,
+
+            name          TEXT NOT NULL,
+
+            x_min         REAL NOT NULL,
+            x_max         REAL NOT NULL,
+            y_min         REAL NOT NULL,
+            y_max         REAL NOT NULL,
+
+            is_enabled    INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0,1)),
+
+            updated_at    TEXT NOT NULL
+        );
+
+''')
     db.commit()
 
 

@@ -129,6 +129,7 @@ async def lifespan(app: FastAPI):
     # 서버 시작시에 실행
     # db connect & init(없으면 만들어줌)
     app.state.db = sqlite_db.connect_db(DB_PATH)
+    app.state.yolo_mode = 0
     sqlite_db.init_db(app.state.db)
     app.state.db_lock = asyncio.Lock()
 
@@ -262,7 +263,8 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         vpr_model=engine.get("vpr_model"),
     )
 
-#임계치 업데이트 함수 호출----------------------------------
+
+# 임계치 업데이트 함수 호출----------------------------------
 def run_threshold_calibration(place_id, engine):
     cfg = load_cfg(engine["bank_root"])
                                   
@@ -1652,6 +1654,59 @@ async def set_yolo_mode(req: UpdateYoloModeReq):
 # ============================================================== 
 
 
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000) # 서버 - 로봇간 통신이면 ...
+# ========================= [TEST/SIMULATOR ENDPOINTS] =========================
+
+@app.post("/test/create_event")
+async def create_mock_vision_event(payload: dict):
+    from datetime import datetime
+    eid = sqlite_db._uuid()
+    place_id = payload.get("place_id", "00_test")
+    now = datetime.now().isoformat()
+    async with app.state.db_lock:
+        sqlite_db.insert_event(
+            app.state.db,
+            eid,
+            place_id,
+            now,
+            payload.get("anomaly_flag", 1),
+            summary_text=payload.get("summary_text", "[테스트] 카메라 강제 진동 감지")
+        )
+        # 더미 프레임 추가 (프론트엔드에서 프레임 목록이 비어있으면 표시 안 될 수 있음)
+        sqlite_db.insert_frames(
+            app.state.db,
+            eid,
+            ["recv/00_test/query/dummy.jpg"], # placeholder
+            capture_times=now
+        )
+    return {"ok": True, "event_id": eid}
+
+@app.post("/test/create_audio_event")
+async def create_mock_audio_event():
+    from datetime import datetime
+    now = datetime.now()
+    async with app.state.db_lock:
+        sqlite_db.insert_audio_event(
+            app.state.db,
+            now.isoformat(),
+            "", # audio_path
+            model_label="glass_breaking", # 유리 깨지는 소리
+            x=0.5, y=0.5 # mock coordinates
+        )
+    return {"ok": True}
+
+@app.post("/test/create_yolo_event")
+async def create_mock_yolo_event():
+    from datetime import datetime
+    eid = sqlite_db._uuid()
+    now = datetime.now().isoformat()
+    async with app.state.db_lock:
+        sqlite_db.insert_yolo_event(
+            app.state.db,
+            now, # timestamp
+            yolo_event_id=eid,
+            person_count=1,
+            event_type="person_dwelling",
+            source_region_name="보안 구역 A"
+        )
+    return {"ok": True, "event_id": eid}
+

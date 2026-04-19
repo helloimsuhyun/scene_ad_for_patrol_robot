@@ -5,11 +5,16 @@ import 'features/map/map_screen.dart';
 import 'features/logs/logs_screen.dart';
 import 'features/settings/settings_screen.dart';
 import 'features/control/control_screen.dart';
+import 'features/analytics/analytics_screen.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'features/control/calibration_provider.dart';
 import 'providers/event_provider.dart';
 import 'models/event_model.dart';
 import 'widgets/event_detail_dialog.dart';
+import 'models/audio_event_model.dart';
+import 'models/yolo_event_model.dart';
+import 'providers/audio_provider.dart';
+import 'providers/yolo_provider.dart';
 
 class MainPage extends ConsumerStatefulWidget {
   const MainPage({super.key});
@@ -20,11 +25,14 @@ class MainPage extends ConsumerStatefulWidget {
 
 class MainPageState extends ConsumerState<MainPage> {
   Pages _currentPage = Pages.dashboard;
+  String? _lastVisionEventTime;
+  String? _lastAudioEventTime;
+  String? _lastYoloEventTime;
 
   final List<Widget> _pages = const [
     DashboardScreen(),
-    MapScreen(),
     LogsScreen(),
+    AnalyticsScreen(),
     ControlScreen(),
     SettingsScreen(),
   ];
@@ -36,40 +44,38 @@ class MainPageState extends ConsumerState<MainPage> {
 
     // 글로벌 비정상 이벤트 감지 (스낵바 알림용)
     ref.listen<List<Event>>(eventListProvider, (previous, next) {
-      if (previous != null && next.isNotEmpty && next.length > previous.length) {
-        // Assuming the new event is added to the beginning of the list
+      if (next.isNotEmpty) {
         final newEvent = next.first;
-        if (newEvent.anomalyFlag == 1) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 28),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text('위험 감지! (구역: ${newEvent.placeId})', style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                        Text('시스템이 새로운 비정상 이벤트를 감지했습니다.', style: const TextStyle(fontSize: 12, color: Colors.white70)),
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-              backgroundColor: Colors.redAccent.shade700,
-              behavior: SnackBarBehavior.floating,
-              margin: const EdgeInsets.only(bottom: 20, left: 20, right: 20),
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-              duration: const Duration(seconds: 4),
-            ),
-          );
-          
-          // 새로 추가된 기능: 스낵바와 동시에 팝업 창 즉시 띄우기
-          WidgetsBinding.instance.addPostFrameCallback((_) {
-            showEventDetailDialog(context, ref, newEvent);
-          });
+        // 시뮬레이터에서 동일 ID를 덮어쓰는 경우 등을 대비해 timestamp(capturedAt)로 비교
+        final isNew = _lastVisionEventTime != newEvent.capturedAt;
+        
+        if (isNew && newEvent.anomalyFlag == 1) {
+          _lastVisionEventTime = newEvent.capturedAt;
+          _showGlobalAlert(context, ref, 'WARNING', '구역: ${newEvent.placeId}', newEvent);
+        }
+      }
+    });
+
+    ref.listen<List<AudioEvent>>(audioEventListProvider, (previous, next) {
+      if (next.isNotEmpty) {
+        final newEvent = next.first;
+        final isNew = _lastAudioEventTime != newEvent.timestamp;
+        
+        if (isNew) {
+          _lastAudioEventTime = newEvent.timestamp;
+          _showGlobalAlert(context, ref, 'AUDIO ALARM', '비정상 음원 감지됨', null, audioEvent: newEvent);
+        }
+      }
+    });
+
+    ref.listen<List<YoloEvent>>(yoloEventsProvider, (previous, next) {
+      if (next.isNotEmpty) {
+        final newEvent = next.first;
+        final isNew = _lastYoloEventTime != newEvent.timestamp;
+        
+        if (isNew) {
+          _lastYoloEventTime = newEvent.timestamp;
+          _showGlobalAlert(context, ref, 'YOLO ALARM', '보안 구역 인물 감지', null, yoloEvent: newEvent);
         }
       }
     });
@@ -95,9 +101,27 @@ class MainPageState extends ConsumerState<MainPage> {
               ),
               //---------- 우측 메인 콘텐츠 영역 ----------
               Expanded(
-                child: IndexedStack(
-                  index: _currentPage.index,
-                  children: _pages,
+                child: AnimatedSwitcher(
+                  duration: const Duration(milliseconds: 300),
+                  transitionBuilder: (Widget child, Animation<double> animation) {
+                    return FadeTransition(
+                      opacity: animation,
+                      child: SlideTransition(
+                        position: Tween<Offset>(
+                          begin: const Offset(0.02, 0),
+                          end: Offset.zero,
+                        ).animate(CurvedAnimation(
+                          parent: animation,
+                          curve: Curves.easeOutCubic,
+                        )),
+                        child: child,
+                      ),
+                    );
+                  },
+                  child: Container(
+                    key: ValueKey<int>(_currentPage.index),
+                    child: _pages[_currentPage.index],
+                  ),
                 ),
               ),
             ],
@@ -140,6 +164,48 @@ class MainPageState extends ConsumerState<MainPage> {
         ],
       ),
     );
+  }
+
+  void _showGlobalAlert(BuildContext context, WidgetRef ref, String title, String message, Event? visionEvent, {dynamic audioEvent, dynamic yoloEvent}) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Row(
+          children: [
+            const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 28),
+            const SizedBox(width: 12),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                  Text(message, style: const TextStyle(fontSize: 12, color: Colors.white70)),
+                ],
+              ),
+            ),
+          ],
+        ),
+        backgroundColor: Colors.redAccent.shade700,
+        behavior: SnackBarBehavior.floating,
+        margin: const EdgeInsets.only(bottom: 20, left: 20, right: 20),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        duration: const Duration(seconds: 4),
+      ),
+    );
+
+    if (visionEvent != null) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showEventDetailDialog(context, ref, visionEvent);
+      });
+    } else if (audioEvent != null && audioEvent is AudioEvent) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showAudioEventDetailDialog(context, ref, audioEvent);
+      });
+    } else if (yoloEvent != null && yoloEvent is YoloEvent) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        showYoloEventDetailDialog(context, ref, yoloEvent);
+      });
+    }
   }
 }
 

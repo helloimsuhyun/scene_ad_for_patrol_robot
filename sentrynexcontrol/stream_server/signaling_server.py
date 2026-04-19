@@ -1,11 +1,11 @@
 # signaling_server.py
 from typing import Optional
+import asyncio
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import asyncio
 
 
 app = FastAPI()
@@ -21,11 +21,8 @@ app.add_middleware(
 viewer_offer_store: Optional[dict] = None
 viewer_answer_store: Optional[dict] = None
 
-sender_offer_store: Optional[dict] = None
-sender_answer_store: Optional[dict] = None
-
-viewer_waiter: Optional[asyncio.Event] = None
-sender_waiter: Optional[asyncio.Event] = None
+offer_ready_event: Optional[asyncio.Event] = None
+answer_ready_event: Optional[asyncio.Event] = None
 
 
 class SDP(BaseModel):
@@ -35,9 +32,9 @@ class SDP(BaseModel):
 
 @app.on_event("startup")
 async def startup():
-    global viewer_waiter, sender_waiter
-    viewer_waiter = asyncio.Event()
-    sender_waiter = asyncio.Event()
+    global offer_ready_event, answer_ready_event
+    offer_ready_event = asyncio.Event()
+    answer_ready_event = asyncio.Event()
 
 
 @app.get("/health")
@@ -48,8 +45,7 @@ async def health():
 @app.post("/viewer_offer")
 async def viewer_offer(req: SDP):
     global viewer_offer_store, viewer_answer_store
-    global sender_offer_store, sender_answer_store
-    global viewer_waiter, sender_waiter
+    global offer_ready_event, answer_ready_event
 
     print("[viewer_offer] received from viewer")
     print(f"[viewer_offer] type={req.type}, sdp_len={len(req.sdp)}")
@@ -57,57 +53,64 @@ async def viewer_offer(req: SDP):
     viewer_offer_store = req.dict()
     viewer_answer_store = None
 
-    sender_offer_store = None
-    sender_answer_store = None
+    # 새 offer가 들어왔으니 answer 대기는 다시 시작
+    answer_ready_event.clear()
+    offer_ready_event.set()
 
-    print("[viewer_offer] stored offer, notifying sender pollers")
-    sender_waiter.set()
+    print("[viewer_offer] stored offer, waiting for sender answer")
 
-    for i in range(300):
-        await asyncio.sleep(0.1)
-        if viewer_answer_store is not None:
-            print(f"[viewer_offer] got answer after {0.1*(i+1):.1f}s")
-            return viewer_answer_store
+    try:
+        await asyncio.wait_for(answer_ready_event.wait(), timeout=30.0)
+    except asyncio.TimeoutError:
+        print("[viewer_offer] timeout waiting for sender answer")
+        raise HTTPException(status_code=504, detail="timeout waiting for sender answer")
 
-    print("[viewer_offer] timeout waiting for sender answer")
-    raise HTTPException(status_code=504, detail="timeout waiting for sender answer")
+    if viewer_answer_store is None:
+        print("[viewer_offer] answer event set but answer store is empty")
+        raise HTTPException(status_code=500, detail="answer missing")
+
+    print("[viewer_offer] sender answer received, returning to viewer")
+    return viewer_answer_store
 
 
 @app.get("/sender_poll")
 async def sender_poll():
     global viewer_offer_store
+    global offer_ready_event
+
     print("[sender_poll] robot polling started")
 
-    for i in range(300):
-        await asyncio.sleep(0.1)
-        if viewer_offer_store is not None:
-            print(f"[sender_poll] found viewer offer after {0.1*(i+1):.1f}s")
-            offer = viewer_offer_store
-            viewer_offer_store = None
-            print(f"[sender_poll] delivering offer to robot, sdp_len={len(offer['sdp'])}, type={offer['type']}")
-            return offer
+    try:
+        await asyncio.wait_for(offer_ready_event.wait(), timeout=30.0)
+    except asyncio.TimeoutError:
+        print("[sender_poll] no viewer offer within polling window")
+        return JSONResponse(status_code=404, content={"detail": "no viewer offer"})
 
-    print("[sender_poll] no viewer offer within polling window")
-    return JSONResponse(status_code=404, content={"detail": "no viewer offer"})
+    if viewer_offer_store is None:
+        print("[sender_poll] offer event set but store is empty")
+        offer_ready_event.clear()
+        return JSONResponse(status_code=404, content={"detail": "no viewer offer"})
 
+    offer = viewer_offer_store
+    viewer_offer_store = None
+    offer_ready_event.clear()
 
-@app.get("/sender_poll")
-async def sender_poll():
-    global viewer_offer_store
-    print("[Signaling] Robot is polling for offers...") # 로봇이 접속하면 이 로그가 찍힙니다.
-    for _ in range(300):
-        await asyncio.sleep(0.1)
-        if viewer_offer_store is not None:
-            print("[Signaling] Offer found! Sending to robot.")
-            # Offer를 가져가면 서버에서는 비워줍니다 (중복 방지)
-            offer = viewer_offer_store
-            viewer_offer_store = None 
-            return offer
-    return JSONResponse(status_code=404, content={"detail": "no viewer offer"})
+    print(
+        f"[sender_poll] delivering offer to robot, "
+        f"sdp_len={len(offer['sdp'])}, type={offer['type']}"
+    )
+    return offer
 
 
 @app.post("/sender_answer")
 async def sender_answer(req: SDP):
     global viewer_answer_store
+    global answer_ready_event
+
+    print("[sender_answer] received from robot")
+    print(f"[sender_answer] type={req.type}, sdp_len={len(req.sdp)}")
+
     viewer_answer_store = req.dict()
+    answer_ready_event.set()
+
     return {"ok": True}

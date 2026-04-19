@@ -4,7 +4,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import httpx
 
 # 🔥 여기에 로봇 주소 고정
-ROBOT_URL = "http://192.168.0.10:8091"  
+ROBOT_URL = "http://192.168.0.24:8091"  
 
 
 def compute_run_yolo(mode: int, has_active_regions: bool) -> bool:

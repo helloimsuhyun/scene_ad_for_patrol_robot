@@ -934,7 +934,7 @@ def infer_event(
         if repr_mode in {"global_patch", "global_patch_with_aligned"}:
             top_patch_idx, top_patch_vals = get_top_p_patch_info(repr_mode, debug)
 
-            align_data = debug.get("align_debug", {}) if repr_mode == "global_patch_with_aligned" else {}
+            align_data = (debug.get("align_debug") or {}) if repr_mode == "global_patch_with_aligned" else {}
 
             patch_vis_all.append({
                 "top_patch_idx": top_patch_idx.detach().cpu().tolist()
