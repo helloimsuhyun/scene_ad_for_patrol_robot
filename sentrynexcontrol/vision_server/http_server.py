@@ -1735,17 +1735,20 @@ class StartAuthReq(BaseModel):
 async def start_auth(req: StartAuthReq):
     ts = req.timestamp or datetime.now().isoformat()
 
-    source_region_id = None
-    source_region_name = None
-
     async with app.state.db_lock:
-        if req.yolo_event_id:
-            yolo_event = sqlite_db.get_yolo_event(app.state.db, req.yolo_event_id)
-            if yolo_event is not None:
-                source_region_id = yolo_event.get("source_region_id")
-                source_region_name = yolo_event.get("source_region_name")
-
         pose = app.state.robot_pose or {}
+
+        x = pose.get("x")
+        y = pose.get("y")
+        yaw = pose.get("yaw")
+
+        source_region_id = None
+        source_region_name = None
+
+        if x is not None and y is not None:
+            source_region_id, source_region_name = find_region_from_pose(
+                app.state.db, x, y
+            )
 
         auth_event_id = sqlite_db.insert_auth_event(
             db=app.state.db,
@@ -1755,9 +1758,9 @@ async def start_auth(req: StartAuthReq):
             status="waiting_rfid",
             source_region_id=source_region_id,
             source_region_name=source_region_name,
-            x=pose.get("x"),
-            y=pose.get("y"),
-            yaw=pose.get("yaw"),
+            x=x,
+            y=y,
+            yaw=yaw,
         )
 
         auth_event = sqlite_db.get_auth_event(app.state.db, auth_event_id)
@@ -1832,7 +1835,6 @@ async def verify_rfid(
     }
 
 # 시간 내 인증 실패시 timeout 알리는 엔드포인트
-@app.post("/auth/timeout")
 @app.post("/auth/timeout")
 async def auth_timeout(
     auth_event_id: str = Form(...),
