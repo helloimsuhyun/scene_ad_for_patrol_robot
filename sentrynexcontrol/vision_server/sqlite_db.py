@@ -1368,17 +1368,29 @@ def update_auth_event_result(
     )
     db.commit()
 
-def set_auth_event_timeout(db, auth_event_id):
+def set_auth_event_timeout(db, auth_event_id, image_path=None):
     cur = db.cursor()
-    cur.execute(
-        """
-        UPDATE auth_events
-        SET status='timeout',
-            result_message='rfid timeout'
-        WHERE auth_event_id=?
-        """,
-        (auth_event_id,),
-    )
+
+    if image_path is None:
+        cur.execute(
+            """
+            UPDATE auth_events
+            SET status = 'timeout'
+            WHERE auth_event_id = ?
+            """,
+            (auth_event_id,),
+        )
+    else:
+        cur.execute(
+            """
+            UPDATE auth_events
+            SET status = 'timeout',
+                image_path = ?
+            WHERE auth_event_id = ?
+            """,
+            (image_path, auth_event_id),
+        )
+
     db.commit()
 
 def get_auth_event(db, auth_event_id):

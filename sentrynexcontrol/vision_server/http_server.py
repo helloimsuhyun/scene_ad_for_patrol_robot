@@ -1726,9 +1726,6 @@ class StartAuthReq(BaseModel):
     timestamp: Optional[str] = None
 
 
-class AuthTimeoutReq(BaseModel):
-    auth_event_id: str
-
 
 # ======================================================= 2차 인증 관련 endpoint
 
@@ -1836,18 +1833,44 @@ async def verify_rfid(
 
 # 시간 내 인증 실패시 timeout 알리는 엔드포인트
 @app.post("/auth/timeout")
-async def auth_timeout(req: AuthTimeoutReq):
+@app.post("/auth/timeout")
+async def auth_timeout(
+    auth_event_id: str = Form(...),
+    timestamp: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+):
+    ts = timestamp or datetime.now().isoformat()
+
+    image_path = None
+    image_url = None
+
+    if image is not None:
+        ext = Path(image.filename or "").suffix.lower() or ".jpg"
+        safe_ts = ts.replace(":", "-")
+        save_path = AUTH_EVENT_ROOT / f"{safe_ts}_{auth_event_id}{ext}"
+
+        data = await image.read()
+        if data:
+            save_path.write_bytes(data)
+            image_path = str(save_path)
+            image_url = f"/auth_images/{save_path.name}"
+
     async with app.state.db_lock:
-        row = sqlite_db.get_auth_event(app.state.db, req.auth_event_id)
+        row = sqlite_db.get_auth_event(app.state.db, auth_event_id)
         if row is None:
             raise HTTPException(status_code=404, detail="auth event not found")
 
-        sqlite_db.set_auth_event_timeout(app.state.db, req.auth_event_id)
-        updated = sqlite_db.get_auth_event(app.state.db, req.auth_event_id)
+        sqlite_db.set_auth_event_timeout(
+            app.state.db,
+            auth_event_id,
+            image_path=image_path,
+        )
+        updated = sqlite_db.get_auth_event(app.state.db, auth_event_id)
 
     return {
         "ok": True,
         "auth_event": updated,
+        "image_url": image_url,
     }
 
 # ================= [2차인증] GUI > 서버 조회 엔드포인트
