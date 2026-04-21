@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Optional, Sequence, Union, Dict, Any
 
 ISO8601 = str
+DEMO_MODE = True
 
 #random한 uuid 문자열 생성 - 고유 id
 def _uuid() -> str:
@@ -110,6 +111,34 @@ def init_db(db: sqlite3.Connection) -> None:
             cur.execute("ALTER TABLE yolo_events ADD COLUMN admin_label TEXT")
         except:
             pass
+    try:
+        cur.execute("SELECT tracking_person_id FROM yolo_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE yolo_events ADD COLUMN tracking_person_id TEXT")
+        except:
+            pass
+    
+    # 4. employees / auth_events 테이블 마이그레이션
+    try:
+        cur.execute("SELECT employee_id FROM employees LIMIT 1")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute("SELECT auth_event_id FROM auth_events LIMIT 1")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        cur.execute("SELECT x FROM auth_events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE auth_events ADD COLUMN x REAL")
+            cur.execute("ALTER TABLE auth_events ADD COLUMN y REAL")
+            cur.execute("ALTER TABLE auth_events ADD COLUMN yaw REAL")
+        except:
+            pass
 
     cur.executescript(
         """
@@ -199,6 +228,7 @@ def init_db(db: sqlite3.Connection) -> None:
         -- =========================
         CREATE TABLE IF NOT EXISTS yolo_events (
             yolo_event_id TEXT PRIMARY KEY,
+            tracking_person_id TEXT,
             timestamp TEXT NOT NULL,
             image_path TEXT,
 
@@ -264,6 +294,39 @@ def init_db(db: sqlite3.Connection) -> None:
         );
 
         -- =========================
+        -- employees: RFID -> 직원 매칭
+        -- =========================
+        CREATE TABLE IF NOT EXISTS employees (
+            employee_id      TEXT PRIMARY KEY,
+            name             TEXT NOT NULL,
+            rfid_uid         TEXT UNIQUE NOT NULL,
+            is_active        INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+            created_at       TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- =========================
+        -- auth_events: 인증 이벤트
+        -- =========================
+        CREATE TABLE IF NOT EXISTS auth_events (
+            auth_event_id        TEXT PRIMARY KEY,
+            tracking_person_id   TEXT,
+            yolo_event_id        TEXT,
+            employee_id          TEXT,
+            timestamp            TEXT NOT NULL,
+            status               TEXT NOT NULL,
+            rfid_uid             TEXT,
+            employee_name        TEXT,
+            result_message       TEXT,
+            image_path           TEXT,
+            source_region_id     INTEGER,
+            source_region_name   TEXT,
+            x REAL,
+            y REAL,
+            yaw REAL,
+            created_at           TEXT NOT NULL DEFAULT (datetime('now'))
+        );
+
+        -- =========================
         -- 인덱스 (GUI/조회 성능)
         -- =========================
         CREATE INDEX IF NOT EXISTS idx_events_place_time
@@ -305,57 +368,23 @@ def init_db(db: sqlite3.Connection) -> None:
 
         CREATE INDEX IF NOT EXISTS idx_yolo_regions_enabled
         ON yolo_regions(is_enabled);
+
+        CREATE INDEX IF NOT EXISTS idx_employees_rfid_uid
+        ON employees(rfid_uid);
+
+        CREATE INDEX IF NOT EXISTS idx_auth_events_time
+        ON auth_events(timestamp);
+
+        CREATE INDEX IF NOT EXISTS idx_auth_events_status
+        ON auth_events(status);
+
+        CREATE INDEX IF NOT EXISTS idx_auth_events_tracking_person_id
+        ON auth_events(tracking_person_id);
         """
     )
-    cur.executescript('''
-        -- =========================
-        -- yolo_events
-        -- =========================
-        CREATE TABLE IF NOT EXISTS yolo_events (
-            yolo_event_id TEXT PRIMARY KEY,
-            timestamp TEXT NOT NULL,
-            image_path TEXT,
-
-            x REAL,
-            y REAL,
-            yaw REAL,
-
-            person_count INTEGER NOT NULL DEFAULT 0,
-            event_type TEXT,
-
-            source_region_id INTEGER,
-            source_region_name TEXT,
-
-            dwell_time_sec REAL,
-
-
-            admin_checked INTEGER NOT NULL DEFAULT 0,
-            admin_label TEXT,
-
-            created_at TEXT DEFAULT CURRENT_TIMESTAMP
-        );
-
-        -- =========================
-        -- yolo 구역
-        -- =========================
-
-        CREATE TABLE IF NOT EXISTS yolo_regions (
-            region_id     INTEGER PRIMARY KEY AUTOINCREMENT,
-
-            name          TEXT NOT NULL,
-
-            x_min         REAL NOT NULL,
-            x_max         REAL NOT NULL,
-            y_min         REAL NOT NULL,
-            y_max         REAL NOT NULL,
-
-            is_enabled    INTEGER NOT NULL DEFAULT 1 CHECK (is_enabled IN (0,1)),
-
-            updated_at    TEXT NOT NULL
-        );
-
-''')
     db.commit()
+    if DEMO_MODE:
+        seed_demo_employees(db)
 
 
 # -------------------------
@@ -973,6 +1002,7 @@ def insert_yolo_event(
     db,
     timestamp,
     image_path=None,
+    tracking_person_id=None,
     x=None,
     y=None,
     yaw=None,
@@ -989,14 +1019,15 @@ def insert_yolo_event(
     cur.execute(
         """
         INSERT INTO yolo_events
-        (yolo_event_id, timestamp, image_path,
-         x, y, yaw,
-         person_count, event_type,
-         source_region_id, source_region_name, dwell_time_sec)
-        VALUES (?, ?,  ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        (yolo_event_id, tracking_person_id, timestamp, image_path,
+        x, y, yaw,
+        person_count, event_type,
+        source_region_id, source_region_name, dwell_time_sec)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             yeid,
+            tracking_person_id,
             timestamp,
             image_path,
             x,
@@ -1219,3 +1250,204 @@ def count_enabled_yolo_regions(db):
     )
     row = cur.fetchone()
     return int(row["cnt"]) if row else 0
+
+# ======================================================== 2차 인증 관련 DB 함수
+
+# 직원 DB는 고정으로 하드코딩 (데모용)
+def seed_demo_employees(db):
+    cur = db.cursor()
+
+    # 기존 값 제거
+    cur.execute("DELETE FROM employees")
+
+    # 등록 카드: 1,2,3만 사용
+    rows = [
+        ("E001", "Kim",  "49B73204", 1),
+        ("E002", "Lee",  "AC9DE33D", 1),
+        ("E003", "Park", "E9D9E33D", 1),
+    ]
+
+    cur.executemany(
+        """
+        INSERT INTO employees
+        (employee_id, name, rfid_uid, is_active)
+        VALUES (?, ?, ?, ?)
+        """,
+        rows,
+    )
+
+    db.commit()
+
+def get_employee_by_rfid(db, rfid_uid):
+    cur = db.cursor()
+    row = cur.execute(
+        """
+        SELECT *
+        FROM employees
+        WHERE rfid_uid = ?
+          AND is_active = 1
+        """,
+        (str(rfid_uid).strip().upper(),),
+    ).fetchone()
+
+    return dict(row) if row else None
+
+
+def insert_auth_event(
+    db,
+    timestamp,
+    tracking_person_id=None,
+    yolo_event_id=None,
+    status="waiting_rfid",
+    source_region_id=None,
+    source_region_name=None,
+    x=None,
+    y=None,
+    yaw=None,
+    auth_event_id=None,
+):
+    aeid = auth_event_id or _uuid()
+
+    cur = db.cursor()
+    cur.execute(
+        """
+        INSERT INTO auth_events
+        (auth_event_id, tracking_person_id, yolo_event_id,
+        timestamp, status,
+        source_region_id, source_region_name,
+        x, y, yaw)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            aeid,
+            tracking_person_id,
+            yolo_event_id,
+            timestamp,
+            status,
+            source_region_id,
+            source_region_name,
+            x,
+            y,
+            yaw,
+        ),
+    )
+    db.commit()
+    return aeid
+
+def update_auth_event_result(
+    db,
+    auth_event_id,
+    status,
+    employee_id=None,
+    rfid_uid=None,
+    employee_name=None,
+    result_message=None,
+    image_path=None,
+):
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE auth_events
+        SET employee_id=?,
+            status=?,
+            rfid_uid=?,
+            employee_name=?,
+            result_message=?,
+            image_path = COALESCE(?, image_path)
+        WHERE auth_event_id=?
+        """,
+        (
+            employee_id,
+            status,
+            rfid_uid,
+            employee_name,
+            result_message,
+            image_path,
+            auth_event_id,
+        ),
+    )
+    db.commit()
+
+def set_auth_event_timeout(db, auth_event_id):
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE auth_events
+        SET status='timeout',
+            result_message='rfid timeout'
+        WHERE auth_event_id=?
+        """,
+        (auth_event_id,),
+    )
+    db.commit()
+
+def get_auth_event(db, auth_event_id):
+    cur = db.cursor()
+    row = cur.execute(
+        """
+        SELECT *
+        FROM auth_events
+        WHERE auth_event_id=?
+        """,
+        (auth_event_id,),
+    ).fetchone()
+
+    return dict(row) if row else None
+
+def list_auth_events(
+    db,
+    since: Optional[str] = None,
+    limit: int = 50,
+    status: Optional[str] = None,
+):
+    cur = db.cursor()
+
+    if since is None and status is None:
+        rows = cur.execute(
+            """
+            SELECT *
+            FROM auth_events
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+
+    elif since is not None and status is None:
+        rows = cur.execute(
+            """
+            SELECT *
+            FROM auth_events
+            WHERE timestamp > ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (since, limit),
+        ).fetchall()
+
+    elif since is None and status is not None:
+        rows = cur.execute(
+            """
+            SELECT *
+            FROM auth_events
+            WHERE status = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (status, limit),
+        ).fetchall()
+
+    else:
+        rows = cur.execute(
+            """
+            SELECT *
+            FROM auth_events
+            WHERE timestamp > ?
+              AND status = ?
+            ORDER BY timestamp DESC
+            LIMIT ?
+            """,
+            (since, status, limit),
+        ).fetchall()
+
+    return [dict(r) for r in rows]
