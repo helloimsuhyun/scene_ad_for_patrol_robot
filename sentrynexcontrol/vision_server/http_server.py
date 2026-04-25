@@ -105,10 +105,13 @@ from .config import load_cfg
 SAVE_ROOT = Path("./recv")  # 이미지저장 root
 AUDIO_ROOT = Path("./recv_audio") # 오디오 저장 root
 PERSON_EVENT_ROOT = Path("./recv_person") # person event 저장 root
+AUTH_EVENT_ROOT = Path("./recv_auth") # 2차 인증 이벤트 저장 root
 
 SAVE_ROOT.mkdir(parents=True, exist_ok=True)
 AUDIO_ROOT.mkdir(parents=True, exist_ok=True)
 PERSON_EVENT_ROOT.mkdir(parents=True, exist_ok=True)
+AUTH_EVENT_ROOT.mkdir(parents=True, exist_ok=True)
+
 
 DB_PATH = Path("./recv/events.db") # db root
 
@@ -241,6 +244,7 @@ app.add_middleware(
 app.mount("/images", StaticFiles(directory=str(SAVE_ROOT)), name="images")
 app.mount("/audio", StaticFiles(directory=str(AUDIO_ROOT)), name="audio")
 app.mount("/person_images", StaticFiles(directory=str(PERSON_EVENT_ROOT)), name="person_images")
+app.mount("/auth_images", StaticFiles(directory=str(AUTH_EVENT_ROOT)), name="auth_images")
 
 # --------------------------------------------------------------------------------------------------------
 # 추론함수 호출 ------------------------------------------------
@@ -1354,6 +1358,7 @@ async def upload_person_event(
     yolo_event_id = str(uuid4())
     ts = event_obj.get("event_time") or datetime.now().isoformat()
     safe_ts = ts.replace(":", "-")
+    tracking_person_id = event_obj.get("person_id")   
 
     ext = Path(image.filename or "").suffix.lower() or ".jpg"
     save_path = PERSON_EVENT_ROOT / f"{safe_ts}_{yolo_event_id}{ext}"
@@ -1381,6 +1386,7 @@ async def upload_person_event(
             yolo_event_id=yolo_event_id,
             timestamp=ts,
             image_path=str(save_path),
+            tracking_person_id=str(tracking_person_id) if tracking_person_id is not None else None,  
             x=pose.get("x"),
             y=pose.get("y"),
             yaw=pose.get("yaw"),
@@ -1710,3 +1716,216 @@ async def create_mock_yolo_event():
         )
     return {"ok": True, "event_id": eid}
 
+
+# =========================================== 2차 인증 관련 엔드포인트 추가
+# ====================================================================
+
+class StartAuthReq(BaseModel):
+    tracking_person_id: Optional[str] = None
+    yolo_event_id: Optional[str] = None
+    timestamp: Optional[str] = None
+
+
+
+# ======================================================= 2차 인증 관련 endpoint
+
+# =========== 로봇 > 서버 엔드포인트 
+# 1. POST /auth/start : 2차 인증 시작시에 로봇이 알리는 endpoint
+@app.post("/auth/start")
+async def start_auth(req: StartAuthReq):
+    ts = req.timestamp or datetime.now().isoformat()
+
+    async with app.state.db_lock:
+        pose = app.state.robot_pose or {}
+
+        x = pose.get("x")
+        y = pose.get("y")
+        yaw = pose.get("yaw")
+
+        source_region_id = None
+        source_region_name = None
+
+        if x is not None and y is not None:
+            source_region_id, source_region_name = find_region_from_pose(
+                app.state.db, x, y
+            )
+
+        auth_event_id = sqlite_db.insert_auth_event(
+            db=app.state.db,
+            timestamp=ts,
+            tracking_person_id=req.tracking_person_id,
+            yolo_event_id=req.yolo_event_id,
+            status="waiting_rfid",
+            source_region_id=source_region_id,
+            source_region_name=source_region_name,
+            x=x,
+            y=y,
+            yaw=yaw,
+        )
+
+        auth_event = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+
+    return {
+        "ok": True,
+        "auth_event_id": auth_event_id,
+        "auth_event": auth_event,
+    }
+
+# 2차 인증 ID 판정 엔드포인트
+@app.post("/auth/rfid")
+async def verify_rfid(
+    auth_event_id: str = Form(...),
+    rfid_uid: str = Form(...),
+    timestamp: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+):
+    ts = timestamp or datetime.now().isoformat()
+    uid = str(rfid_uid).strip().upper()
+
+    image_path = None
+    image_url = None
+
+    if image is not None:
+        ext = Path(image.filename or "").suffix.lower() or ".jpg"
+        safe_ts = ts.replace(":", "-")
+        save_path = AUTH_EVENT_ROOT / f"{safe_ts}_{auth_event_id}{ext}"
+
+        data = await image.read()
+        if data:
+            save_path.write_bytes(data)
+            image_path = str(save_path)
+            image_url = f"/auth_images/{save_path.name}"
+
+    async with app.state.db_lock:
+        auth_event = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+        if auth_event is None:
+            raise HTTPException(status_code=404, detail="auth event not found")
+
+        emp = sqlite_db.get_employee_by_rfid(app.state.db, uid)
+
+        if emp is None:
+            sqlite_db.update_auth_event_result(
+                db=app.state.db,
+                auth_event_id=auth_event_id,
+                status="fail",
+                employee_id=None,
+                rfid_uid=uid,
+                employee_name=None,
+                result_message="unregistered or inactive card",
+                image_path=image_path,
+            )
+        else:
+            sqlite_db.update_auth_event_result(
+                db=app.state.db,
+                auth_event_id=auth_event_id,
+                status="success",
+                employee_id=emp["employee_id"],
+                rfid_uid=uid,
+                employee_name=emp["name"],
+                result_message="authorized employee",
+                image_path=image_path,
+            )
+
+        updated = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+
+    return {
+        "ok": True,
+        "auth_event": updated,
+        "image_url": image_url,
+    }
+
+# 시간 내 인증 실패시 timeout 알리는 엔드포인트
+@app.post("/auth/timeout")
+async def auth_timeout(
+    auth_event_id: str = Form(...),
+    timestamp: Optional[str] = Form(None),
+    image: Optional[UploadFile] = File(None),
+):
+    ts = timestamp or datetime.now().isoformat()
+
+    image_path = None
+    image_url = None
+
+    if image is not None:
+        ext = Path(image.filename or "").suffix.lower() or ".jpg"
+        safe_ts = ts.replace(":", "-")
+        save_path = AUTH_EVENT_ROOT / f"{safe_ts}_{auth_event_id}{ext}"
+
+        data = await image.read()
+        if data:
+            save_path.write_bytes(data)
+            image_path = str(save_path)
+            image_url = f"/auth_images/{save_path.name}"
+
+    async with app.state.db_lock:
+        row = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="auth event not found")
+
+        sqlite_db.set_auth_event_timeout(
+            app.state.db,
+            auth_event_id,
+            image_path=image_path,
+        )
+        updated = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+
+    return {
+        "ok": True,
+        "auth_event": updated,
+        "image_url": image_url,
+    }
+
+# ================= [2차인증] GUI > 서버 조회 엔드포인트
+
+@app.get("/auth_events")
+async def get_auth_events(
+    since: Optional[str] = None,
+    limit: int = 50,
+    status: Optional[str] = None,
+):
+    """
+    인증 이벤트 polling용.
+    - since가 없으면 최근 인증 이벤트 목록 반환
+    - since가 있으면 그 시각 이후의 인증 이벤트만 반환
+    - status가 있으면 waiting_rfid / success / fail / timeout 필터 가능
+    """
+    async with app.state.db_lock:
+        rows = sqlite_db.list_auth_events(
+            app.state.db,
+            since=since,
+            limit=limit,
+            status=status,
+        )
+
+    out = []
+    for r in rows:
+        item = dict(r)
+        if item.get("image_path"):
+            item["image_url"] = f"/auth_images/{Path(item['image_path']).name}"
+        else:
+            item["image_url"] = None
+        out.append(item)
+
+    return {
+        "ok": True,
+        "auth_events": out,
+    }
+
+
+@app.get("/auth_events/{auth_event_id}")
+async def get_auth_event_detail(auth_event_id: str):
+    async with app.state.db_lock:
+        row = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="auth event not found")
+
+    item = dict(row)
+    if item.get("image_path"):
+        item["image_url"] = f"/auth_images/{Path(item['image_path']).name}"
+    else:
+        item["image_url"] = None
+
+    return {
+        "ok": True,
+        "auth_event": item,
+    }
