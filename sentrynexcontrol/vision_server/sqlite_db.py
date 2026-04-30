@@ -63,6 +63,17 @@ def init_db(db: sqlite3.Connection) -> None:
             cur.execute("ALTER TABLE places ADD COLUMN is_active INTEGER NOT NULL DEFAULT 1")
         except:
             pass
+    
+    try:
+        cur.execute("SELECT place_type FROM places LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("""
+                ALTER TABLE places
+                ADD COLUMN place_type TEXT NOT NULL DEFAULT 'capture'
+            """)
+        except:
+            pass
     # 3. yolo_events 테이블 마이그레이션
     try:
         cur.execute("SELECT event_type FROM yolo_events LIMIT 1")
@@ -213,6 +224,8 @@ def init_db(db: sqlite3.Connection) -> None:
             patrol_enabled     INTEGER NOT NULL DEFAULT 1 CHECK (patrol_enabled IN (0,1)),
             patrol_order       INTEGER NOT NULL DEFAULT 0,
             is_active          INTEGER NOT NULL DEFAULT 1 CHECK (is_active IN (0,1)),
+
+            place_type TEXT NOT NULL DEFAULT 'capture',
 
             mode               TEXT NOT NULL DEFAULT 'idle'
                                 CHECK (mode IN ('idle', 'bank', 'th_calib', 'query')),
@@ -631,6 +644,7 @@ def get_place(db, place_id: str):
     cur.execute("""
         SELECT place_id, display_name, x, y, yaw,
             patrol_enabled, patrol_order, is_active,
+            place_type,
             mode, need_calibration, updated_at
         FROM places
         WHERE place_id = ?
@@ -646,6 +660,7 @@ def list_places(db, active_only: bool = True):
         cur.execute("""
             SELECT place_id, display_name, x, y, yaw,
                 patrol_enabled, patrol_order, is_active,
+                place_type,
                 mode, need_calibration, updated_at
             FROM places
             WHERE is_active = 1
@@ -655,6 +670,7 @@ def list_places(db, active_only: bool = True):
         cur.execute("""
             SELECT place_id, display_name, x, y, yaw,
                 patrol_enabled, patrol_order, is_active,
+                place_type,
                 mode, need_calibration, updated_at
             FROM places
             ORDER BY patrol_order ASC, place_id ASC
@@ -866,12 +882,9 @@ def reactivate_place(db, place_id: str):
 
 
 def list_patrol_places(db):
-    """
-    현재 순찰 waypoint로 지정된 place들을 patrol_order 기준으로 반환
-    """
     cur = db.cursor()
     cur.execute("""
-        SELECT place_id, display_name, x, y, yaw, patrol_order
+        SELECT place_id, display_name, x, y, yaw, patrol_order, place_type
         FROM places
         WHERE is_active = 1
           AND patrol_enabled = 1
@@ -1540,3 +1553,66 @@ def get_latest_yolo_event(db, tracking_person_id=None):
     ).fetchone()
 
     return dict(row) if row else None
+
+# ================================================================ 경유점 추가 
+
+def generate_unique_waypoint_id(db, prefix: str = "W") -> str:
+    cur = db.cursor()
+
+    rows = cur.execute(
+        """
+        SELECT place_id
+        FROM places
+        WHERE place_id LIKE ?
+        """,
+        (f"{prefix}%",),
+    ).fetchall()
+
+    max_num = 0
+
+    for r in rows:
+        pid = r["place_id"]
+        tail = pid[len(prefix):]
+
+        if tail.isdigit():
+            num = int(tail)
+            if num > max_num:
+                max_num = num
+
+    return f"{prefix}{max_num + 1:03d}"
+
+# 사진을 찍지 않고 경우만 하는 place 위한 db 함수
+def insert_gui_waypoint(
+    db,
+    place_id: str,
+    x: float,
+    y: float,
+    yaw: float,
+    display_name: Optional[str] = None,
+    patrol_enabled: bool = True,
+    patrol_order: Optional[int] = None,
+):
+    now = datetime.now().isoformat()
+
+    if patrol_order is None:
+        patrol_order = get_next_patrol_order(db)
+
+    cur = db.cursor()
+    cur.execute("""
+        INSERT INTO places
+        (place_id, display_name, x, y, yaw,
+         patrol_enabled, patrol_order, is_active,
+         place_type, mode, need_calibration, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 1,
+                'waypoint', 'idle', 0, ?)
+    """, (
+        str(place_id),
+        display_name or str(place_id),
+        float(x),
+        float(y),
+        float(yaw),
+        1 if patrol_enabled else 0,
+        int(patrol_order),
+        now,
+    ))
+    db.commit()

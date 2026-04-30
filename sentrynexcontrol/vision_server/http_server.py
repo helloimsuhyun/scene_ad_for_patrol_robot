@@ -1972,3 +1972,43 @@ async def update_auth_event_label(auth_event_id: str, req: UpdateAuthEventLabelR
         "ok": True,
         "auth_event": updated,
     }
+
+
+# ======================================================= 경유점 위한 엔드포인트 추가
+class CreateGuiWaypointReq(BaseModel):
+    place_id: Optional[str] = None
+    x: float
+    y: float
+    yaw: float = 0.0
+    display_name: Optional[str] = None
+    patrol_enabled: bool = True
+
+@app.post("/gui/waypoints")
+async def create_gui_waypoint(req: CreateGuiWaypointReq):
+    async with app.state.db_lock:
+        if req.place_id is None or not req.place_id.strip():
+            place_id = sqlite_db.generate_unique_waypoint_id(app.state.db)
+        else:
+            place_id = req.place_id.strip()
+
+        existing = sqlite_db.get_place(app.state.db, place_id)
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="place_id already exists")
+
+        sqlite_db.insert_gui_waypoint(
+            db=app.state.db,
+            place_id=place_id,
+            x=req.x,
+            y=req.y,
+            yaw=req.yaw,
+            display_name=req.display_name or place_id,
+            patrol_enabled=req.patrol_enabled,
+        )
+
+        place = sqlite_db.get_place(app.state.db, place_id)
+
+    return {
+        "ok": True,
+        "status": "gui_waypoint_created",
+        "place": place,
+    }
