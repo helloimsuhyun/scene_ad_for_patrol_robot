@@ -1026,7 +1026,7 @@ async def get_robot_goal():
 class RobotCommandReq(BaseModel):
     command: str
     timestamp: Optional[str] = None
-    
+
 
 # ------------------------------------ GUI > 서버 로봇 주행명령 endpoint
 @app.post("/robot/command")
@@ -1747,6 +1747,16 @@ async def start_auth(req: StartAuthReq):
     async with app.state.db_lock:
         pose = app.state.robot_pose or {}
 
+        linked_yolo_event_id = req.yolo_event_id
+
+        if linked_yolo_event_id is None:
+            latest = sqlite_db.get_latest_yolo_event(
+                app.state.db,
+                tracking_person_id=req.tracking_person_id,
+            )
+            if latest is not None:
+                linked_yolo_event_id = latest["yolo_event_id"]
+
         x = pose.get("x")
         y = pose.get("y")
         yaw = pose.get("yaw")
@@ -1763,7 +1773,7 @@ async def start_auth(req: StartAuthReq):
             db=app.state.db,
             timestamp=ts,
             tracking_person_id=req.tracking_person_id,
-            yolo_event_id=req.yolo_event_id,
+            yolo_event_id=linked_yolo_event_id,
             status="waiting_rfid",
             source_region_id=source_region_id,
             source_region_name=source_region_name,
@@ -1937,4 +1947,68 @@ async def get_auth_event_detail(auth_event_id: str):
     return {
         "ok": True,
         "auth_event": item,
+    }
+
+class UpdateAuthEventLabelReq(BaseModel):
+    admin_label: Optional[str] = None
+
+
+@app.patch("/auth_events/{auth_event_id}/label")
+async def update_auth_event_label(auth_event_id: str, req: UpdateAuthEventLabelReq):
+    async with app.state.db_lock:
+        row = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+        if row is None:
+            raise HTTPException(status_code=404, detail="auth event not found")
+
+        sqlite_db.set_auth_event_admin_label(
+            app.state.db,
+            auth_event_id,
+            req.admin_label,
+        )
+
+        updated = sqlite_db.get_auth_event(app.state.db, auth_event_id)
+
+    return {
+        "ok": True,
+        "auth_event": updated,
+    }
+
+
+# ======================================================= 경유점 위한 엔드포인트 추가
+class CreateGuiWaypointReq(BaseModel):
+    place_id: Optional[str] = None
+    x: float
+    y: float
+    yaw: float = 0.0
+    display_name: Optional[str] = None
+    patrol_enabled: bool = True
+
+@app.post("/gui/waypoints")
+async def create_gui_waypoint(req: CreateGuiWaypointReq):
+    async with app.state.db_lock:
+        if req.place_id is None or not req.place_id.strip():
+            place_id = sqlite_db.generate_unique_waypoint_id(app.state.db)
+        else:
+            place_id = req.place_id.strip()
+
+        existing = sqlite_db.get_place(app.state.db, place_id)
+        if existing is not None:
+            raise HTTPException(status_code=409, detail="place_id already exists")
+
+        sqlite_db.insert_gui_waypoint(
+            db=app.state.db,
+            place_id=place_id,
+            x=req.x,
+            y=req.y,
+            yaw=req.yaw,
+            display_name=req.display_name or place_id,
+            patrol_enabled=req.patrol_enabled,
+        )
+
+        place = sqlite_db.get_place(app.state.db, place_id)
+
+    return {
+        "ok": True,
+        "status": "gui_waypoint_created",
+        "place": place,
     }
