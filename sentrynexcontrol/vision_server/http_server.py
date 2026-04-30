@@ -903,6 +903,7 @@ class TeachPlaceReq(BaseModel):
     patrol_enabled: bool = True
     patrol_order: Optional[int] = None
 
+
 #로봇 교시 유틸
 @app.post("/robot/teach")
 async def teach_place(req: TeachPlaceReq):
@@ -1025,6 +1026,7 @@ async def get_robot_goal():
 class RobotCommandReq(BaseModel):
     command: str
     timestamp: Optional[str] = None
+    
 
 # ------------------------------------ GUI > 서버 로봇 주행명령 endpoint
 @app.post("/robot/command")
@@ -1089,6 +1091,14 @@ async def upload_audio_event(
     save_path.write_bytes(data)
 
     async with app.state.db_lock:
+        source_region_id = None
+        source_region_name = None
+
+        if x is not None and y is not None:
+            source_region_id, source_region_name = find_region_from_pose(
+                app.state.db, x, y
+            )
+
         sqlite_db.insert_audio_event(
             db=app.state.db,
             audio_event_id=audio_event_id,
@@ -1099,6 +1109,8 @@ async def upload_audio_event(
             yaw=yaw,
             doa=doa,
             model_label=model_label,
+            source_region_id=source_region_id,
+            source_region_name=source_region_name,
         )
 
     return {
@@ -1225,7 +1237,7 @@ async def update_audio_event_label(audio_event_id: str, req: UpdateAudioLabelReq
         "audio_event": updated,
     }
 
-# ======================================= 순찰 프리셋 및 스케줄링 엔드포인트
+# ================================================= 순찰 프리셋 및 스케줄링 엔드포인트
 
 class CreatePresetReq(BaseModel):
     name: str
@@ -1326,7 +1338,6 @@ async def run_scheduler_daemon(app: FastAPI):
 
 
 # =============================================================== YOLO 관련 이벤트 ( 이벤트 수신 / 풀링 / 라벨링 )
-
 def find_region_from_pose(db, x, y):
     cur = db.cursor()
     rows = cur.execute(
@@ -1726,9 +1737,7 @@ class StartAuthReq(BaseModel):
     timestamp: Optional[str] = None
 
 
-
 # ======================================================= 2차 인증 관련 endpoint
-
 # =========== 로봇 > 서버 엔드포인트 
 # 1. POST /auth/start : 2차 인증 시작시에 로봇이 알리는 endpoint
 @app.post("/auth/start")

@@ -581,15 +581,6 @@ def calibrate_place(bank_root, plc_idx, global_model, cc_backbone, verifier_back
         vpr_model = vpr_model
         )
 
-    print("[CALIB-RAW] n =", len(scores))
-    print("[CALIB-RAW] min/max =", float(np.min(scores)), float(np.max(scores)))
-    print("[CALIB-RAW] median =", float(np.median(scores)))
-    mad = float(np.median(np.abs(scores - np.median(scores))))
-    print("[CALIB-RAW] mad =", mad)
-    print("[CALIB-RAW] thr =", float(thr))
-    print("[CALIB-RAW] top5 =", sorted([float(x) for x in scores])[-5:])
-
-    
     return thr, scores, thr_path
 
 @torch.inference_mode()
@@ -712,6 +703,37 @@ def compute_and_save_threshold(
             if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         ])
 
+        min_th_calib_images = int(calib_cfg.get("min_th_calib_images", 5))
+        if len(th_imgs) < min_th_calib_images:
+            print(
+                f"[WARN] th_calib images too few: "
+                f"{len(th_imgs)} < {min_th_calib_images} → skip calib, use floor"
+            )
+
+            scores = np.asarray([], dtype=np.float32)
+            thr = float(threshold_floor)
+            method = "floor_fallback"
+
+            created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            out = {
+                "plc_idx": plc_idx,
+                "repr_mode": repr_mode,
+                "k": k,
+                "method": method,
+                "threshold": float(thr),
+                "num_th": 0,
+                "created_at": created_at,
+            }
+
+            thr_path = bank_root / plc_idx / "threshold.json"
+            thr_path.write_text(
+                json.dumps(out, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+
+            return float(thr), scores, thr_path
+
         if max_imgs > 0:
             th_imgs = th_imgs[:max_imgs]
 
@@ -763,7 +785,11 @@ def compute_and_save_threshold(
             )
 
         if len(final_scores) == 0:
-            raise RuntimeError("aligned calib failed: no scores collected")
+            print("[WARN] all calib failed → fallback to threshold_floor")
+
+            scores = np.asarray([], dtype=np.float32)
+            thr = float(threshold_floor)
+            method = "floor_fallback"
 
         scores = np.asarray(final_scores, dtype=np.float32)
 
