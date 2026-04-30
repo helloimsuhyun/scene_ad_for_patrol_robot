@@ -140,6 +140,16 @@ def init_db(db: sqlite3.Connection) -> None:
         except:
             pass
 
+    try:
+        cur.execute("SELECT source_region_id FROM audio_events LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE audio_events ADD COLUMN source_region_id INTEGER")
+
+    try:
+        cur.execute("SELECT source_region_name FROM audio_events LIMIT 1")
+    except sqlite3.OperationalError:
+        cur.execute("ALTER TABLE audio_events ADD COLUMN source_region_name TEXT")
+
     cur.executescript(
         """
         -- =========================
@@ -216,6 +226,9 @@ def init_db(db: sqlite3.Connection) -> None:
 
             doa REAL,
             model_label TEXT,
+
+            source_region_id INTEGER,
+            source_region_name TEXT,
 
             admin_checked INTEGER NOT NULL DEFAULT 0,
             admin_label TEXT,
@@ -868,16 +881,23 @@ def insert_audio_event(
     doa: Optional[float] = None,
     model_label: Optional[str] = None,
     audio_event_id: Optional[str] = None,
+    source_region_id=None,
+    source_region_name=None,
 ) -> str:
     aid = audio_event_id or _uuid()
     cur = db.cursor()
     cur.execute(
         """
         INSERT INTO audio_events
-        (audio_event_id, timestamp, audio_path, x, y, yaw, doa, model_label)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        (audio_event_id, timestamp, audio_path, x, y, yaw, doa, model_label,
+        source_region_id, source_region_name)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (aid, timestamp, audio_path, x, y, yaw, doa, model_label),
+        (
+            aid, timestamp, audio_path,
+            x, y, yaw, doa, model_label,
+            source_region_id, source_region_name
+        ),
     )
     db.commit()
     return aid

@@ -712,6 +712,37 @@ def compute_and_save_threshold(
             if p.suffix.lower() in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}
         ])
 
+        min_th_calib_images = int(calib_cfg.get("min_th_calib_images", 5))
+        if len(th_imgs) < min_th_calib_images:
+            print(
+                f"[WARN] th_calib images too few: "
+                f"{len(th_imgs)} < {min_th_calib_images} → skip calib, use floor"
+            )
+
+            scores = np.asarray([], dtype=np.float32)
+            thr = float(threshold_floor)
+            method = "floor_fallback"
+
+            created_at = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            out = {
+                "plc_idx": plc_idx,
+                "repr_mode": repr_mode,
+                "k": k,
+                "method": method,
+                "threshold": float(thr),
+                "num_th": 0,
+                "created_at": created_at,
+            }
+
+            thr_path = bank_root / plc_idx / "threshold.json"
+            thr_path.write_text(
+                json.dumps(out, indent=2, ensure_ascii=False),
+                encoding="utf-8"
+            )
+
+            return float(thr), scores, thr_path
+
         if max_imgs > 0:
             th_imgs = th_imgs[:max_imgs]
 
@@ -763,7 +794,11 @@ def compute_and_save_threshold(
             )
 
         if len(final_scores) == 0:
-            raise RuntimeError("aligned calib failed: no scores collected")
+            print("[WARN] all calib failed → fallback to threshold_floor")
+
+            scores = np.asarray([], dtype=np.float32)
+            thr = float(threshold_floor)
+            method = "floor_fallback"
 
         scores = np.asarray(final_scores, dtype=np.float32)
 

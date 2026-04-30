@@ -54,7 +54,8 @@ DEFAULT_CFG = {
             "calibration": {
                 "threshold_param": 97,
                 "threshold_floor": 0.0,
-                "max_calib_images": 100
+                "max_calib_images": 100,
+                "min_th_calib_images": 5
             }
         },
 
@@ -85,7 +86,8 @@ DEFAULT_CFG = {
             "calibration": {
                 "threshold_param": 97,
                 "threshold_floor": 0.45,
-                "max_calib_images": 100
+                "max_calib_images": 100,
+                "min_th_calib_images": 5
             }
         }
     }
