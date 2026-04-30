@@ -581,15 +581,6 @@ def calibrate_place(bank_root, plc_idx, global_model, cc_backbone, verifier_back
         vpr_model = vpr_model
         )
 
-    print("[CALIB-RAW] n =", len(scores))
-    print("[CALIB-RAW] min/max =", float(np.min(scores)), float(np.max(scores)))
-    print("[CALIB-RAW] median =", float(np.median(scores)))
-    mad = float(np.median(np.abs(scores - np.median(scores))))
-    print("[CALIB-RAW] mad =", mad)
-    print("[CALIB-RAW] thr =", float(thr))
-    print("[CALIB-RAW] top5 =", sorted([float(x) for x in scores])[-5:])
-
-    
     return thr, scores, thr_path
 
 @torch.inference_mode()
