@@ -178,6 +178,9 @@ async def lifespan(app: FastAPI):
 
     # GPU lock
     app.state.gpu_lock = asyncio.Lock()
+    # inference queue
+    app.state.inference_queue = asyncio.Queue()
+    app.state.inference_worker_task = None
 
     app.state.calib_progress = {
     "total": 0,
@@ -377,7 +380,6 @@ async def inference_worker_loop(app: FastAPI):
 
                 if event is None:
                     print(f"[INFERENCE WORKER] event not found: {event_id}", flush=True)
-                    app.state.inference_queue.task_done()
                     continue
 
                 frames = sqlite_db.list_frames(app.state.db, event_id)
@@ -593,8 +595,6 @@ async def place_imgs(
         out_path.write_bytes(data)
         saved.append(str(out_path))
 
-    resp_status = "saved"
-
     if mode in ("bank", "th_calib"):
         # th.json 존재하는데, ref bank 업데이트하면 calibaration 필요로 db에 기록
         if th_path.exists():
@@ -625,7 +625,7 @@ async def place_imgs(
     return JSONResponse(
         {
             "ok": True,
-            "status": resp_status,
+            "status": "accepted",
             "place_id": place_id,
             "applied_mode": mode,
             "n_images": len(saved),
