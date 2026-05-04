@@ -27,16 +27,19 @@ dependencies:
   - python-multipart
   - requests
 
+  # Streaming / media
+  - av
+
   - pip:
       # WebRTC / streaming
       - aiortc
-      - av
 
       # Deep learning / feature extraction utilities
       - timm
       - transformers
       - safetensors
       - einops
+      - kornia
       - fast-pytorch-kmeans
 
       # Optional project utilities
