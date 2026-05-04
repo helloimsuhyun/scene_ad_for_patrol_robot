@@ -170,12 +170,7 @@ flutter build web
 빌드 결과 폴더로 이동합니다.
 
 ```bash
-cd build/web
-```
-
-Python HTTP 서버를 실행합니다.
-
-```bash
+cd /home/choisuhyun/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
 python3 -m http.server 8080
 ```
 

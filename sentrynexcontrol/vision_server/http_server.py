@@ -72,7 +72,6 @@ import json
 import asyncio
 from contextlib import asynccontextmanager
 from PIL import Image
-import io
 import numpy as np
 import shutil
 from uuid import uuid4
@@ -227,6 +226,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(push_yolo_config_to_robot(app, sqlite_db))
     asyncio.create_task(push_audio_config_to_robot(app, sqlite_db))
     app.state.scheduler_task = asyncio.create_task(run_scheduler_daemon(app))
+    
+    app.state.inference_worker_task = asyncio.create_task(
+        inference_worker_loop(app)
+    )
 
     yield  # -------------
 
@@ -243,8 +246,19 @@ async def lifespan(app: FastAPI):
                 pass
     except Exception as e:
         print(f"[SHUTDOWN WARN] scheduler_task cleanup failed: {e}")
+    
+    # 2) 이미지 추론 큐 정리
+    try:
+        if getattr(app.state, "inference_worker_task", None):
+            app.state.inference_worker_task.cancel()
+            try:
+                await app.state.inference_worker_task
+            except asyncio.CancelledError:
+                pass
+    except Exception as e:
+        print(f"[SHUTDOWN WARN] inference_worker_task cleanup failed: {e}")
 
-    # 2) calibration task 정리
+    # 3) calibration task 정리
     try:
         if getattr(app.state, "calib_task", None):
             app.state.calib_task.cancel()
@@ -255,7 +269,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[SHUTDOWN WARN] calib_task cleanup failed: {e}")
 
-    # 3) GPU 모델 참조 제거
+    # 4) GPU 모델 참조 제거
     try:
         engine = getattr(app.state, "engine", None)
 
@@ -276,7 +290,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[SHUTDOWN WARN] engine cleanup failed: {e}")
 
-    # 4) Python object / CUDA cache 정리
+    # 5) Python object / CUDA cache 정리
     try:
         import gc
         gc.collect()
@@ -290,7 +304,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[SHUTDOWN WARN] cuda cleanup failed: {e}")
 
-    # 5) DB close
+    # 6) DB close
     try:
         app.state.db.close()
         print("DB closed")
@@ -332,6 +346,108 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         cfg=cfg,
         vpr_model=engine.get("vpr_model"),
     )
+
+def load_event_images_bgr(image_paths: List[str]):
+    imgs_bgr = []
+
+    for p in image_paths:
+        path = Path(p)
+
+        if not path.exists():
+            raise FileNotFoundError(f"image not found: {path}")
+
+        rgb = np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+        bgr = rgb[:, :, ::-1].copy()
+        imgs_bgr.append(bgr)
+
+    return imgs_bgr
+
+
+async def inference_worker_loop(app: FastAPI):
+    print("[INFERENCE WORKER] started", flush=True)
+
+    while True:
+        event_id = None
+
+        try:
+            event_id = await app.state.inference_queue.get()
+
+            async with app.state.db_lock:
+                event = sqlite_db.get_event(app.state.db, event_id)
+
+                if event is None:
+                    print(f"[INFERENCE WORKER] event not found: {event_id}", flush=True)
+                    app.state.inference_queue.task_done()
+                    continue
+
+                frames = sqlite_db.list_frames(app.state.db, event_id)
+                image_paths = [f["image_path"] for f in frames]
+
+                meta_obj = {
+                    "place_id": event["place_id"],
+                    "timestamp": event["captured_at"],
+                    "event_id": event_id,
+                }
+
+            imgs_bgr = load_event_images_bgr(image_paths)
+
+            async with app.state.gpu_lock:
+                result = await asyncio.to_thread(
+                    run_inference_event,
+                    imgs_bgr,
+                    meta_obj,
+                    app.state.engine,
+                )
+
+            async with app.state.db_lock:
+                sqlite_db.update_frame_scores(
+                    app.state.db,
+                    event_id,
+                    result["frame_scores"],
+                )
+
+                sqlite_db.update_event_result(
+                    app.state.db,
+                    event_id=event_id,
+                    anomaly_flag=int(result["anomaly_flag"]),
+                    anomaly_score=float(result["event_score"]),
+                    threshold_used=float(result["threshold"]),
+                    ref_bank_id=result.get("ref_bank_id"),
+                    ref_topk_json=result.get("ref_topk_json"),
+                    summary_text=result.get("summary"),
+                )
+
+            print(f"[INFERENCE WORKER] done event_id={event_id}", flush=True)
+
+        except asyncio.CancelledError:
+            print("[INFERENCE WORKER] cancelled", flush=True)
+            break
+
+        except Exception as e:
+            print(f"[INFERENCE WORKER ERROR] event_id={event_id}, exc={e}", flush=True)
+
+            if event_id is not None:
+                try:
+                    async with app.state.db_lock:
+                        sqlite_db.update_event_result(
+                            app.state.db,
+                            event_id=event_id,
+                            anomaly_flag=-1,
+                            anomaly_score=0.0,
+                            threshold_used=0.0,
+                            ref_bank_id=None,
+                            ref_topk_json=None,
+                            summary_text=f"inference_failed: {e}",
+                        )
+                except Exception as db_e:
+                    print(f"[INFERENCE WORKER DB ERROR] {db_e}", flush=True)
+
+        finally:
+            if event_id is not None:
+                try:
+                    app.state.inference_queue.task_done()
+                except ValueError:
+                    pass
 
 
 # 임계치 업데이트 함수 호출----------------------------------
@@ -468,7 +584,6 @@ async def place_imgs(
 
     # 파일 저장
     saved = []
-    imgs_bgr = [] 
 
     for i, uf in enumerate(images):
         ext = Path(uf.filename).suffix.lower() or ".jpg"
@@ -477,11 +592,6 @@ async def place_imgs(
         data = await uf.read()
         out_path.write_bytes(data)
         saved.append(str(out_path))
-
-        if mode == "query": #바로 메모리 끌고와서 추론할 준비
-            rgb = np.array(Image.open(io.BytesIO(data)).convert("RGB"), dtype=np.uint8)
-            bgr = rgb[:, :, ::-1].copy()  
-            imgs_bgr.append(bgr)
 
     resp_status = "saved"
 
@@ -510,26 +620,7 @@ async def place_imgs(
             )
         
         #추론 
-        async with app.state.gpu_lock:
-            result = await asyncio.to_thread(
-                run_inference_event,
-                imgs_bgr,
-                meta_obj,
-                app.state.engine
-            )
-
-        async with app.state.db_lock:
-            sqlite_db.update_frame_scores(app.state.db, event_id, result["frame_scores"])
-            sqlite_db.update_event_result(
-                app.state.db,
-                event_id=event_id,
-                anomaly_flag=int(result["anomaly_flag"]),
-                anomaly_score=float(result["event_score"]),
-                threshold_used=float(result["threshold"]),
-                ref_bank_id=result.get("ref_bank_id"),
-                ref_topk_json=result.get("ref_topk_json"),
-                summary_text=result.get("summary"),
-            )
+        await app.state.inference_queue.put(event_id)
 
     return JSONResponse(
         {
