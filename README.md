@@ -74,7 +74,7 @@ cd ~/scene_ad_for_patrol_robot
 `environment.yml`을 사용해 `dl` 환경을 생성합니다.
 
 ```bash
-conda env create -f environment.yml
+conda env create -f environment_min.yml
 conda activate dl
 ```
 
@@ -86,7 +86,7 @@ which python
 ```
 
 > Python은 3.10 사용을 권장합니다.  
-> `environment.yml`에서 `python=3.10`으로 고정되어 있어야 합니다.
+> `environment_min.yml`에서 `python=3.10`으로 고정되어 있어야 합니다.
 
 PyTorch CUDA 패키지를 별도로 설치합니다.
 
@@ -118,7 +118,7 @@ True
 프로젝트 폴더에서 서버 실행 스크립트를 실행합니다.
 
 ```bash
-cd ~/scene_ad_for_patrol_robot
+cd ~/capston_patrol_server
 conda activate dl
 ./run_servers.sh
 ```
