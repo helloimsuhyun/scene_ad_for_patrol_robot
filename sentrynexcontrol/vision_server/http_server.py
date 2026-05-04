@@ -96,7 +96,11 @@ from . import place_manager
 from .distance import infer_event, calibrate_place
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
 from .vpr_megaloc import MegaLocWrapper
-from .yolo_server_util import push_yolo_config_to_robot
+from .yolo_server_util import (
+    push_yolo_config_to_robot,
+    push_audio_config_to_robot,
+    push_all_region_configs_to_robot,
+)
 
 
 from .config import load_cfg
@@ -132,7 +136,7 @@ async def lifespan(app: FastAPI):
     # 서버 시작시에 실행
     # db connect & init(없으면 만들어줌)
     app.state.db = sqlite_db.connect_db(DB_PATH)
-    app.state.yolo_mode = 0
+
     sqlite_db.init_db(app.state.db)
     app.state.db_lock = asyncio.Lock()
 
@@ -146,10 +150,12 @@ async def lifespan(app: FastAPI):
     # GT
     app.state.query_capture_label = None
 
-    # YOLO MODE
+    # YOLO & audio mode
     app.state.yolo_mode = 0
+    app.state.audio_mode = 1
+    app.state.audio_allowed_labels = []
 
-    #robot 현재 / 목표 position
+    # robot 현재 / 목표 position
     app.state.robot_pose = {
         "x": None,
         "y": None,
@@ -219,17 +225,77 @@ async def lifespan(app: FastAPI):
     print(" ------------Server startup complete")
 
     asyncio.create_task(push_yolo_config_to_robot(app, sqlite_db))
+    asyncio.create_task(push_audio_config_to_robot(app, sqlite_db))
     app.state.scheduler_task = asyncio.create_task(run_scheduler_daemon(app))
 
-    yield  # ------------- 
-
-    if app.state.scheduler_task:
-        app.state.scheduler_task.cancel()
+    yield  # -------------
 
     # 서버 종료 시 (shutdown)
     print(" ------------ Server shutting down")
-    app.state.db.close()
-    print("DB closed")
+
+    # 1) background task 정리
+    try:
+        if getattr(app.state, "scheduler_task", None):
+            app.state.scheduler_task.cancel()
+            try:
+                await app.state.scheduler_task
+            except asyncio.CancelledError:
+                pass
+    except Exception as e:
+        print(f"[SHUTDOWN WARN] scheduler_task cleanup failed: {e}")
+
+    # 2) calibration task 정리
+    try:
+        if getattr(app.state, "calib_task", None):
+            app.state.calib_task.cancel()
+            try:
+                await app.state.calib_task
+            except asyncio.CancelledError:
+                pass
+    except Exception as e:
+        print(f"[SHUTDOWN WARN] calib_task cleanup failed: {e}")
+
+    # 3) GPU 모델 참조 제거
+    try:
+        engine = getattr(app.state, "engine", None)
+
+        if engine is not None:
+            for key in [
+                "global_model",
+                "cc_backbone",
+                "verifier_backbone",
+                "sg_matcher",
+                "vpr_model",
+            ]:
+                if key in engine:
+                    engine[key] = None
+
+            engine.clear()
+            app.state.engine = None
+
+    except Exception as e:
+        print(f"[SHUTDOWN WARN] engine cleanup failed: {e}")
+
+    # 4) Python object / CUDA cache 정리
+    try:
+        import gc
+        gc.collect()
+
+        import torch
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            torch.cuda.ipc_collect()
+
+    except Exception as e:
+        print(f"[SHUTDOWN WARN] cuda cleanup failed: {e}")
+
+    # 5) DB close
+    try:
+        app.state.db.close()
+        print("DB closed")
+    except Exception as e:
+        print(f"[SHUTDOWN WARN] DB close failed: {e}")
 
 app = FastAPI(lifespan=lifespan)
 
@@ -325,7 +391,7 @@ async def place_imgs(
     except Exception:
         raise HTTPException(status_code=400, detail="meta must be valid json string")
     
-    #캘리브레이션 중이면 저장하지 않고 바로 RETURN
+    # 캘리브레이션 중이면 저장하지 않고 바로 RETURN
     if app.state.global_calibrating:
         return JSONResponse(
             {
@@ -524,7 +590,6 @@ async def set_place_config(
     return {"ok": True, "place": place}
 
 
-
 # 특정 place 전체 삭제
 @app.delete("/places/{place_id}")
 async def delete_place(place_id: str):
@@ -693,7 +758,6 @@ async def update_patrol_order(req: ReorderPatrolReq):
         "ok": True,
         "places": places,
     }
-
 
 # -----------------------------------------------------------------------------------------------
 # GUI bank 이동 endpoint 
@@ -891,7 +955,7 @@ async def get_event_detail(event_id: str):
         "frames": frames,
     }
 
-#========================================================================================= robot 교시 endpoint
+# ========================================================================================= robot 교시 endpoint
 # --------------- 로봇 교시 및 waypoint 조회 -------------
 
 class TeachPlaceReq(BaseModel):
@@ -989,7 +1053,8 @@ async def update_robot_pose(req: RobotPoseReq):
     }
     return {"ok": True}
 
-# 로봇 -> 서버 : 목표 지점 업로드 endpoint ( 로봇에서 이벤트성으로 송신 ) : 로봇 nav2의 단기적인 목표 위치 /goal_pose_2d (x,y, yaw)와 로봇쪽에서 다음에 방문하고자 하는 place의 place_id를 송신
+# 로봇 -> 서버 : 목표 지점 업로드 endpoint ( 로봇에서 이벤트성으로 송신 ) : 
+# 로봇 nav2의 단기적인 목표 위치 /goal_pose_2d (x,y, yaw)와 로봇쪽에서 다음에 방문하고자 하는 place의 place_id를 송신
 @app.post("/robot/goal")
 async def update_robot_goal(req: RobotGoalReq):
     print(
@@ -1545,9 +1610,13 @@ async def create_yolo_region(req: CreateYoloRegionReq):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
 
     return {"ok": True, "region": dict(row)}
 
@@ -1575,9 +1644,13 @@ async def update_yolo_region(region_id: int, req: UpdateYoloRegionReq):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+    
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
 
     return {"ok": True, "region": dict(row)}
 
@@ -1598,9 +1671,14 @@ async def set_yolo_region_enabled(region_id: int, req: UpdateYoloRegionEnabledRe
 
         row = sqlite_db.get_yolo_region(app.state.db, region_id)
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+    
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
+
     return {"ok": True, "region": dict(row)}
 
 
@@ -1613,9 +1691,14 @@ async def set_all_yolo_regions_enabled(req: UpdateYoloRegionEnabledReq):
             req.is_enabled,
         )
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+    
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
+
     return {"ok": True, "affected": affected}
 
 
@@ -1629,9 +1712,13 @@ async def delete_yolo_region(region_id: int):
 
         sqlite_db.delete_yolo_region(app.state.db, region_id)
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
+
     return {"ok": True, "region_id": region_id}
 
 
@@ -1641,13 +1728,18 @@ async def delete_all_yolo_regions():
     async with app.state.db_lock:
         affected = sqlite_db.delete_all_yolo_regions(app.state.db)
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+    
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
+
     return {"ok": True, "deleted_count": affected}
 
 
-# YOLO MODE 변경
+# YOLO MODE 변경 ===================================================
 class UpdateYoloModeReq(BaseModel):
     yolo_mode: int
 
@@ -1666,6 +1758,84 @@ async def set_yolo_mode(req: UpdateYoloModeReq):
     return {
         "ok": True,
         "yolo_mode": app.state.yolo_mode,
+    }
+
+# 오디오 모드 변경 / 라벨 변경 =========================================
+"""
+0 → 오디오 업로드 OFF
+1 → 항상 업로드 (기존 동작)
+2 → region 조건 있을 때만 업로드
+"""
+
+class UpdateAudioModeReq(BaseModel):
+    audio_mode: int
+
+
+# GUI > 서버 ( 현재 오디오 모드 조회 )
+@app.get("/robot/audio_mode")
+async def get_audio_mode():
+    return {
+        "ok": True,
+        "audio_mode": int(getattr(app.state, "audio_mode", 1)),
+    }
+
+# 서버 > 로봇 오디오 모드 변경
+@app.patch("/robot/audio_mode")
+async def set_audio_mode(req: UpdateAudioModeReq):
+    mode = int(req.audio_mode)
+    if mode not in (0, 1, 2):
+        raise HTTPException(status_code=400, detail="invalid mode")
+
+    app.state.audio_mode = mode
+
+    ok, err, _ = await push_audio_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[AUDIO PUSH FAIL]", err)
+
+    return {
+        "ok": True,
+        "audio_mode": app.state.audio_mode,
+    }
+
+
+class UpdateAudioAllowedLabelsReq(BaseModel):
+    allowed_labels: List[str] = []
+
+"""
+현재는 아래의 라벨 모두를 보냄 초기값 비어잇는 LIST 인 경우는 아래 라벨을 다 보냄
+- speech
+- impact
+- alarm
+- scream
+"""
+
+# 현재 허용된 소리 이벤트 종류 조회
+@app.get("/robot/audio_allowed_labels")
+async def get_audio_allowed_labels():
+    return {
+        "ok": True,
+        "allowed_labels": list(getattr(app.state, "audio_allowed_labels", [])),
+    }
+
+# 라벨 필터 설정 API
+@app.patch("/robot/audio_allowed_labels")
+async def set_audio_allowed_labels(req: UpdateAudioAllowedLabelsReq):
+    labels = [
+        str(x).strip()
+        for x in req.allowed_labels
+        if str(x).strip()
+    ]
+    labels = sorted(set(labels))
+
+    app.state.audio_allowed_labels = labels
+
+    ok, err, _ = await push_audio_config_to_robot(app, sqlite_db)
+    if not ok:
+        print("[AUDIO PUSH FAIL]", err)
+
+    return {
+        "ok": True,
+        "allowed_labels": app.state.audio_allowed_labels,
     }
 
 # ============================================================== 
@@ -1728,7 +1898,7 @@ async def create_mock_yolo_event():
     return {"ok": True, "event_id": eid}
 
 
-# =========================================== 2차 인증 관련 엔드포인트 추가
+# ======================================================================================================= 2차 인증 관련 엔드포인트 추가
 # ====================================================================
 
 class StartAuthReq(BaseModel):
