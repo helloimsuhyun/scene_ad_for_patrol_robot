@@ -1,0 +1,45 @@
+name: dl
+channels:
+  - conda-forge
+  - defaults
+
+dependencies:
+  - python=3.10
+  - pip
+
+  # Core scientific / vision stack
+  - numpy=1.26
+  - scipy
+  - scikit-learn
+  - opencv
+  - pillow
+  - matplotlib
+  - pandas
+  - tqdm
+  - pyyaml
+  - imageio
+  - scikit-image
+
+  # Backend server
+  - fastapi
+  - uvicorn
+  - pydantic
+  - python-multipart
+  - requests
+
+  - pip:
+      # WebRTC / streaming
+      - aiortc
+      - av
+
+      # Deep learning / feature extraction utilities
+      - timm
+      - transformers
+      - safetensors
+      - einops
+      - fast-pytorch-kmeans
+
+      # Optional project utilities
+      - pyrealsense2
+      - psutil
+      - termcolor
