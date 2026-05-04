@@ -1,6 +1,6 @@
 # Capstone Server & GUI 실행 가이드
 
-`scene_ad_for_patrol_robot` 프로젝트를 다른 PC에서 실행하기 위한 최소 가이드입니다.
+`capston_patrol_server` 프로젝트를 다른 PC에서 실행하기 위한 최소 가이드입니다.
 
 구성 포트:
 
@@ -68,7 +68,7 @@ conda --version
 프로젝트 폴더로 이동합니다.
 
 ```bash
-cd ~/scene_ad_for_patrol_robot
+cd ~/capston_patrol_server
 ```
 
 `environment.yml`을 사용해 `dl` 환경을 생성합니다.
@@ -140,7 +140,7 @@ Stream Server : 8001
 Flutter GUI 폴더로 이동합니다.
 
 ```bash
-cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
+cd ~/capston_patrol_server/sentrynexcontrol
 ```
 
 Flutter 패키지를 설치합니다.
@@ -162,7 +162,7 @@ flutter run -d chrome
 GUI를 Web으로 빌드합니다.
 
 ```bash
-cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
+cd ~/capston_patrol_server/sentrynexcontrol
 flutter pub get
 flutter build web
 ```
