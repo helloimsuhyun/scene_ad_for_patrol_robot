@@ -365,6 +365,17 @@ def load_event_images_bgr(image_paths: List[str]):
 
     return imgs_bgr
 
+def is_cuda_fatal_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    fatal_keywords = [
+        "cuda error",
+        "unspecified launch failure",
+        "illegal memory access",
+        "device-side assert",
+        "cublas",
+        "cudnn",
+    ]
+    return any(k in msg for k in fatal_keywords)
 
 async def inference_worker_loop(app: FastAPI):
     print("[INFERENCE WORKER] started", flush=True)
@@ -1864,10 +1875,15 @@ async def set_yolo_mode(req: UpdateYoloModeReq):
         raise HTTPException(status_code=400, detail="invalid mode")
 
     app.state.yolo_mode = mode
+    app.state.audio_mode = mode
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
 
     return {
         "ok": True,
