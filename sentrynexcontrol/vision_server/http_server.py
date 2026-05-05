@@ -2275,6 +2275,7 @@ async def update_auth_event_label(auth_event_id: str, req: UpdateAuthEventLabelR
 
 
 # ======================================================= 경유점 위한 엔드포인트 추가
+
 class CreateGuiWaypointReq(BaseModel):
     place_id: Optional[str] = None
     x: float
