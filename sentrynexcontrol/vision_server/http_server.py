@@ -150,8 +150,8 @@ async def lifespan(app: FastAPI):
     app.state.query_capture_label = None
 
     # YOLO & audio mode
-    app.state.yolo_mode = 0
-    app.state.audio_mode = 1
+    app.state.yolo_mode = 2
+    app.state.audio_mode = 2
     app.state.audio_allowed_labels = []
 
     # robot 현재 / 목표 position
