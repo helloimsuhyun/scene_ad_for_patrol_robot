@@ -72,7 +72,6 @@ import json
 import asyncio
 from contextlib import asynccontextmanager
 from PIL import Image
-import io
 import numpy as np
 import shutil
 from uuid import uuid4
@@ -151,11 +150,13 @@ async def lifespan(app: FastAPI):
     app.state.query_capture_label = None
 
     # YOLO & audio mode
-    app.state.yolo_mode = 0
-    app.state.audio_mode = 1
+    app.state.yolo_mode = 2
+    app.state.audio_mode = 2
     app.state.audio_allowed_labels = []
 
-    # robot 현재 / 목표 position
+    # robot 현재 / 목표 position / 로봇 배터리
+    app.state.robot_battery = None
+
     app.state.robot_pose = {
         "x": None,
         "y": None,
@@ -179,6 +180,9 @@ async def lifespan(app: FastAPI):
 
     # GPU lock
     app.state.gpu_lock = asyncio.Lock()
+    # inference queue
+    app.state.inference_queue = asyncio.Queue()
+    app.state.inference_worker_task = None
 
     app.state.calib_progress = {
     "total": 0,
@@ -227,6 +231,10 @@ async def lifespan(app: FastAPI):
     asyncio.create_task(push_yolo_config_to_robot(app, sqlite_db))
     asyncio.create_task(push_audio_config_to_robot(app, sqlite_db))
     app.state.scheduler_task = asyncio.create_task(run_scheduler_daemon(app))
+    
+    app.state.inference_worker_task = asyncio.create_task(
+        inference_worker_loop(app)
+    )
 
     yield  # -------------
 
@@ -243,8 +251,19 @@ async def lifespan(app: FastAPI):
                 pass
     except Exception as e:
         print(f"[SHUTDOWN WARN] scheduler_task cleanup failed: {e}")
+    
+    # 2) 이미지 추론 큐 정리
+    try:
+        if getattr(app.state, "inference_worker_task", None):
+            app.state.inference_worker_task.cancel()
+            try:
+                await app.state.inference_worker_task
+            except asyncio.CancelledError:
+                pass
+    except Exception as e:
+        print(f"[SHUTDOWN WARN] inference_worker_task cleanup failed: {e}")
 
-    # 2) calibration task 정리
+    # 3) calibration task 정리
     try:
         if getattr(app.state, "calib_task", None):
             app.state.calib_task.cancel()
@@ -255,7 +274,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[SHUTDOWN WARN] calib_task cleanup failed: {e}")
 
-    # 3) GPU 모델 참조 제거
+    # 4) GPU 모델 참조 제거
     try:
         engine = getattr(app.state, "engine", None)
 
@@ -276,7 +295,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[SHUTDOWN WARN] engine cleanup failed: {e}")
 
-    # 4) Python object / CUDA cache 정리
+    # 5) Python object / CUDA cache 정리
     try:
         import gc
         gc.collect()
@@ -290,7 +309,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         print(f"[SHUTDOWN WARN] cuda cleanup failed: {e}")
 
-    # 5) DB close
+    # 6) DB close
     try:
         app.state.db.close()
         print("DB closed")
@@ -332,6 +351,118 @@ def run_inference_event(imgs_bgr, meta_obj, engine):
         cfg=cfg,
         vpr_model=engine.get("vpr_model"),
     )
+
+def load_event_images_bgr(image_paths: List[str]):
+    imgs_bgr = []
+
+    for p in image_paths:
+        path = Path(p)
+
+        if not path.exists():
+            raise FileNotFoundError(f"image not found: {path}")
+
+        rgb = np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+        bgr = rgb[:, :, ::-1].copy()
+        imgs_bgr.append(bgr)
+
+    return imgs_bgr
+
+def is_cuda_fatal_error(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    fatal_keywords = [
+        "cuda error",
+        "unspecified launch failure",
+        "illegal memory access",
+        "device-side assert",
+        "cublas",
+        "cudnn",
+    ]
+    return any(k in msg for k in fatal_keywords)
+
+async def inference_worker_loop(app: FastAPI):
+    print("[INFERENCE WORKER] started", flush=True)
+
+    while True:
+        event_id = None
+
+        try:
+            event_id = await app.state.inference_queue.get()
+
+            async with app.state.db_lock:
+                event = sqlite_db.get_event(app.state.db, event_id)
+
+                if event is None:
+                    print(f"[INFERENCE WORKER] event not found: {event_id}", flush=True)
+                    continue
+
+                frames = sqlite_db.list_frames(app.state.db, event_id)
+                image_paths = [f["image_path"] for f in frames]
+
+                meta_obj = {
+                    "place_id": event["place_id"],
+                    "timestamp": event["captured_at"],
+                    "event_id": event_id,
+                }
+
+            imgs_bgr = load_event_images_bgr(image_paths)
+
+            async with app.state.gpu_lock:
+                result = await asyncio.to_thread(
+                    run_inference_event,
+                    imgs_bgr,
+                    meta_obj,
+                    app.state.engine,
+                )
+
+            async with app.state.db_lock:
+                sqlite_db.update_frame_scores(
+                    app.state.db,
+                    event_id,
+                    result["frame_scores"],
+                )
+
+                sqlite_db.update_event_result(
+                    app.state.db,
+                    event_id=event_id,
+                    anomaly_flag=int(result["anomaly_flag"]),
+                    anomaly_score=float(result["event_score"]),
+                    threshold_used=float(result["threshold"]),
+                    ref_bank_id=result.get("ref_bank_id"),
+                    ref_topk_json=result.get("ref_topk_json"),
+                    summary_text=result.get("summary"),
+                )
+
+            print(f"[INFERENCE WORKER] done event_id={event_id}", flush=True)
+
+        except asyncio.CancelledError:
+            print("[INFERENCE WORKER] cancelled", flush=True)
+            break
+
+        except Exception as e:
+            print(f"[INFERENCE WORKER ERROR] event_id={event_id}, exc={e}", flush=True)
+
+            if event_id is not None:
+                try:
+                    async with app.state.db_lock:
+                        sqlite_db.update_event_result(
+                            app.state.db,
+                            event_id=event_id,
+                            anomaly_flag=-1,
+                            anomaly_score=0.0,
+                            threshold_used=0.0,
+                            ref_bank_id=None,
+                            ref_topk_json=None,
+                            summary_text=f"inference_failed: {e}",
+                        )
+                except Exception as db_e:
+                    print(f"[INFERENCE WORKER DB ERROR] {db_e}", flush=True)
+
+        finally:
+            if event_id is not None:
+                try:
+                    app.state.inference_queue.task_done()
+                except ValueError:
+                    pass
 
 
 # 임계치 업데이트 함수 호출----------------------------------
@@ -468,7 +599,6 @@ async def place_imgs(
 
     # 파일 저장
     saved = []
-    imgs_bgr = [] 
 
     for i, uf in enumerate(images):
         ext = Path(uf.filename).suffix.lower() or ".jpg"
@@ -477,13 +607,6 @@ async def place_imgs(
         data = await uf.read()
         out_path.write_bytes(data)
         saved.append(str(out_path))
-
-        if mode == "query": #바로 메모리 끌고와서 추론할 준비
-            rgb = np.array(Image.open(io.BytesIO(data)).convert("RGB"), dtype=np.uint8)
-            bgr = rgb[:, :, ::-1].copy()  
-            imgs_bgr.append(bgr)
-
-    resp_status = "saved"
 
     if mode in ("bank", "th_calib"):
         # th.json 존재하는데, ref bank 업데이트하면 calibaration 필요로 db에 기록
@@ -510,31 +633,12 @@ async def place_imgs(
             )
         
         #추론 
-        async with app.state.gpu_lock:
-            result = await asyncio.to_thread(
-                run_inference_event,
-                imgs_bgr,
-                meta_obj,
-                app.state.engine
-            )
-
-        async with app.state.db_lock:
-            sqlite_db.update_frame_scores(app.state.db, event_id, result["frame_scores"])
-            sqlite_db.update_event_result(
-                app.state.db,
-                event_id=event_id,
-                anomaly_flag=int(result["anomaly_flag"]),
-                anomaly_score=float(result["event_score"]),
-                threshold_used=float(result["threshold"]),
-                ref_bank_id=result.get("ref_bank_id"),
-                ref_topk_json=result.get("ref_topk_json"),
-                summary_text=result.get("summary"),
-            )
+        await app.state.inference_queue.put(event_id)
 
     return JSONResponse(
         {
             "ok": True,
-            "status": resp_status,
+            "status": "accepted",
             "place_id": place_id,
             "applied_mode": mode,
             "n_images": len(saved),
@@ -854,48 +958,69 @@ async def move_event(req: MoveEventToBankReq):
 
 # ========================================================================================= vision 이상감지 이벤트 GUI 조회 / Pooling endpoint
 # GUI event polling API
-
 # 이벤트 polling 최근에 생긴 것
 @app.get("/events")
-async def get_events(since: Optional[str] = None, limit: int = 50):
+async def get_events(since: Optional[str] = None, limit: int = 30):
     """
     Flutter polling용.
-    - since가 없으면 최근 이벤트 목록 반환
-    - since가 있으면 그 시각 이후의 이벤트만 반환
+    - 프론트가 since를 보내도 서버는 since를 사용하지 않음
+    - 항상 최근 이벤트 목록을 반환
+    - 비동기 추론 결과 업데이트를 GUI에 반영하기 위한 구조
     응답 형식:
     {
         "ok": True,
         "events": [...]
     }
     """
+
     async with app.state.db_lock:
         cur = app.state.db.cursor()
 
-        if since is None:
-            cur.execute(
-                """
-                SELECT event_id, place_id, captured_at, anomaly_flag,
-                    anomaly_score, threshold_used, ref_bank_id,
-                    ref_topk_json, summary_text, admin_checked, admin_label, created_at
-                FROM events
-                ORDER BY captured_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT event_id, place_id, captured_at, anomaly_flag,
-                    anomaly_score, threshold_used, ref_bank_id,
-                    ref_topk_json, summary_text, admin_checked, admin_label, created_at
-                FROM events
-                WHERE captured_at > ?
-                ORDER BY captured_at DESC
-                LIMIT ?
-                """,
-                (since, limit),
-            )
+        # 기존 since 기반 polling 로직
+        # 비동기 추론 결과가 나중에 업데이트되는 구조에서는,
+        # captured_at 기준 since 필터를 사용하면 이미 받은 이벤트의 업데이트를 놓칠 수 있음.
+        #
+        # if since is None:
+        #     cur.execute(
+        #         """
+        #         SELECT event_id, place_id, captured_at, anomaly_flag,
+        #             anomaly_score, threshold_used, ref_bank_id,
+        #             ref_topk_json, summary_text, admin_checked, admin_label, created_at
+        #         FROM events
+        #         ORDER BY captured_at DESC
+        #         LIMIT ?
+        #         """,
+        #         (limit,),
+        #     )
+        # else:
+        #     cur.execute(
+        #         """
+        #         SELECT event_id, place_id, captured_at, anomaly_flag,
+        #             anomaly_score, threshold_used, ref_bank_id,
+        #             ref_topk_json, summary_text, admin_checked, admin_label, created_at
+        #         FROM events
+        #         WHERE captured_at > ?
+        #         ORDER BY captured_at DESC
+        #         LIMIT ?
+        #         """,
+        #         (since, limit),
+        #     )
+
+        # 현재 데모용 안정화 로직:
+        # since를 무시하고 항상 최신 20개 이벤트를 반환한다.
+        # 프론트는 event_id 기준으로 기존 이벤트를 교체하므로,
+        # 추론 완료 후 업데이트된 이벤트도 GUI에 반영될 수 있다.
+        cur.execute(
+            """
+            SELECT event_id, place_id, captured_at, anomaly_flag,
+                anomaly_score, threshold_used, ref_bank_id,
+                ref_topk_json, summary_text, admin_checked, admin_label, created_at
+            FROM events
+            ORDER BY captured_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
 
         rows = cur.fetchall()
 
@@ -905,19 +1030,21 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
         # Fetch frames for this event
         async with app.state.db_lock:
             frames = sqlite_db.list_frames(app.state.db, event_id)
-            
+
         # 각 프레임의 경로를 /images/ 경로에서 접근 가능한 형태로 변환
         processed_frames = []
         for f in frames:
             f_dict = dict(f)
             raw_path = f_dict["image_path"]
+
             # 'recv/' 이후의 경로만 추출하여 상대 경로화
             if "recv/" in raw_path:
                 f_dict["image_path"] = raw_path.split("recv/")[-1]
             else:
                 f_dict["image_path"] = Path(raw_path).name
+
             processed_frames.append(f_dict)
-            
+
         events.append({
             "event_id": event_id,
             "place_id": row["place_id"],
@@ -1750,10 +1877,15 @@ async def set_yolo_mode(req: UpdateYoloModeReq):
         raise HTTPException(status_code=400, detail="invalid mode")
 
     app.state.yolo_mode = mode
+    app.state.audio_mode = mode
 
-    ok, err, _ = await push_yolo_config_to_robot(app, sqlite_db)
-    if not ok:
-        print("[YOLO PUSH FAIL]", err)
+    result = await push_all_region_configs_to_robot(app, sqlite_db)
+
+    if not result["yolo_ok"]:
+        print("[YOLO PUSH FAIL]", result["yolo_err"])
+
+    if not result["audio_ok"]:
+        print("[AUDIO PUSH FAIL]", result["audio_err"])
 
     return {
         "ok": True,
@@ -2145,6 +2277,7 @@ async def update_auth_event_label(auth_event_id: str, req: UpdateAuthEventLabelR
 
 
 # ======================================================= 경유점 위한 엔드포인트 추가
+
 class CreateGuiWaypointReq(BaseModel):
     place_id: Optional[str] = None
     x: float
@@ -2181,4 +2314,37 @@ async def create_gui_waypoint(req: CreateGuiWaypointReq):
         "ok": True,
         "status": "gui_waypoint_created",
         "place": place,
+    }
+
+# ============================================================= 로봇 배터리 잔량 확인
+class RobotBatteryReq(BaseModel):
+    percentage: int
+
+@app.post("/robot/battery")
+async def update_robot_battery(req: RobotBatteryReq):
+    percentage = int(req.percentage)
+
+    if percentage < 0 or percentage > 100:
+        raise HTTPException(
+            status_code=400,
+            detail="percentage must be between 0 and 100",
+        )
+
+    app.state.robot_battery = percentage
+
+    print(
+        f"[ROBOT BATTERY] {percentage}%",
+        flush=True,
+    )
+
+    return {
+        "ok": True,
+        "battery": app.state.robot_battery,
+    }
+
+@app.get("/robot/battery")
+async def get_robot_battery():
+    return {
+        "ok": True,
+        "battery": app.state.robot_battery,
     }
