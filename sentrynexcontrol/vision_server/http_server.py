@@ -2315,37 +2315,3 @@ async def create_gui_waypoint(req: CreateGuiWaypointReq):
         "status": "gui_waypoint_created",
         "place": place,
     }
-
-# ============================================================= 로봇 배터리 잔량 확인
-
-class RobotBatteryReq(BaseModel):
-    percentage: int
-
-@app.post("/robot/battery")
-async def update_robot_battery(req: RobotBatteryReq):
-    percentage = int(req.percentage)
-
-    if percentage < 0 or percentage > 100:
-        raise HTTPException(
-            status_code=400,
-            detail="percentage must be between 0 and 100",
-        )
-
-    app.state.robot_battery = percentage
-
-    print(
-        f"[ROBOT BATTERY] {percentage}%",
-        flush=True,
-    )
-
-    return {
-        "ok": True,
-        "battery": app.state.robot_battery,
-    }
-
-@app.get("/robot/battery")
-async def get_robot_battery():
-    return {
-        "ok": True,
-        "battery": app.state.robot_battery,
-    }
