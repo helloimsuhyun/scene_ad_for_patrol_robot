@@ -945,48 +945,69 @@ async def move_event(req: MoveEventToBankReq):
 
 # ========================================================================================= vision 이상감지 이벤트 GUI 조회 / Pooling endpoint
 # GUI event polling API
-
 # 이벤트 polling 최근에 생긴 것
 @app.get("/events")
-async def get_events(since: Optional[str] = None, limit: int = 50):
+async def get_events(since: Optional[str] = None, limit: int = 30):
     """
     Flutter polling용.
-    - since가 없으면 최근 이벤트 목록 반환
-    - since가 있으면 그 시각 이후의 이벤트만 반환
+    - 프론트가 since를 보내도 서버는 since를 사용하지 않음
+    - 항상 최근 이벤트 목록을 반환
+    - 비동기 추론 결과 업데이트를 GUI에 반영하기 위한 구조
     응답 형식:
     {
         "ok": True,
         "events": [...]
     }
     """
+
     async with app.state.db_lock:
         cur = app.state.db.cursor()
 
-        if since is None:
-            cur.execute(
-                """
-                SELECT event_id, place_id, captured_at, anomaly_flag,
-                    anomaly_score, threshold_used, ref_bank_id,
-                    ref_topk_json, summary_text, admin_checked, admin_label, created_at
-                FROM events
-                ORDER BY captured_at DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
-        else:
-            cur.execute(
-                """
-                SELECT event_id, place_id, captured_at, anomaly_flag,
-                    anomaly_score, threshold_used, ref_bank_id,
-                    ref_topk_json, summary_text, admin_checked, admin_label, created_at
-                FROM events
-                WHERE captured_at > ?
-                ORDER BY captured_at DESC
-                LIMIT ?
-                """,
-                (since, limit),
-            )
+        # 기존 since 기반 polling 로직
+        # 비동기 추론 결과가 나중에 업데이트되는 구조에서는,
+        # captured_at 기준 since 필터를 사용하면 이미 받은 이벤트의 업데이트를 놓칠 수 있음.
+        #
+        # if since is None:
+        #     cur.execute(
+        #         """
+        #         SELECT event_id, place_id, captured_at, anomaly_flag,
+        #             anomaly_score, threshold_used, ref_bank_id,
+        #             ref_topk_json, summary_text, admin_checked, admin_label, created_at
+        #         FROM events
+        #         ORDER BY captured_at DESC
+        #         LIMIT ?
+        #         """,
+        #         (limit,),
+        #     )
+        # else:
+        #     cur.execute(
+        #         """
+        #         SELECT event_id, place_id, captured_at, anomaly_flag,
+        #             anomaly_score, threshold_used, ref_bank_id,
+        #             ref_topk_json, summary_text, admin_checked, admin_label, created_at
+        #         FROM events
+        #         WHERE captured_at > ?
+        #         ORDER BY captured_at DESC
+        #         LIMIT ?
+        #         """,
+        #         (since, limit),
+        #     )
+
+        # 현재 데모용 안정화 로직:
+        # since를 무시하고 항상 최신 20개 이벤트를 반환한다.
+        # 프론트는 event_id 기준으로 기존 이벤트를 교체하므로,
+        # 추론 완료 후 업데이트된 이벤트도 GUI에 반영될 수 있다.
+        cur.execute(
+            """
+            SELECT event_id, place_id, captured_at, anomaly_flag,
+                anomaly_score, threshold_used, ref_bank_id,
+                ref_topk_json, summary_text, admin_checked, admin_label, created_at
+            FROM events
+            ORDER BY captured_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        )
 
         rows = cur.fetchall()
 
@@ -996,19 +1017,21 @@ async def get_events(since: Optional[str] = None, limit: int = 50):
         # Fetch frames for this event
         async with app.state.db_lock:
             frames = sqlite_db.list_frames(app.state.db, event_id)
-            
+
         # 각 프레임의 경로를 /images/ 경로에서 접근 가능한 형태로 변환
         processed_frames = []
         for f in frames:
             f_dict = dict(f)
             raw_path = f_dict["image_path"]
+
             # 'recv/' 이후의 경로만 추출하여 상대 경로화
             if "recv/" in raw_path:
                 f_dict["image_path"] = raw_path.split("recv/")[-1]
             else:
                 f_dict["image_path"] = Path(raw_path).name
+
             processed_frames.append(f_dict)
-            
+
         events.append({
             "event_id": event_id,
             "place_id": row["place_id"],
