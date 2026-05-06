@@ -35,6 +35,7 @@ class MapTransformerLoader {
       originX: originX,
       originY: originY,
       imageHeight: image.height.toDouble(),
+      imageWidth: image.width.toDouble(),
     );
   }
 

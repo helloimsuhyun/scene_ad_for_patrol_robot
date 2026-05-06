@@ -2012,3 +2012,16 @@ async def create_gui_waypoint(req: CreateGuiWaypointReq):
         "status": "gui_waypoint_created",
         "place": place,
     }
+
+class ReorderPatrolReq(BaseModel):
+    place_ids: List[str]
+
+@app.patch("/places/patrol_order")
+async def reorder_patrol(req: ReorderPatrolReq):
+    async with app.state.db_lock:
+        try:
+            sqlite_db.reorder_patrol_places(app.state.db, req.place_ids)
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+    return {"ok": True, "status": "reordered"}
+

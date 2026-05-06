@@ -27,3 +27,6 @@ final mapImagePathProvider = FutureProvider<String>((ref) async {
   final loader = MapTransformerLoader(yamlAssetPath: _getYamlPath(location));
   return await loader.loadMapImagePath();
 });
+
+// 지도에서 경유점 찍기 모드 상태
+final waypointPickingModeProvider = StateProvider<bool>((ref) => false);

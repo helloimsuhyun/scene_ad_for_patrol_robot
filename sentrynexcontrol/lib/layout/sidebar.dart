@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'sidebar_menu.dart';
 import '../widgets/combined_event_list.dart';
+import '../widgets/auth_event_list.dart';
 
 enum Pages { dashboard, logs, analytics, control, settings }
 
@@ -87,10 +88,11 @@ class Sidebar extends StatelessWidget {
             isSelected: currentPage == Pages.settings,
             onTap: () => onPageSelected(Pages.settings),
           ),
-          //---------- 메뉴 아래: 실시간 경보 로그 ----------
+          //---------- 메뉴 아래: 2차 인증 및 실시간 경보 로그 ----------
           const SizedBox(height: 36),
           const Divider(height: 1, color: Color(0xFF2D3041)),
           const SizedBox(height: 20),
+          const AuthEventList(), // 2차 인증 이벤트 리스트
           const Expanded(
             child: CombinedEventList(showOnlyUnchecked: true, title: '실시간 로그'),
           ),

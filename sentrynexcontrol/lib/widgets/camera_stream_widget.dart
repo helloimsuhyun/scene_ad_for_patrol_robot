@@ -190,6 +190,51 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
 
   @override
   Widget build(BuildContext context) {
+    // 1. 연결 완료 상태 (full-bleed)
+    if (_status == _Status.connected) {
+      return Container(
+        decoration: BoxDecoration(
+          color: const Color(0xFF0D0E16),
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(color: const Color(0xFF2D3041)),
+        ),
+        clipBehavior: Clip.antiAlias,
+        child: AspectRatio(
+          aspectRatio: 16 / 9,
+          child: Stack(
+            children: [
+              // 비전 스트림 화면 (꽉 채우기)
+              Positioned.fill(
+                child: _buildVideoArea(),
+              ),
+              // 우측 하단 전체화면 버튼
+              Positioned(
+                right: 8,
+                bottom: 8,
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: Colors.black.withOpacity(0.4),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: IconButton(
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    icon: const Icon(
+                      Icons.fullscreen,
+                      size: 22,
+                      color: Colors.white,
+                    ),
+                    onPressed: () => _showFullScreen(context),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    // 2. 연결 전/대기 상태 (padded layout)
     return Container(
       decoration: BoxDecoration(
         color: const Color(0xFF0D0E16),
@@ -218,16 +263,6 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
                   ),
                 ),
               ),
-              IconButton(
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                icon: const Icon(
-                  Icons.fullscreen,
-                  size: 20,
-                  color: Color(0xFFB5BAD3),
-                ),
-                onPressed: () => _showFullScreen(context),
-              ),
               const SizedBox(width: 8),
               _StatusDot(status: _status),
             ],
@@ -249,14 +284,54 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
 
   Widget _buildVideoArea() {
     if (_status == _Status.connected) {
-      return RTCVideoView(
-        _remoteRenderer,
-        objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+      // 영상이 연결된 경우: WebRTC 렌더러 (클릭 시 연결 해제 옵션 제공)
+      return Stack(
+        children: [
+          Positioned.fill(
+            child: RTCVideoView(
+              _remoteRenderer,
+              objectFit: RTCVideoViewObjectFit.RTCVideoViewObjectFitCover,
+            ),
+          ),
+          Positioned.fill(
+            child: Material(
+              color: Colors.transparent,
+              child: InkWell(
+                onTap: () {
+                  // 한 번 클릭하면 연결 해제 확인 창 표시
+                  showDialog(
+                    context: context,
+                    builder: (ctx) => AlertDialog(
+                      backgroundColor: const Color(0xFF1C1E2B),
+                      title: const Text('카메라 연결 해제', style: TextStyle(color: Colors.white)),
+                      content: const Text('로봇 카메라 연결을 종료하시겠습니까?', style: TextStyle(color: Colors.white70)),
+                      actions: [
+                        TextButton(
+                          onPressed: () => Navigator.pop(ctx),
+                          child: const Text('취소', style: TextStyle(color: Colors.white54)),
+                        ),
+                        ElevatedButton(
+                          style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+                          onPressed: () {
+                            Navigator.pop(ctx);
+                            _disconnect();
+                          },
+                          child: const Text('연결 해제', style: TextStyle(color: Colors.white)),
+                        ),
+                      ],
+                    ),
+                  );
+                },
+              ),
+            ),
+          ),
+        ],
       );
     }
 
+
     return Container(
-      color: const Color(0xFF181924),
+      color: const Color(0xFF0D0E16),
       child: Center(
         child: Column(
           mainAxisSize: MainAxisSize.min,

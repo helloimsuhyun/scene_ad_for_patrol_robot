@@ -3,12 +3,14 @@ class MapTransformer {
   final double originX;
   final double originY;
   final double imageHeight;
+  final double imageWidth;
 
   MapTransformer({
     required this.resolution,
     required this.originX,
     required this.originY,
     required this.imageHeight,
+    required this.imageWidth,
   });
 
   Map<String, double> transform(double x, double y, double yaw) {
