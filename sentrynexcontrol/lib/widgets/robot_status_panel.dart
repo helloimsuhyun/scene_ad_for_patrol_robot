@@ -5,11 +5,9 @@ import 'dart:convert';
 import '../providers/robot_provider.dart';
 import '../providers/map_provider.dart';
 import '../features/control/control_provider.dart'; // placesProvider 참조
+import '../providers/server_config_provider.dart';
 import 'patrol_route_dialog.dart';
 import 'timeline_dialog.dart';
-
-// 로봇 현재 목표 지점 폴링은 실제 연동 시 활성화 예정
-// final _robotGoalProvider = StreamProvider...
 
 // 수동 캡처 대기를 위한 로딩 상태
 final _isCapturingProvider = StateProvider<bool>((ref) => false);
@@ -29,7 +27,6 @@ class RobotStatusPanel extends ConsumerStatefulWidget {
 
 class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
   bool isCliButtonsEnabled = false;
-  // 로컬 _isPatrolling 제거 (전역 patrolStatusProvider 사용)
 
   Future<void> _triggerCapture(
     BuildContext context,
@@ -39,13 +36,14 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
     final loadingNotifier = ref.read(_isCapturingProvider.notifier);
     loadingNotifier.state = true;
     try {
+      final config = ref.read(serverConfigProvider);
       final targetPlace = ref.read(_testTargetPlaceProvider);
       final body = endpoint == 'place_and_capture' && targetPlace != null
           ? jsonEncode({'place_id': targetPlace})
           : null;
 
       final response = await http.post(
-        Uri.parse('http://192.168.0.24:8090/patrol/$endpoint'),
+        Uri.parse('http://${config.serverIp}:8090/patrol/$endpoint'),
         headers: body != null ? {'Content-Type': 'application/json'} : null,
         body: body,
       );
@@ -138,7 +136,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
     }
     try {
       final res = await http.post(
-        Uri.parse('http://127.0.0.1:8000/robot/command'),
+        Uri.parse(ref.read(serverConfigProvider).getUrl('/robot/command')),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'command': cmd}),
       );
@@ -158,7 +156,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
 
     try {
       final res = await http.post(
-        Uri.parse('http://127.0.0.1:8000/query_capture_label'),
+        Uri.parse(ref.read(serverConfigProvider).getUrl('/query_capture_label')),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'label': next}),
       );
@@ -185,6 +183,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
   @override
   Widget build(BuildContext context) {
     final robotPose = ref.watch(robotPoseProvider);
+    final battery = ref.watch(robotBatteryProvider);
 
     return Container(
       width: double.infinity,
@@ -229,7 +228,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Container(
-                          width: 60 * 0.72,
+                          width: 60 * (battery / 100.0),
                           decoration: BoxDecoration(
                             color: const Color(0xFF7F7CFF), // 포인트 컬러 연보라색
                             borderRadius: BorderRadius.circular(5),
@@ -238,8 +237,8 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    const Text(
-                      '72%',
+                    Text(
+                      '$battery%',
                       style: TextStyle(
                         color: Color(0xFF7F7CFF), // 연보라색 텍스트
                         fontSize: 11,

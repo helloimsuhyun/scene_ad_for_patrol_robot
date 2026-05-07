@@ -2,20 +2,24 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 
-class ManualControllerPanel extends StatefulWidget {
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/server_config_provider.dart';
+
+class ManualControllerPanel extends ConsumerStatefulWidget {
   const ManualControllerPanel({super.key});
 
   @override
-  State<ManualControllerPanel> createState() => _ManualControllerPanelState();
+  ConsumerState<ManualControllerPanel> createState() => _ManualControllerPanelState();
 }
 
-class _ManualControllerPanelState extends State<ManualControllerPanel> {
+class _ManualControllerPanelState extends ConsumerState<ManualControllerPanel> {
   bool isManualControlEnabled = false;
 
   Future<void> _sendCommand(String cmd) async {
     try {
+      final config = ref.read(serverConfigProvider);
       await http.post(
-        Uri.parse('http://127.0.0.1:8000/robot/command'),
+        Uri.parse(config.getUrl('/robot/command')),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'command': cmd}),
       );

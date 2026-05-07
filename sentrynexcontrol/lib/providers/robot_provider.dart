@@ -152,3 +152,44 @@ final yoloModeProvider = StateNotifierProvider<YoloModeNotifier, int>((ref) {
 final yoloDrawingModeProvider = StateProvider<bool>((ref) => false);
 
 final yoloShowRegionsProvider = StateProvider<bool>((ref) => true);
+
+class RobotBatteryNotifier extends StateNotifier<int> {
+  final Ref ref;
+  Timer? _timer;
+
+  RobotBatteryNotifier(this.ref) : super(100) {
+    _startPolling();
+  }
+
+  void _startPolling() {
+    _timer = Timer.periodic(const Duration(seconds: 10), (timer) {
+      fetchBattery();
+    });
+    fetchBattery();
+  }
+
+  Future<void> fetchBattery() async {
+    final config = ref.read(serverConfigProvider);
+    try {
+      final response = await http.get(Uri.parse('${config.baseUrl}/robot/battery'));
+      if (response.statusCode == 200) {
+        final data = jsonDecode(response.body);
+        if (data['battery'] != null) {
+          state = (data['battery'] as num).toInt();
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  @override
+  void dispose() {
+    _timer?.cancel();
+    super.dispose();
+  }
+}
+
+final robotBatteryProvider = StateNotifierProvider<RobotBatteryNotifier, int>((ref) {
+  return RobotBatteryNotifier(ref);
+});

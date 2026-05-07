@@ -3,18 +3,17 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_webrtc/flutter_webrtc.dart';
 import 'package:http/http.dart' as http;
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../providers/server_config_provider.dart';
 
-// 시그널링 서버 주소 (signaling_server.py - 포트 8001)
-const String _signalingUrl = 'http://127.0.0.1:8001';
-
-class CameraStreamWidget extends StatefulWidget {
+class CameraStreamWidget extends ConsumerStatefulWidget {
   const CameraStreamWidget({super.key});
 
   @override
-  State<CameraStreamWidget> createState() => _CameraStreamWidgetState();
+  ConsumerState<CameraStreamWidget> createState() => _CameraStreamWidgetState();
 }
 
-class _CameraStreamWidgetState extends State<CameraStreamWidget> {
+class _CameraStreamWidgetState extends ConsumerState<CameraStreamWidget> {
   final RTCVideoRenderer _remoteRenderer = RTCVideoRenderer();
   RTCPeerConnection? _peerConnection;
 
@@ -155,8 +154,9 @@ class _CameraStreamWidgetState extends State<CameraStreamWidget> {
         'sdp_len=${localDesc.sdp?.length ?? 0}',
       );
 
+      final signalingUrl = ref.read(serverConfigProvider).signalingUrl;
       final resp = await http.post(
-        Uri.parse('$_signalingUrl/viewer_offer'),
+        Uri.parse('$signalingUrl/viewer_offer'),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'sdp': localDesc.sdp,

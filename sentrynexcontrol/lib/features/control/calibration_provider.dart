@@ -2,8 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-
-final String baseUrl = 'http://127.0.0.1:8000';
+import '../../providers/server_config_provider.dart';
 
 class CalibrationStatus {
   final bool globalCalibrating;
@@ -30,15 +29,17 @@ class CalibrationStatus {
 }
 
 class CalibrationNotifier extends StateNotifier<CalibrationStatus> {
+  final Ref _ref;
   Timer? _timer;
 
-  CalibrationNotifier() : super(CalibrationStatus(globalCalibrating: false, total: 0, done: 0)) {
+  CalibrationNotifier(this._ref) : super(CalibrationStatus(globalCalibrating: false, total: 0, done: 0)) {
     _startPolling();
   }
 
   void _startPolling() {
     _timer = Timer.periodic(const Duration(seconds: 1), (_) async {
       try {
+        final baseUrl = _ref.read(serverConfigProvider).baseUrl;
         final response = await http.get(Uri.parse('$baseUrl/calibration_status'));
         if (response.statusCode == 200) {
           state = CalibrationStatus.fromJson(jsonDecode(response.body));
@@ -57,5 +58,5 @@ class CalibrationNotifier extends StateNotifier<CalibrationStatus> {
 }
 
 final calibrationProvider = StateNotifierProvider<CalibrationNotifier, CalibrationStatus>((ref) {
-  return CalibrationNotifier();
+  return CalibrationNotifier(ref);
 });

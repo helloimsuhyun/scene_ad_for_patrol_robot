@@ -1,10 +1,10 @@
 import 'dart:convert';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
-
-final String baseUrl = 'http://127.0.0.1:8000';
+import '../../providers/server_config_provider.dart';
 
 final placesProvider = FutureProvider.autoDispose<Map<String, dynamic>>((ref) async {
+  final baseUrl = ref.watch(serverConfigProvider).baseUrl;
   final response = await http.get(Uri.parse('$baseUrl/places'));
   if (response.statusCode == 200) {
     final data = jsonDecode(response.body);
@@ -26,6 +26,7 @@ final patrolStatusProvider = StateProvider<bool>((ref) => false);
 
 class ControlActions {
   static Future<void> recalibrateAll(WidgetRef ref) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.post(Uri.parse('$baseUrl/places/recalibrate_all'));
     if (response.statusCode == 200) {
       ref.invalidate(placesProvider);
@@ -33,6 +34,7 @@ class ControlActions {
   }
 
   static Future<void> updateDisplayName(WidgetRef ref, String placeId, String name) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.patch(
       Uri.parse('$baseUrl/places/$placeId/display_name'),
       headers: {'Content-Type': 'application/json'},
@@ -46,6 +48,7 @@ class ControlActions {
   }
 
   static Future<void> updatePatrolEnabled(WidgetRef ref, String placeId, bool enabled) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.patch(
       Uri.parse('$baseUrl/places/$placeId/patrol_enabled'),
       headers: {'Content-Type': 'application/json'},
@@ -59,6 +62,7 @@ class ControlActions {
   }
 
   static Future<void> reorderPatrol(WidgetRef ref, List<String> placeIds) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.patch(
       Uri.parse('$baseUrl/places/patrol_order'),
       headers: {'Content-Type': 'application/json'},
@@ -78,6 +82,7 @@ class ControlActions {
 
 
   static Future<void> setMode(WidgetRef ref, String placeId, String mode) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.post(
       Uri.parse('$baseUrl/places/$placeId/config'),
       body: {'mode': mode},
@@ -88,6 +93,7 @@ class ControlActions {
   }
 
   static Future<void> deletePlace(WidgetRef ref, String placeId) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.delete(Uri.parse('$baseUrl/places/$placeId'));
     if (response.statusCode == 200) {
       ref.invalidate(placesProvider);
@@ -95,6 +101,7 @@ class ControlActions {
   }
 
   static Future<void> deleteThreshold(WidgetRef ref, String placeId) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.delete(Uri.parse('$baseUrl/places/$placeId/threshold'));
     if (response.statusCode == 200) {
       ref.invalidate(placesProvider);
@@ -102,6 +109,7 @@ class ControlActions {
   }
 
   static Future<void> deleteAllPlaces(WidgetRef ref) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.delete(Uri.parse('$baseUrl/places'));
     if (response.statusCode == 200) {
       ref.invalidate(placesProvider);
@@ -109,6 +117,7 @@ class ControlActions {
   }
 
   static Future<void> applyRouteAndStart(WidgetRef ref, List<Map<String, dynamic>> allPlaces, List<String> selectedPlaceIds) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     // 1. Update patrol_enabled
     for (final p in allPlaces) {
       final pid = p['place_id'].toString();
@@ -140,7 +149,7 @@ class ControlActions {
     
     // 3. Start patrol
     await http.post(
-      Uri.parse('http://127.0.0.1:8000/robot/command'),
+      Uri.parse('$baseUrl/robot/command'),
       headers: {'Content-Type': 'application/json'},
       body: jsonEncode({'command': 'start_patrol'}),
     );
@@ -151,6 +160,7 @@ class ControlActions {
   }
 
   static Future<void> savePreset(WidgetRef ref, String name, List<String> routes) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.post(
       Uri.parse('$baseUrl/patrol/presets'),
       headers: {'Content-Type': 'application/json'},
@@ -162,6 +172,7 @@ class ControlActions {
   }
 
   static Future<void> deletePreset(WidgetRef ref, int presetId) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.delete(Uri.parse('$baseUrl/patrol/presets/$presetId'));
     if (response.statusCode == 200) {
       ref.invalidate(presetsProvider);
@@ -170,6 +181,7 @@ class ControlActions {
   }
 
   static Future<void> addSchedule(WidgetRef ref, int presetId, String timeStr) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.post(
       Uri.parse('$baseUrl/patrol/schedules'),
       headers: {'Content-Type': 'application/json'},
@@ -181,6 +193,7 @@ class ControlActions {
   }
 
   static Future<void> deleteSchedule(WidgetRef ref, int scheduleId) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.delete(Uri.parse('$baseUrl/patrol/schedules/$scheduleId'));
     if (response.statusCode == 200) {
       ref.invalidate(schedulesProvider);
@@ -188,6 +201,7 @@ class ControlActions {
   }
 
   static Future<void> toggleSchedule(WidgetRef ref, int scheduleId) async {
+    final baseUrl = ref.read(serverConfigProvider).baseUrl;
     final response = await http.patch(Uri.parse('$baseUrl/patrol/schedules/$scheduleId/toggle'));
     if (response.statusCode == 200) {
       ref.invalidate(schedulesProvider);
@@ -197,6 +211,7 @@ class ControlActions {
 
 final presetsProvider = FutureProvider<List<dynamic>>((ref) async {
   try {
+    final baseUrl = ref.watch(serverConfigProvider).baseUrl;
     final response = await http.get(Uri.parse('$baseUrl/patrol/presets'));
     if (response.statusCode == 200) {
       return jsonDecode(response.body)['presets'] ?? [];
@@ -209,6 +224,7 @@ final presetsProvider = FutureProvider<List<dynamic>>((ref) async {
 
 final schedulesProvider = FutureProvider<List<dynamic>>((ref) async {
   try {
+    final baseUrl = ref.watch(serverConfigProvider).baseUrl;
     final response = await http.get(Uri.parse('$baseUrl/patrol/schedules'));
     if (response.statusCode == 200) {
       return jsonDecode(response.body)['schedules'] ?? [];
