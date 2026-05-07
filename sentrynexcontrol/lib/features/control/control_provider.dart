@@ -66,6 +66,13 @@ class ControlActions {
     );
     if (response.statusCode == 200) {
       ref.invalidate(placesProvider);
+      if (ref.read(patrolStatusProvider)) {
+        await http.post(
+          Uri.parse('$baseUrl/robot/command'),
+          headers: {'Content-Type': 'application/json'},
+          body: jsonEncode({'command': 'start_patrol'}),
+        );
+      }
     }
   }
 

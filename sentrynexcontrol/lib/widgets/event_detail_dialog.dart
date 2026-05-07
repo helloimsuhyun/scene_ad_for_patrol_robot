@@ -150,7 +150,7 @@ void showEventDetailDialog(BuildContext context, WidgetRef ref, Event event) {
                 const SizedBox(height: 12),
                 _DetailRow(
                   label: '위험성 (Confidence)',
-                  value: '${(event.anomalyScore! * 100).toStringAsFixed(1)}%',
+                  value: '${event.anomalyScore!.toStringAsFixed(1)}%',
                   valueColor: mainColor,
                 ),
               ],
