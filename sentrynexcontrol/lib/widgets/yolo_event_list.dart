@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/yolo_provider.dart';
 import '../models/yolo_event_model.dart';
+import 'event_detail_dialog.dart';
 
 class YoloEventList extends ConsumerWidget {
   final bool showOnlyUnchecked;
@@ -110,98 +111,101 @@ class _YoloTile extends ConsumerWidget {
       badgeColor = const Color(0xFF7A7F96);
     }
 
-    return Opacity(
-      opacity: isChecked ? 0.7 : 1.0,
-      child: Container(
-        padding: const EdgeInsets.all(12),
-        decoration: BoxDecoration(
-          color: const Color(0xFF11131C),
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(
-            color: isChecked
-                ? const Color(0xFF2D3041)
-                : badgeColor.withOpacity(0.5),
+    return GestureDetector(
+      onTap: () => showYoloEventDetailDialog(context, ref, event),
+      child: Opacity(
+        opacity: isChecked ? 0.7 : 1.0,
+        child: Container(
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            color: const Color(0xFF11131C),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isChecked
+                  ? const Color(0xFF2D3041)
+                  : badgeColor.withOpacity(0.5),
+            ),
           ),
-        ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-                  decoration: BoxDecoration(
-                    color: badgeColor.withOpacity(0.14),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  child: Text(
-                    badgeLabel,
-                    style: TextStyle(
-                      color: badgeColor,
-                      fontSize: 10,
-                      fontWeight: FontWeight.bold,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+                    decoration: BoxDecoration(
+                      color: badgeColor.withOpacity(0.14),
+                      borderRadius: BorderRadius.circular(4),
+                    ),
+                    child: Text(
+                      badgeLabel,
+                      style: TextStyle(
+                        color: badgeColor,
+                        fontSize: 10,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
+                  if (isChecked)
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        const Icon(Icons.check_circle, color: Color(0xFF4ADE80), size: 13),
+                        const SizedBox(width: 4),
+                        Text(
+                          event.adminLabel ?? '확인됨',
+                          style: const TextStyle(
+                            color: Color(0xFF4ADE80),
+                            fontSize: 10,
+                            fontWeight: FontWeight.w600,
+                          ),
+                        ),
+                      ],
+                    ),
+                ],
+              ),
+              const SizedBox(height: 10),
+              Text(
+                '감지 인원: ${event.personCount}명 ${event.sourceRegionName != null ? '(${event.sourceRegionName})' : ''}',
+                style: TextStyle(
+                  color: Colors.white,
+                  fontSize: 13,
+                  fontWeight: isChecked ? FontWeight.normal : FontWeight.w600,
                 ),
-                if (isChecked)
+              ),
+              const SizedBox(height: 10),
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
                   Row(
-                    mainAxisSize: MainAxisSize.min,
                     children: [
-                      const Icon(Icons.check_circle, color: Color(0xFF4ADE80), size: 13),
+                      const Icon(Icons.access_time, size: 10, color: Color(0xFF757B92)),
                       const SizedBox(width: 4),
                       Text(
-                        event.adminLabel ?? '확인됨',
+                        formatLocalTime(event.timestamp),
                         style: const TextStyle(
-                          color: Color(0xFF4ADE80),
-                          fontSize: 10,
-                          fontWeight: FontWeight.w600,
+                          color: Color(0xFF757B92),
+                          fontSize: 11,
                         ),
                       ),
                     ],
                   ),
-              ],
-            ),
-            const SizedBox(height: 10),
-            Text(
-              '감지 인원: ${event.personCount}명 ${event.sourceRegionName != null ? '(${event.sourceRegionName})' : ''}',
-              style: TextStyle(
-                color: Colors.white,
-                fontSize: 13,
-                fontWeight: isChecked ? FontWeight.normal : FontWeight.w600,
-              ),
-            ),
-            const SizedBox(height: 10),
-            Row(
-              mainAxisAlignment: MainAxisAlignment.spaceBetween,
-              children: [
-                Row(
-                  children: [
-                    const Icon(Icons.access_time, size: 10, color: Color(0xFF757B92)),
-                    const SizedBox(width: 4),
-                    Text(
-                      formatLocalTime(event.timestamp),
-                      style: const TextStyle(
-                        color: Color(0xFF757B92),
-                        fontSize: 11,
-                      ),
+                  if (event.imageUrl != null)
+                    const Row(
+                      children: [
+                        Icon(Icons.image_outlined, size: 10, color: Color(0xFF757B92)),
+                        SizedBox(width: 4),
+                        Text(
+                          '이미지 첨부됨',
+                          style: TextStyle(color: Color(0xFF757B92), fontSize: 11),
+                        ),
+                      ],
                     ),
-                  ],
-                ),
-                if (event.imageUrl != null)
-                  const Row(
-                    children: [
-                      Icon(Icons.image_outlined, size: 10, color: Color(0xFF757B92)),
-                      SizedBox(width: 4),
-                      Text(
-                        '이미지 첨부됨',
-                        style: TextStyle(color: Color(0xFF757B92), fontSize: 11),
-                      ),
-                    ],
-                  ),
-              ],
-            ),
-          ],
+                ],
+              ),
+            ],
+          ),
         ),
       ),
     );

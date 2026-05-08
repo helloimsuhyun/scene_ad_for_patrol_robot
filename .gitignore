@@ -76,3 +76,7 @@ build/
 build/
 .dart_tool/
 build/
+
+# Flutter generated files
+sentrynexcontrol/.dart_tool/
+sentrynexcontrol/build/

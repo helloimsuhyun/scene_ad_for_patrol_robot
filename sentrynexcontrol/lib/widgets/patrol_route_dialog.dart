@@ -4,6 +4,7 @@ import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../providers/map_provider.dart';
 import '../features/control/control_provider.dart';
+import '../providers/server_config_provider.dart';
 
 class PatrolRouteDialog extends ConsumerStatefulWidget {
   const PatrolRouteDialog({super.key});
@@ -426,7 +427,7 @@ class _PatrolRouteDialogState extends ConsumerState<PatrolRouteDialog> {
                                           "P_${DateTime.now().millisecondsSinceEpoch}";
                                       final res = await http.post(
                                         Uri.parse(
-                                          'http://127.0.0.1:8000/places',
+                                          ref.read(serverConfigProvider).getUrl('/places'),
                                         ),
                                         headers: {
                                           'Content-Type': 'application/json',

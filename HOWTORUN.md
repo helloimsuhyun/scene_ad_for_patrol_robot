@@ -24,14 +24,18 @@ Stream Server : 8001
 
 ```bash
 cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
+flutter clean
+rm -rf build .dart_tool
 flutter pub get
-flutter build web
+flutter build web --release --no-web-resources-cdn --pwa-strategy=none
+
+
 ```
 
 빌드 결과는 아래 폴더에 생성됩니다.
 
 ```text
-~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
+cd ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
 ```
 
 ---
@@ -42,14 +46,14 @@ flutter build web
 
 ```bash
 cd ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
-python3 -m http.server 8080
+python3 -m http.server 8093 --bind 0.0.0.0
 ```
 
 접속 주소:
 
 ```text
-같은 PC : http://localhost:8080
-다른 PC : http://서버PC_IP:8080
+같은 PC : http://localhost:8093
+다른 PC : http://서버PC_IP:8093
 ```
 
 서버 PC IP 확인:
@@ -57,3 +61,8 @@ python3 -m http.server 8080
 ```bash
 hostname -I
 ```
+
+cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
+
+
+

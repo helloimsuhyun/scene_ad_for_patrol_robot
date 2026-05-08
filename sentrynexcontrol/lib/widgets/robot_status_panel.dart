@@ -3,12 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
 import '../providers/robot_provider.dart';
+import '../providers/map_provider.dart';
 import '../features/control/control_provider.dart'; // placesProvider 참조
+import '../providers/server_config_provider.dart';
 import 'patrol_route_dialog.dart';
 import 'timeline_dialog.dart';
-
-// 로봇 현재 목표 지점 폴링은 실제 연동 시 활성화 예정
-// final _robotGoalProvider = StreamProvider...
 
 // 수동 캡처 대기를 위한 로딩 상태
 final _isCapturingProvider = StateProvider<bool>((ref) => false);
@@ -28,7 +27,6 @@ class RobotStatusPanel extends ConsumerStatefulWidget {
 
 class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
   bool isCliButtonsEnabled = false;
-  // 로컬 _isPatrolling 제거 (전역 patrolStatusProvider 사용)
 
   Future<void> _triggerCapture(
     BuildContext context,
@@ -38,13 +36,14 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
     final loadingNotifier = ref.read(_isCapturingProvider.notifier);
     loadingNotifier.state = true;
     try {
+      final config = ref.read(serverConfigProvider);
       final targetPlace = ref.read(_testTargetPlaceProvider);
       final body = endpoint == 'place_and_capture' && targetPlace != null
           ? jsonEncode({'place_id': targetPlace})
           : null;
 
       final response = await http.post(
-        Uri.parse('http://192.168.0.24:8090/patrol/$endpoint'),
+        Uri.parse('http://${config.serverIp}:8090/patrol/$endpoint'),
         headers: body != null ? {'Content-Type': 'application/json'} : null,
         body: body,
       );
@@ -137,7 +136,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
     }
     try {
       final res = await http.post(
-        Uri.parse('http://127.0.0.1:8000/robot/command'),
+        Uri.parse(ref.read(serverConfigProvider).getUrl('/robot/command')),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'command': cmd}),
       );
@@ -157,7 +156,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
 
     try {
       final res = await http.post(
-        Uri.parse('http://127.0.0.1:8000/query_capture_label'),
+        Uri.parse(ref.read(serverConfigProvider).getUrl('/query_capture_label')),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'label': next}),
       );
@@ -176,9 +175,15 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
     }
   }
 
+  void _toggleWaypointPickingMode() {
+    final current = ref.read(waypointPickingModeProvider);
+    ref.read(waypointPickingModeProvider.notifier).state = !current;
+  }
+
   @override
   Widget build(BuildContext context) {
     final robotPose = ref.watch(robotPoseProvider);
+    final battery = ref.watch(robotBatteryProvider);
 
     return Container(
       width: double.infinity,
@@ -223,7 +228,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                       child: Align(
                         alignment: Alignment.centerLeft,
                         child: Container(
-                          width: 60 * 0.72,
+                          width: 60 * (battery / 100.0),
                           decoration: BoxDecoration(
                             color: const Color(0xFF7F7CFF), // 포인트 컬러 연보라색
                             borderRadius: BorderRadius.circular(5),
@@ -232,8 +237,8 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                       ),
                     ),
                     const SizedBox(width: 8),
-                    const Text(
-                      '72%',
+                    Text(
+                      '$battery%',
                       style: TextStyle(
                         color: Color(0xFF7F7CFF), // 연보라색 텍스트
                         fontSize: 11,
@@ -516,7 +521,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
                 const Text(
-                  '사람 감지 (YOLO)',
+                  'YOLO / AUDIO MODE',
                   style: TextStyle(color: Color(0xFF9FA4B9), fontSize: 11),
                 ),
                 Consumer(
@@ -731,57 +736,111 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                               fontSize: 14,
                             ),
                           ),
-                          Text(
-                            firstName,
-                            style: const TextStyle(
-                              color: Colors.white,
-                              fontSize: 14,
-                              fontWeight: FontWeight.w600,
+                          Expanded(
+                            child: Text(
+                              firstName,
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w600,
+                              ),
+                              overflow: TextOverflow.ellipsis,
                             ),
+                          ),
+                          Consumer(
+                            builder: (context, ref, _) {
+                              final isPicking = ref.watch(waypointPickingModeProvider);
+                              return IconButton(
+                                onPressed: _toggleWaypointPickingMode,
+                                icon: Icon(
+                                  isPicking ? Icons.close : Icons.add_location_alt,
+                                  size: 18,
+                                ),
+                                color: isPicking ? Colors.redAccent : const Color(0xFF7F7CFF),
+                                tooltip: isPicking ? '경유점 추가 취소' : '지도에 경유점 추가',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                              );
+                            },
                           ),
                         ],
                       ),
                       if (patrolList.isNotEmpty) ...[
                         const SizedBox(height: 12),
-                        Wrap(
-                          spacing: 6,
-                          runSpacing: 6,
-                          children: patrolList.asMap().entries.map((entry) {
-                            final idx = entry.key;
-                            final p = entry.value;
-                            final pid = p['place_id'].toString();
-                            final name = p['display_name']?.toString() ?? pid;
-                            final isCurrent = pid == firstId;
-                            return Container(
-                              padding: const EdgeInsets.symmetric(
-                                horizontal: 10,
-                                vertical: 5,
-                              ),
-                              decoration: BoxDecoration(
-                                color: isCurrent
-                                    ? const Color(0xFF7F7CFF)
-                                    : const Color(0xFF26293A),
-                                borderRadius: BorderRadius.circular(12),
-                                border: Border.all(
-                                  color: isCurrent
-                                      ? const Color(0xFF7F7CFF)
-                                      : const Color(0xFF3D4060),
+                        SizedBox(
+                          height: 30,
+                          child: ReorderableListView.builder(
+                            scrollDirection: Axis.horizontal,
+                            buildDefaultDragHandles: false,
+                            itemCount: patrolList.length,
+                            onReorder: (oldIndex, newIndex) {
+                              if (oldIndex == 0 || newIndex == 0) return; // 현재 노드는 이동 불가
+                              if (newIndex > patrolList.length) newIndex = patrolList.length;
+                              if (oldIndex < newIndex) newIndex -= 1;
+                              
+                              final newList = List<Map<String, dynamic>>.from(patrolList);
+                              final item = newList.removeAt(oldIndex);
+                              newList.insert(newIndex, item);
+                              
+                              final orderedIds = newList.map((e) => e['place_id'].toString()).toList();
+                              ControlActions.reorderPatrol(ref, orderedIds);
+                            },
+                            proxyDecorator: (child, index, animation) => Material(
+                              color: Colors.transparent,
+                              child: child,
+                            ),
+                            itemBuilder: (context, idx) {
+                              final p = patrolList[idx];
+                              final pid = p['place_id'].toString();
+                              final name = p['display_name']?.toString() ?? pid;
+                              final isCurrent = pid == firstId;
+                              
+                              return ReorderableDragStartListener(
+                                key: ValueKey(pid),
+                                index: idx,
+                                enabled: !isCurrent, // 현재 노드는 드래그 비활성화
+                                child: Container(
+                                  margin: const EdgeInsets.only(right: 8),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 10,
+                                    vertical: 5,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: isCurrent
+                                        ? const Color(0xFF7F7CFF)
+                                        : const Color(0xFF26293A),
+                                    borderRadius: BorderRadius.circular(12),
+                                    border: Border.all(
+                                      color: isCurrent
+                                          ? const Color(0xFF7F7CFF)
+                                          : const Color(0xFF3D4060),
+                                    ),
+                                  ),
+                                  child: Row(
+                                    mainAxisSize: MainAxisSize.min,
+                                    children: [
+                                      Text(
+                                        '${idx + 1}. $name',
+                                        style: TextStyle(
+                                          color: isCurrent
+                                              ? Colors.white
+                                              : const Color(0xFF7F7CFF),
+                                          fontSize: 13,
+                                          fontWeight: isCurrent
+                                              ? FontWeight.w600
+                                              : FontWeight.normal,
+                                        ),
+                                      ),
+                                      if (!isCurrent) const SizedBox(width: 4),
+                                      if (!isCurrent)
+                                        const Icon(Icons.drag_indicator,
+                                            size: 14, color: Colors.white24),
+                                    ],
+                                  ),
                                 ),
-                              ),
-                              child: Text(
-                                '${idx + 1}. $name',
-                                style: TextStyle(
-                                  color: isCurrent
-                                      ? Colors.white
-                                      : const Color(0xFF9FA4B9),
-                                  fontSize: 13, // 글씨 크기 확대
-                                  fontWeight: isCurrent
-                                      ? FontWeight.w600
-                                      : FontWeight.normal,
-                                ),
-                              ),
-                            );
-                          }).toList(),
+                              );
+                            },
+                          ),
                         ),
                       ],
                     ],
