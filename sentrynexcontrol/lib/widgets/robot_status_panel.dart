@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../main.dart' show kFontFallback; // 폰트 fallback 상수
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -156,7 +157,9 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
 
     try {
       final res = await http.post(
-        Uri.parse(ref.read(serverConfigProvider).getUrl('/query_capture_label')),
+        Uri.parse(
+          ref.read(serverConfigProvider).getUrl('/query_capture_label'),
+        ),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'label': next}),
       );
@@ -540,13 +543,60 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                         child: DropdownButton<int>(
                           value: yoloMode,
                           dropdownColor: const Color(0xFF1C1E2B),
-                          icon: const Icon(Icons.arrow_drop_down, color: Colors.white54, size: 16),
-                          style: const TextStyle(color: Colors.white, fontSize: 13),
+                          icon: const Icon(
+                            Icons.arrow_drop_down,
+                            color: Colors.white54,
+                            size: 16,
+                          ),
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 13,
+                            fontFamilyFallback: kFontFallback,
+                          ),
                           items: const [
-                            DropdownMenuItem(value: 0, child: Text('OFF', style: TextStyle(fontSize: 12))),
-                            DropdownMenuItem(value: 1, child: Text('GLOBAL', style: TextStyle(fontSize: 12))),
-                            DropdownMenuItem(value: 2, child: Text('REGION', style: TextStyle(fontSize: 12))),
+                            DropdownMenuItem(
+                              value: 0,
+                              child: Text(
+                                'OFF',
+                                style: TextStyle(fontSize: 12, color: Colors.white, fontFamilyFallback: kFontFallback),
+                              ),
+                            ),
+                            DropdownMenuItem(
+                              value: 1,
+                              child: Text(
+                                'GLOBAL',
+                                style: TextStyle(fontSize: 12, color: Colors.white, fontFamilyFallback: kFontFallback),
+                              ),
+                            ),
+                            DropdownMenuItem(
+                              value: 2,
+                              child: Text(
+                                'REGION',
+                                style: TextStyle(fontSize: 12, color: Colors.white, fontFamilyFallback: kFontFallback),
+                              ),
+                            ),
                           ],
+                          selectedItemBuilder: (BuildContext context) {
+                            return [0, 1, 2].map<Widget>((int item) {
+                              String label = '';
+                              if (item == 0) label = 'OFF';
+                              else if (item == 1) label = 'GLOBAL';
+                              else label = 'REGION';
+                              return Container(
+                                alignment: Alignment.centerLeft,
+                                child: Text(
+                                  label,
+                                  style: const TextStyle(
+                                    color: Colors.white,
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w500,
+                                    fontFamilyFallback: kFontFallback,
+                                  ),
+                                ),
+                              );
+                            }).toList();
+                          },
+
                           onChanged: (val) {
                             if (val != null) {
                               ref.read(yoloModeProvider.notifier).setMode(val);
@@ -706,14 +756,18 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                   Map<String, dynamic>? currentPlace;
                   if (currentTargetId != null) {
                     try {
-                      currentPlace = patrolList.firstWhere((p) => p['place_id'].toString() == currentTargetId);
+                      currentPlace = patrolList.firstWhere(
+                        (p) => p['place_id'].toString() == currentTargetId,
+                      );
                     } catch (_) {}
                   }
                   if (currentPlace == null && patrolList.isNotEmpty) {
                     currentPlace = patrolList.first;
                   }
 
-                  final firstId = currentPlace != null ? currentPlace['place_id'].toString() : null;
+                  final firstId = currentPlace != null
+                      ? currentPlace['place_id'].toString()
+                      : null;
                   final firstName = currentPlace != null
                       ? (currentPlace['display_name']?.toString() ?? firstId!)
                       : '노드 없음';
@@ -749,14 +803,20 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                           ),
                           Consumer(
                             builder: (context, ref, _) {
-                              final isPicking = ref.watch(waypointPickingModeProvider);
+                              final isPicking = ref.watch(
+                                waypointPickingModeProvider,
+                              );
                               return IconButton(
                                 onPressed: _toggleWaypointPickingMode,
                                 icon: Icon(
-                                  isPicking ? Icons.close : Icons.add_location_alt,
+                                  isPicking
+                                      ? Icons.close
+                                      : Icons.add_location_alt,
                                   size: 18,
                                 ),
-                                color: isPicking ? Colors.redAccent : const Color(0xFF7F7CFF),
+                                color: isPicking
+                                    ? Colors.redAccent
+                                    : const Color(0xFF7F7CFF),
                                 tooltip: isPicking ? '경유점 추가 취소' : '지도에 경유점 추가',
                                 padding: EdgeInsets.zero,
                                 constraints: const BoxConstraints(),
@@ -774,27 +834,34 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                             buildDefaultDragHandles: false,
                             itemCount: patrolList.length,
                             onReorder: (oldIndex, newIndex) {
-                              if (oldIndex == 0 || newIndex == 0) return; // 현재 노드는 이동 불가
-                              if (newIndex > patrolList.length) newIndex = patrolList.length;
+                              if (oldIndex == 0 || newIndex == 0)
+                                return; // 현재 노드는 이동 불가
+                              if (newIndex > patrolList.length)
+                                newIndex = patrolList.length;
                               if (oldIndex < newIndex) newIndex -= 1;
-                              
-                              final newList = List<Map<String, dynamic>>.from(patrolList);
+
+                              final newList = List<Map<String, dynamic>>.from(
+                                patrolList,
+                              );
                               final item = newList.removeAt(oldIndex);
                               newList.insert(newIndex, item);
-                              
-                              final orderedIds = newList.map((e) => e['place_id'].toString()).toList();
+
+                              final orderedIds = newList
+                                  .map((e) => e['place_id'].toString())
+                                  .toList();
                               ControlActions.reorderPatrol(ref, orderedIds);
                             },
-                            proxyDecorator: (child, index, animation) => Material(
-                              color: Colors.transparent,
-                              child: child,
-                            ),
+                            proxyDecorator: (child, index, animation) =>
+                                Material(
+                                  color: Colors.transparent,
+                                  child: child,
+                                ),
                             itemBuilder: (context, idx) {
                               final p = patrolList[idx];
                               final pid = p['place_id'].toString();
                               final name = p['display_name']?.toString() ?? pid;
                               final isCurrent = pid == firstId;
-                              
+
                               return ReorderableDragStartListener(
                                 key: ValueKey(pid),
                                 index: idx,
@@ -833,8 +900,11 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                                       ),
                                       if (!isCurrent) const SizedBox(width: 4),
                                       if (!isCurrent)
-                                        const Icon(Icons.drag_indicator,
-                                            size: 14, color: Colors.white24),
+                                        const Icon(
+                                          Icons.drag_indicator,
+                                          size: 14,
+                                          color: Colors.white24,
+                                        ),
                                     ],
                                   ),
                                 ),

@@ -1,0 +1,252 @@
+                    child: mapImagePathAsync.when(
+                      data: (imagePath) => mapTransformerAsync.when(
+                        data: (transformer) {
+                          final robotGoal = ref.watch(robotGoalProvider);
+                          // 목표 지점 찾기
+                          Map<String, dynamic>? targetPlace;
+                          if (robotGoal?.nextPlaceId != null &&
+                              placesAsync.hasValue) {
+                            final places =
+                                placesAsync.value?['places'] as List<dynamic>?;
+                            if (places != null) {
+                              for (var p in places) {
+                                if (p['place_id'].toString() ==
+                                    robotGoal!.nextPlaceId) {
+                                  targetPlace = p;
+                                  break;
+                                }
+                              }
+                            }
+                          }
+                          return LayoutBuilder(
+                            builder: (context, constraints) {
+                              // Constraints 사이즈를 렌더링 사이클 이후에 _viewportSize에 저장
+                              WidgetsBinding.instance.addPostFrameCallback((_) {
+                                if (mounted) {
+                                  _viewportSize = Size(
+                                    constraints.maxWidth,
+                                    constraints.maxHeight,
+                                  );
+                                }
+                              });
+                              return InteractiveViewer(
+                                constrained: false,
+                                minScale: 1.0,
+                                maxScale: 5.0,
+                                transformationController:
+                                    _transformationController,
+                                child: Center(
+                                  child: FittedBox(
+                                    fit: BoxFit.contain,
+                                    alignment: Alignment.center,
+                                    child: GestureDetector(
+                                      onTapDown: (details) {
+                                        if (isWaypointPicking) {
+                                          final r = transformer.inverseTransform(
+                                            details.localPosition.dx,
+                                            details.localPosition.dy,
+                                            0,
+                                          );
+                                          _promptSaveWaypoint(r['x']!, r['y']!);
+                                        }
+                                      },
+                                      onPanUpdate: isDrawingMode
+                                          ? (details) {
+                                              setState(() {
+                                                _dragEnd = details.localPosition;
+                                              });
+                                            }
+                                          : null,
+                                      onPanEnd: isDrawingMode
+                                          ? (details) {
+                                              if (_dragStart != null &&
+                                                  _dragEnd != null) {
+                                                final rStart = transformer
+                                                    .inverseTransform(
+                                                      _dragStart!.dx,
+                                                      _dragStart!.dy,
+                                                      0,
+                                                    );
+                                                final rEnd = transformer
+                                                    .inverseTransform(
+                                                      _dragEnd!.dx,
+                                                      _dragEnd!.dy,
+                                                      0,
+                                                    );
+                                                _promptSaveRegion(
+                                                  rStart['x']!,
+                                                  rEnd['x']!,
+                                                  rStart['y']!,
+                                                  rEnd['y']!,
+                                                );
+                                              }
+                                            }
+                                          : null,
+                                      child: Stack(
+                                        clipBehavior: Clip.none,
+                                        children: [
+                                          Image.asset(imagePath),
+
+                                          // 경유점 추가 모드 오버레이
+                                          if (isWaypointPicking)
+                                            Positioned.fill(
+                                              child: Container(
+                                                color: Colors.black.withOpacity(
+                                                  0.5,
+                                                ),
+                                                alignment: Alignment.center,
+                                                child: const Text(
+                                                  '원하는 위치를 클릭하여 경유점을 추가하세요',
+                                                  style: TextStyle(
+                                                    color: Colors.white,
+                                                    fontSize: 16,
+                                                    fontWeight: FontWeight.bold,
+                                                    shadows: [
+                                                      Shadow(
+                                                        color: Colors.black,
+                                                        blurRadius: 4,
+                                                      ),
+                                                    ],
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+
+                                          if (ref.watch(
+                                                yoloShowRegionsProvider,
+                                              ) &&
+                                              yoloRegionsAsync.value != null)
+                                            ...yoloRegionsAsync.value!.map(
+                                              (r) => _YoloRegionMarker(
+                                                region: r,
+                                                transformer: transformer,
+                                              ),
+                                            ),
+                                          if (placesAsync.hasValue &&
+                                              placesAsync.value?['places'] !=
+                                                  null)
+                                            ...(placesAsync.value?['places']
+                                                    as List<dynamic>)
+                                                .map((p) {
+                                              final placeId = p['place_id']
+                                                  .toString();
+                                              final pt = transformer.transform(
+                                                p['x'],
+                                                p['y'],
+                                                p['yaw'] ?? 0,
+                                              );
+                                              final isTarget = targetPlace !=
+                                                      null &&
+                                                  targetPlace?['place_id'] ==
+                                                      p['place_id'];
+
+                                              final event =
+                                                  latestEventsByPlace[placeId];
+
+                                              return _PlaceMarker(
+                                                place: p,
+                                                px: pt['px']!,
+                                                py: pt['py']!,
+                                                isTarget: isTarget,
+                                                event: event,
+                                                onTap: () =>
+                                                    _onPlaceMarkerTap(placeId),
+                                              );
+                                            }),
+
+                                          if (robotPose != null &&
+                                              robotPose.x != null &&
+                                              robotPose.y != null)
+                                            _RobotMarker(
+                                              pose: robotPose,
+                                              transformer: transformer,
+                                            ),
+
+                                          for (var audio in audioEvents)
+                                            _AudioMarker(
+                                              event: audio,
+                                              transformer: transformer,
+                                            ),
+
+                                          for (var auth in authEvents)
+                                            _AuthMarker(
+                                              event: auth,
+                                              transformer: transformer,
+                                            ),
+
+                                          if (isDrawingMode &&
+                                              _dragStart != null &&
+                                              _dragEnd != null)
+                                            Positioned.fill(
+                                              child: IgnorePointer(
+                                                child: CustomPaint(
+                                                  painter: _RegionPainter(
+                                                    start: _dragStart!,
+                                                    end: _dragEnd!,
+                                                  ),
+                                                ),
+                                              ),
+                                            ),
+
+                                          if (ref.watch(yoloDrawingModeProvider))
+                                            Positioned.fill(
+                                              child: GestureDetector(
+                                                onPanStart: (details) {
+                                                  setState(() {
+                                                    _dragStart =
+                                                        details.localPosition;
+                                                    _dragEnd =
+                                                        details.localPosition;
+                                                  });
+                                                },
+                                                onPanUpdate: (details) {
+                                                  setState(() {
+                                                    _dragEnd =
+                                                        details.localPosition;
+                                                  });
+                                                },
+                                                onPanEnd: (_) {
+                                                  // 드래그 종료 처리는 상위 GestureDetector에서 수행
+                                                },
+                                              ),
+                                            ),
+
+                                          if (_isTrackingMode)
+                                            _TrackingOverlay(
+                                              color: const Color(
+                                                0xFF4ADE80,
+                                              ).withOpacity(0.2),
+                                            ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          );
+                        },
+                        loading: () => const Center(
+                          child: CircularProgressIndicator(
+                            color: Color(0xFF38BDF8),
+                          ),
+                        ),
+                        error: (err, stack) => Center(
+                          child: Text(
+                            'Map Transform Error: $err',
+                            style: const TextStyle(color: Colors.red),
+                          ),
+                        ),
+                      ),
+                      loading: () => const Center(
+                        child: CircularProgressIndicator(
+                          color: Color(0xFF38BDF8),
+                        ),
+                      ),
+                      error: (err, stack) => Center(
+                        child: Text(
+                          'Map Image Error: $err',
+                          style: const TextStyle(color: Colors.red),
+                        ),
+                      ),
+                    ),
