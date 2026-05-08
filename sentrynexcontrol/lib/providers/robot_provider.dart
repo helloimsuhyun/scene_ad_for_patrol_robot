@@ -109,8 +109,9 @@ class YoloModeNotifier extends StateNotifier<int> {
       if (response.statusCode == 200) {
         final data = jsonDecode(response.body);
         if (data['ok'] == true) {
-          if (state != data['yolo_mode']) {
-            state = data['yolo_mode'];
+          final int newVal = (data['yolo_mode'] as num).toInt();
+          if (state != newVal) {
+            state = newVal;
           }
         }
       }

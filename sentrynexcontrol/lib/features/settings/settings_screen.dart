@@ -6,6 +6,7 @@ import '../../providers/yolo_provider.dart';
 import '../../providers/server_config_provider.dart';
 import '../control/control_provider.dart';
 import '../../providers/auth_event_provider.dart';
+import '../../providers/robot_provider.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -39,10 +40,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
     setState(() {
       _isSimulating = true;
     });
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('시뮬레이션: 3초 후 이벤트가 발생합니다...')),
-    );
-    
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(const SnackBar(content: Text('시뮬레이션: 3초 후 이벤트가 발생합니다...')));
+
     await Future.delayed(const Duration(seconds: 3));
     if (!mounted) return;
 
@@ -76,7 +77,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
           ),
           const SizedBox(height: 32),
-          
+
           // 서버 연결 설정 카드
           Container(
             padding: const EdgeInsets.all(24),
@@ -121,13 +122,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                           fillColor: const Color(0xFF11131C),
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: Color(0xFF2D3041)),
+                            borderSide: const BorderSide(
+                              color: Color(0xFF2D3041),
+                            ),
                           ),
                           enabledBorder: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(8),
-                            borderSide: const BorderSide(color: Color(0xFF2D3041)),
+                            borderSide: const BorderSide(
+                              color: Color(0xFF2D3041),
+                            ),
                           ),
-                          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+                          contentPadding: const EdgeInsets.symmetric(
+                            horizontal: 16,
+                            vertical: 14,
+                          ),
                         ),
                       ),
                     ),
@@ -136,17 +144,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       onPressed: () async {
                         final ip = _ipController.text.trim();
                         if (ip.isNotEmpty) {
-                          await ref.read(serverConfigProvider.notifier).setIp(ip);
+                          await ref
+                              .read(serverConfigProvider.notifier)
+                              .setIp(ip);
                           // 모든 실시간 데이터 프로바이더 강제 갱신
                           ref.invalidate(placesProvider);
                           ref.invalidate(eventListProvider);
                           ref.invalidate(audioEventListProvider);
                           ref.invalidate(yoloEventsProvider);
                           ref.invalidate(authEventListProvider);
+                          ref.invalidate(yoloModeProvider);
+                          ref.invalidate(robotBatteryProvider);
+                          ref.invalidate(robotPoseProvider);
+                          ref.invalidate(robotGoalProvider);
 
                           if (mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('서버 IP가 $ip로 업데이트되었습니다. (모든 데이터 갱신됨)')),
+                              SnackBar(
+                                content: Text(
+                                  '서버 IP가 $ip로 업데이트되었습니다. (모든 데이터 갱신됨)',
+                                ),
+                              ),
                             );
                           }
                         }
@@ -154,10 +172,18 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       style: ElevatedButton.styleFrom(
                         backgroundColor: const Color(0xFF4ADE80),
                         foregroundColor: Colors.black,
-                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
-                        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 20,
+                          vertical: 16,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
                       ),
-                      child: const Text('저장', style: TextStyle(fontWeight: FontWeight.bold)),
+                      child: const Text(
+                        '저장',
+                        style: TextStyle(fontWeight: FontWeight.bold),
+                      ),
                     ),
                   ],
                 ),
@@ -177,7 +203,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               children: [
                 Row(
                   children: [
-                    const Icon(Icons.bug_report_outlined, color: Color(0xFF7F7CFF)),
+                    const Icon(
+                      Icons.bug_report_outlined,
+                      color: Color(0xFF7F7CFF),
+                    ),
                     const SizedBox(width: 8),
                     const Text(
                       '이벤트 시뮬레이터 (테스트용)',
@@ -195,7 +224,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   style: TextStyle(color: Color(0xFF9FA4B9), fontSize: 13),
                 ),
                 const SizedBox(height: 24),
-                
+
                 const Text(
                   '경보 종류 선택',
                   style: TextStyle(
@@ -217,19 +246,31 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       value: _selectedEventType,
                       dropdownColor: const Color(0xFF1C1E2B),
                       isExpanded: true,
-                      icon: const Icon(Icons.arrow_drop_down, color: Colors.white54),
+                      icon: const Icon(
+                        Icons.arrow_drop_down,
+                        color: Colors.white54,
+                      ),
                       items: const [
                         DropdownMenuItem(
                           value: 'vision',
-                          child: Text('이상 감지 (Vision) - 카메라 강제 진동 감지', style: TextStyle(color: Colors.white)),
+                          child: Text(
+                            '이상 감지 (Vision) - 카메라 강제 진동 감지',
+                            style: TextStyle(color: Colors.white),
+                          ),
                         ),
                         DropdownMenuItem(
                           value: 'audio',
-                          child: Text('소리 감지 (Audio) - 유리 깨지는 소리', style: TextStyle(color: Colors.white)),
+                          child: Text(
+                            '소리 감지 (Audio) - 유리 깨지는 소리',
+                            style: TextStyle(color: Colors.white),
+                          ),
                         ),
                         DropdownMenuItem(
                           value: 'yolo',
-                          child: Text('사람 감지 (YOLO) - 보안 구역 체류 위반', style: TextStyle(color: Colors.white)),
+                          child: Text(
+                            '사람 감지 (YOLO) - 보안 구역 체류 위반',
+                            style: TextStyle(color: Colors.white),
+                          ),
                         ),
                       ],
                       onChanged: _isSimulating
@@ -261,7 +302,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         ? const SizedBox(
                             width: 20,
                             height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: Colors.white,
+                            ),
                           )
                         : const Text(
                             '경보 발생시키기 (3초 후)',
