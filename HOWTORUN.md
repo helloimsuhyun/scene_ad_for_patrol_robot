@@ -23,10 +23,13 @@ Stream Server : 8001
 인터넷이 되는 환경에서 한 번만 실행합니다.
 
 ```bash
+cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
 flutter clean
 rm -rf build .dart_tool
 flutter pub get
 flutter build web --release --no-web-resources-cdn --pwa-strategy=none
+
+
 ```
 
 빌드 결과는 아래 폴더에 생성됩니다.
@@ -49,8 +52,8 @@ python3 -m http.server 8093 --bind 0.0.0.0
 접속 주소:
 
 ```text
-같은 PC : http://localhost:8090
-다른 PC : http://서버PC_IP:8090
+같은 PC : http://localhost:8093
+다른 PC : http://서버PC_IP:8093
 ```
 
 서버 PC IP 확인:
