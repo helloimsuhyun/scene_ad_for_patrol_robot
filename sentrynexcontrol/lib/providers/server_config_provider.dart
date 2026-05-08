@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class ServerConfig {
   final String serverIp;
@@ -30,8 +31,18 @@ class ServerConfig {
 }
 
 class ServerConfigNotifier extends StateNotifier<ServerConfig> {
-  ServerConfigNotifier() : super(ServerConfig(serverIp: '127.0.0.1')) {
+  ServerConfigNotifier() : super(ServerConfig(serverIp: _getDefaultIp())) {
     _loadConfig();
+  }
+
+  static String _getDefaultIp() {
+    if (kIsWeb) {
+      final host = Uri.base.host;
+      if (host.isNotEmpty) {
+        return host;
+      }
+    }
+    return '127.0.0.1';
   }
 
   static const String _keyIp = 'server_ip';
