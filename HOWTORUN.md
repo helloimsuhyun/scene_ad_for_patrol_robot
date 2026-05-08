@@ -42,14 +42,14 @@ flutter build web
 
 ```bash
 cd ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
-python3 -m http.server 8080
+python3 -m http.server 8090 --bind 0.0.0.0
 ```
 
 접속 주소:
 
 ```text
-같은 PC : http://localhost:8080
-다른 PC : http://서버PC_IP:8080
+같은 PC : http://localhost:8090
+다른 PC : http://서버PC_IP:8090
 ```
 
 서버 PC IP 확인:
@@ -57,3 +57,14 @@ python3 -m http.server 8080
 ```bash
 hostname -I
 ```
+
+cd ~/scene_ad_for_patrol_robot/sentrynexcontrol
+
+flutter clean
+rm -rf build
+flutter pub get
+
+flutter build web --release --no-web-resources-cdn
+
+cd ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
+python3 -m http.server 8091 --bind 0.0.0.0
