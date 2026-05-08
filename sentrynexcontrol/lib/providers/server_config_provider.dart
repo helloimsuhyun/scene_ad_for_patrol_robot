@@ -8,9 +8,18 @@ class ServerConfig {
   ServerConfig({required this.serverIp, this.port = '8000'});
 
   String get baseUrl => 'http://$serverIp:$port';
+  String get signalingUrl => 'http://$serverIp:8001'; // 시그널링 서버 (고정 포트 8001)
   String get imageUrlBase => 'http://$serverIp:$port/images/';
   String get audioUrlBase => 'http://$serverIp:$port/audio/';
   String get yoloImageUrlBase => 'http://$serverIp:$port/person_images/';
+  String get authImageUrlBase => 'http://$serverIp:$port/auth_images/';
+
+  String getUrl(String path) {
+    if (path.startsWith('/')) {
+      return '$baseUrl$path';
+    }
+    return '$baseUrl/$path';
+  }
 
   ServerConfig copyWith({String? serverIp, String? port}) {
     return ServerConfig(

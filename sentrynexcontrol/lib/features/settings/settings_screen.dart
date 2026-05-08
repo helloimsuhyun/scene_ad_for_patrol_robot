@@ -4,6 +4,8 @@ import '../../providers/event_provider.dart';
 import '../../providers/audio_provider.dart';
 import '../../providers/yolo_provider.dart';
 import '../../providers/server_config_provider.dart';
+import '../control/control_provider.dart';
+import '../../providers/auth_event_provider.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -135,9 +137,16 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                         final ip = _ipController.text.trim();
                         if (ip.isNotEmpty) {
                           await ref.read(serverConfigProvider.notifier).setIp(ip);
+                          // 모든 실시간 데이터 프로바이더 강제 갱신
+                          ref.invalidate(placesProvider);
+                          ref.invalidate(eventListProvider);
+                          ref.invalidate(audioEventListProvider);
+                          ref.invalidate(yoloEventsProvider);
+                          ref.invalidate(authEventListProvider);
+
                           if (mounted) {
                             ScaffoldMessenger.of(context).showSnackBar(
-                              SnackBar(content: Text('서버 IP가 $ip로 업데이트되었습니다. (모든 통신 재설정)')),
+                              SnackBar(content: Text('서버 IP가 $ip로 업데이트되었습니다. (모든 데이터 갱신됨)')),
                             );
                           }
                         }

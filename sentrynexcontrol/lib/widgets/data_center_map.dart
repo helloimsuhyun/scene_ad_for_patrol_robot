@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'dart:math' show pi;
 import 'dart:convert';
+import 'dart:async';
+import 'dart:ui' as ui;
 import '../providers/event_provider.dart';
 import '../providers/map_provider.dart';
 import '../providers/robot_provider.dart';
@@ -14,6 +16,7 @@ import '../utils/map_transformer.dart';
 import 'event_detail_dialog.dart';
 import '../providers/auth_event_provider.dart';
 import '../models/auth_event_model.dart';
+import '../providers/server_config_provider.dart';
 import 'package:http/http.dart' as http;
 
 final _selectedMapEventProvider = StateProvider<String?>((ref) => null);
@@ -135,8 +138,9 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
     }
 
     try {
+      final config = ref.read(serverConfigProvider);
       final res = await http.post(
-        Uri.parse('http://127.0.0.1:8000/gui/waypoints'),
+        Uri.parse(config.getUrl('/gui/waypoints')),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'x': x,
@@ -155,7 +159,7 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
         ref.invalidate(placesProvider);
         if (ref.read(patrolStatusProvider)) {
           await http.post(
-            Uri.parse('http://127.0.0.1:8000/robot/command'),
+            Uri.parse(config.getUrl('/robot/command')),
             headers: {'Content-Type': 'application/json'},
             body: jsonEncode({'command': 'start_patrol'}),
           );
@@ -959,7 +963,7 @@ class _PlaceMarker extends ConsumerWidget {
                                   http
                                       .post(
                                         Uri.parse(
-                                          'http://127.0.0.1:8000/places/$placeId/config',
+                                          ref.read(serverConfigProvider).getUrl('/places/$placeId/config'),
                                         ),
                                         body: {'mode': value},
                                       )
@@ -1132,16 +1136,51 @@ class _PulsingDotState extends State<_PulsingDot>
   }
 }
 
-class _AudioMarker extends ConsumerWidget {
+class _AudioMarker extends StatefulWidget {
   final dynamic audio;
   final MapTransformer transformer;
   const _AudioMarker({required this.audio, required this.transformer});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  State<_AudioMarker> createState() => _AudioMarkerState();
+}
+
+class _AudioMarkerState extends State<_AudioMarker>
+    with SingleTickerProviderStateMixin {
+  late AnimationController _blinkController;
+  bool _isBlinking = true;
+
+  @override
+  void initState() {
+    super.initState();
+    _blinkController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    )..repeat(reverse: true);
+
+    // 3초 후 깜빡임 중지
+    Timer(const Duration(seconds: 3), () {
+      if (mounted) {
+        setState(() {
+          _isBlinking = false;
+          _blinkController.stop();
+        });
+      }
+    });
+  }
+
+  @override
+  void dispose() {
+    _blinkController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final audio = widget.audio;
     if (audio.x == null || audio.y == null) return const SizedBox.shrink();
 
-    final transformed = transformer.transform(
+    final transformed = widget.transformer.transform(
       audio.x!,
       audio.y!,
       audio.yaw ?? 0,
@@ -1156,7 +1195,25 @@ class _AudioMarker extends ConsumerWidget {
         clipBehavior: Clip.none,
         alignment: Alignment.center,
         children: [
-          const _PulsingDot(color: Color(0xFFBA68C8), size: 18, icon: Icons.volume_up),
+          // 레이더 효과 (중심각 30도)
+          AnimatedBuilder(
+            animation: _blinkController,
+            builder: (context, child) {
+              final opacity = _isBlinking ? _blinkController.value * 0.6 : 0.35;
+              return CustomPaint(
+                painter: _RadarConePainter(
+                  yaw: (audio.yaw ?? 0).toDouble(),
+                  color: const Color(0xFFBA68C8),
+                  opacity: opacity,
+                ),
+              );
+            },
+          ),
+          const _PulsingDot(
+            color: Color(0xFFBA68C8),
+            size: 18,
+            icon: Icons.volume_up,
+          ),
         ],
       ),
     );
@@ -1483,5 +1540,69 @@ class _AuthMarker extends StatelessWidget {
         ),
       ),
     );
+  }
+}
+
+class _RadarConePainter extends CustomPainter {
+  final double yaw; // 라디안 방향
+  final Color color;
+  final double opacity;
+
+  _RadarConePainter({
+    required this.yaw,
+    required this.color,
+    required this.opacity,
+  });
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final center = Offset(size.width / 2, size.height / 2);
+    final radius = size.width * 2.5; // 레이더 도달 거리
+
+    final paint = Paint()
+      ..shader = ui.Gradient.radial(
+        center,
+        radius,
+        [
+          color.withOpacity(opacity),
+          color.withOpacity(0),
+        ],
+        [0.0, 1.0],
+      )
+      ..style = PaintingStyle.fill;
+
+    // 중심각 30도 (라디안: 30 * pi / 180 = pi / 6)
+    const sweepAngle = pi / 6;
+    // 시작 각도: yaw 기준 좌우 15도씩
+    final startAngle = yaw - (sweepAngle / 2);
+
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      startAngle,
+      sweepAngle,
+      true,
+      paint,
+    );
+
+    // 외곽선 효과
+    final strokePaint = Paint()
+      ..color = color.withOpacity(opacity * 0.5)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 1.0;
+
+    canvas.drawArc(
+      Rect.fromCircle(center: center, radius: radius),
+      startAngle,
+      sweepAngle,
+      true,
+      strokePaint,
+    );
+  }
+
+  @override
+  bool shouldRepaint(covariant _RadarConePainter oldDelegate) {
+    return oldDelegate.yaw != yaw ||
+        oldDelegate.opacity != opacity ||
+        oldDelegate.color != color;
   }
 }
