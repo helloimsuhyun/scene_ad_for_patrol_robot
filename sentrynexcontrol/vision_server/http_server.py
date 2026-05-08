@@ -2348,3 +2348,211 @@ async def get_robot_battery():
         "ok": True,
         "battery": app.state.robot_battery,
     }
+
+
+## =======================================================================================================
+# 관리자용 이벤트 초기화 엔드포인트
+# - GUI에서 호출하지 않음
+# - 같은 PC의 관리자 Python 파일에서 requests.post()로 호출
+#
+# 초기화 대상
+# 1) vision events : events / frames DB 삭제 + recv/<place_id>/query 내부 파일 삭제
+# 2) audio events  : audio_events DB 삭제 + recv_audio 내부 파일 삭제
+# 3) auth events   : auth_events DB 삭제 + recv_auth 내부 파일 삭제
+# 4) yolo events   : yolo_events DB 삭제 + recv_person 내부 파일 삭제
+#
+# 유지 대상
+# - places
+# - recv/<place_id>/bank
+# - recv/<place_id>/th_calib
+# - recv/<place_id>/threshold.json
+# - patrol_presets / patrol_schedules
+# - yolo_regions
+# - employees
+# =======================================================================================================
+
+class ResetEventsReq(BaseModel):
+    vision: bool = True
+    audio: bool = True
+    auth: bool = True
+    yolo: bool = False
+    delete_files: bool = True
+
+
+def _clear_dir_contents(target_dir: Path):
+    """
+    target_dir 자체는 유지하고 내부 파일/폴더만 삭제.
+    target_dir가 없으면 아무것도 하지 않음.
+    """
+    if not target_dir.exists():
+        return 0
+
+    deleted_count = 0
+
+    for p in target_dir.iterdir():
+        try:
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
+
+            deleted_count += 1
+
+        except Exception as e:
+            print(
+                f"[RESET WARN] failed to delete {p}: {e}",
+                flush=True,
+            )
+
+    return deleted_count
+
+
+def _delete_vision_query_dirs(save_root: Path):
+    """
+    비전 이벤트 이미지는 recv/<place_id>/query 내부만 삭제.
+    bank, th_calib, threshold.json은 유지.
+    """
+    deleted_dirs = []
+    deleted_items = 0
+
+    if not save_root.exists():
+        return deleted_dirs, deleted_items
+
+    for place_dir in save_root.iterdir():
+        if not place_dir.is_dir():
+            continue
+
+        query_dir = place_dir / "query"
+
+        if query_dir.exists() and query_dir.is_dir():
+            n = _clear_dir_contents(query_dir)
+
+            deleted_items += n
+            deleted_dirs.append(str(query_dir))
+
+    return deleted_dirs, deleted_items
+
+
+@app.post("/admin/reset_events")
+async def reset_events(req: ResetEventsReq):
+    """
+    관리자용 이벤트 초기화 API.
+
+    기본값:
+    {
+        "vision": true,
+        "audio": true,
+        "auth": true,
+        "yolo": false,
+        "delete_files": true
+    }
+
+    주의:
+    - GUI용 아님.
+    - 같은 PC의 reset_events_admin.py 같은 관리자 스크립트에서 호출.
+    - 비전 파일은 query만 삭제.
+    - YOLO 파일은 recv_person 내부 파일 삭제.
+    """
+
+    result = {
+        "vision": {
+            "enabled": req.vision,
+            "deleted_events": 0,
+            "deleted_frames": 0,
+            "deleted_query_dirs": [],
+            "deleted_query_items": 0,
+        },
+        "audio": {
+            "enabled": req.audio,
+            "deleted_events": 0,
+            "deleted_files": 0,
+        },
+        "auth": {
+            "enabled": req.auth,
+            "deleted_events": 0,
+            "deleted_files": 0,
+        },
+        "yolo": {
+            "enabled": req.yolo,
+            "deleted_events": 0,
+            "deleted_files": 0,
+        },
+    }
+
+    async with app.state.db_lock:
+        cur = app.state.db.cursor()
+
+        # ------------------------------
+        # 1) Vision events 초기화
+        # ------------------------------
+        if req.vision:
+            cur.execute("SELECT COUNT(*) AS n FROM frames")
+            result["vision"]["deleted_frames"] = int(cur.fetchone()["n"])
+
+            cur.execute("SELECT COUNT(*) AS n FROM events")
+            result["vision"]["deleted_events"] = int(cur.fetchone()["n"])
+
+            # FK cascade가 꺼져 있어도 안전하게 frames 먼저 삭제
+            cur.execute("DELETE FROM frames")
+            cur.execute("DELETE FROM events")
+
+        # ------------------------------
+        # 2) Audio events 초기화
+        # ------------------------------
+        if req.audio:
+            cur.execute("SELECT COUNT(*) AS n FROM audio_events")
+            result["audio"]["deleted_events"] = int(cur.fetchone()["n"])
+
+            cur.execute("DELETE FROM audio_events")
+
+        # ------------------------------
+        # 3) Auth events 초기화
+        # ------------------------------
+        if req.auth:
+            cur.execute("SELECT COUNT(*) AS n FROM auth_events")
+            result["auth"]["deleted_events"] = int(cur.fetchone()["n"])
+
+            cur.execute("DELETE FROM auth_events")
+
+        # ------------------------------
+        # 4) YOLO/person events 초기화
+        # ------------------------------
+        if req.yolo:
+            cur.execute("SELECT COUNT(*) AS n FROM yolo_events")
+            result["yolo"]["deleted_events"] = int(cur.fetchone()["n"])
+
+            cur.execute("DELETE FROM yolo_events")
+
+        app.state.db.commit()
+
+    # ------------------------------
+    # 5) 파일 삭제
+    # ------------------------------
+    if req.delete_files:
+        if req.vision:
+            deleted_dirs, deleted_items = _delete_vision_query_dirs(SAVE_ROOT)
+            result["vision"]["deleted_query_dirs"] = deleted_dirs
+            result["vision"]["deleted_query_items"] = deleted_items
+
+        if req.audio:
+            result["audio"]["deleted_files"] = _clear_dir_contents(AUDIO_ROOT)
+
+        if req.auth:
+            result["auth"]["deleted_files"] = _clear_dir_contents(AUTH_EVENT_ROOT)
+
+        if req.yolo:
+            result["yolo"]["deleted_files"] = _clear_dir_contents(PERSON_EVENT_ROOT)
+
+    print(
+        "[ADMIN RESET EVENTS] "
+        f"vision={req.vision}, audio={req.audio}, auth={req.auth}, yolo={req.yolo}, "
+        f"delete_files={req.delete_files}, result={result}",
+        flush=True,
+    )
+
+    return {
+        "ok": True,
+        "status": "events_reset",
+        "delete_files": req.delete_files,
+        "result": result,
+    }
