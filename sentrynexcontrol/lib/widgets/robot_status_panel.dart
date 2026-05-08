@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import '../main.dart' show kFontFallback; // 폰트 fallback 상수
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:http/http.dart' as http;
 import 'dart:convert';
@@ -550,27 +551,28 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                           style: const TextStyle(
                             color: Colors.white,
                             fontSize: 13,
+                            fontFamilyFallback: kFontFallback,
                           ),
                           items: const [
                             DropdownMenuItem(
                               value: 0,
                               child: Text(
                                 'OFF',
-                                style: TextStyle(fontSize: 12, color: Colors.white),
+                                style: TextStyle(fontSize: 12, color: Colors.white, fontFamilyFallback: kFontFallback),
                               ),
                             ),
                             DropdownMenuItem(
                               value: 1,
                               child: Text(
                                 'GLOBAL',
-                                style: TextStyle(fontSize: 12, color: Colors.white),
+                                style: TextStyle(fontSize: 12, color: Colors.white, fontFamilyFallback: kFontFallback),
                               ),
                             ),
                             DropdownMenuItem(
                               value: 2,
                               child: Text(
                                 'REGION',
-                                style: TextStyle(fontSize: 12, color: Colors.white),
+                                style: TextStyle(fontSize: 12, color: Colors.white, fontFamilyFallback: kFontFallback),
                               ),
                             ),
                           ],
@@ -588,6 +590,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
                                     color: Colors.white,
                                     fontSize: 12,
                                     fontWeight: FontWeight.w500,
+                                    fontFamilyFallback: kFontFallback,
                                   ),
                                 ),
                               );

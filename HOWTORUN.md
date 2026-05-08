@@ -46,14 +46,14 @@ cd ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
 
 ```bash
 cd ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
-python3 -m http.server 8094 --bind 0.0.0.0
+python3 -m http.server 8095 --bind 0.0.0.0
 ```
 
 접속 주소:
 
 ```text
-같은 PC : http://localhost:8094
-다른 PC : http://서버PC_IP:8094
+같은 PC : http://localhost:8095
+다른 PC : http://서버PC_IP:8095
 ```
 
 서버 PC IP 확인:
