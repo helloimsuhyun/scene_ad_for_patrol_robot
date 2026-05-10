@@ -21,7 +21,7 @@ graceful_kill_port() {
     fi
 
     echo "[INFO] Gracefully stopping process on port $PORT: $PIDS"
-
+./
     kill -TERM $PIDS 2>/dev/null || true
 
     for i in {1..8}; do
