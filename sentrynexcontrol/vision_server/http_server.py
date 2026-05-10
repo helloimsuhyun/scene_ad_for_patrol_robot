@@ -92,7 +92,7 @@ from . import dino_emb
 from .backbone_wrapper import build_local_backbone
 
 from . import place_manager
-from .distance import infer_event, calibrate_place
+from .distance import infer_event, calibrate_place, save_verified_change_overlay
 from .matcher import SuperGlueMatcher, SuperGlueMatchConfig
 from .vpr_megaloc import MegaLocWrapper
 from .yolo_server_util import (
@@ -413,6 +413,36 @@ async def inference_worker_loop(app: FastAPI):
                     meta_obj,
                     app.state.engine,
                 )
+            
+            verified_change_rel_path = None
+
+            # 이벤트 전체가 이상으로 판단된 경우에만 최종 변화 heatmap 저장
+            if int(result.get("anomaly_flag", 0)) == 1:
+                stage6 = result.get("stage6_vis", {})
+                q_crop = stage6.get("q_crop", None)
+                verified_regions = stage6.get("verified_regions", [])
+
+                if q_crop is not None and len(verified_regions) > 0:
+                    place_id = str(meta_obj["place_id"])
+
+                    vis_dir = SAVE_ROOT / place_id / "query" / "_verified_change"
+                    vis_dir.mkdir(parents=True, exist_ok=True)
+
+                    vis_path = vis_dir / f"{event_id}_verified_change_overlay.png"
+
+                    saved_ok = save_verified_change_overlay(
+                        vis_path,
+                        q_crop,
+                        verified_regions,
+                    )
+
+                    if saved_ok:
+                        verified_change_rel_path = str(vis_path.relative_to(SAVE_ROOT))
+
+                        print(
+                            f"[VERIFIED CHANGE VIS] saved: {vis_path}",
+                            flush=True,
+                        )
 
             async with app.state.db_lock:
                 sqlite_db.update_frame_scores(
@@ -431,6 +461,12 @@ async def inference_worker_loop(app: FastAPI):
                     ref_topk_json=result.get("ref_topk_json"),
                     summary_text=result.get("summary"),
                 )
+                if verified_change_rel_path is not None:
+                    sqlite_db.update_event_verified_change_image(
+                        app.state.db,
+                        event_id,
+                        verified_change_rel_path,
+                    )
 
             print(f"[INFERENCE WORKER] done event_id={event_id}", flush=True)
 
@@ -447,7 +483,7 @@ async def inference_worker_loop(app: FastAPI):
                         sqlite_db.update_event_result(
                             app.state.db,
                             event_id=event_id,
-                            anomaly_flag=-1,
+                            anomaly_flag=0,
                             anomaly_score=0.0,
                             threshold_used=0.0,
                             ref_bank_id=None,
@@ -1014,7 +1050,9 @@ async def get_events(since: Optional[str] = None, limit: int = 30):
             """
             SELECT event_id, place_id, captured_at, anomaly_flag,
                 anomaly_score, threshold_used, ref_bank_id,
-                ref_topk_json, summary_text, admin_checked, admin_label, created_at
+                ref_topk_json, summary_text, admin_checked, admin_label,
+                verified_change_image_path,
+                created_at
             FROM events
             ORDER BY captured_at DESC
             LIMIT ?
@@ -1027,6 +1065,12 @@ async def get_events(since: Optional[str] = None, limit: int = 30):
     events = []
     for row in rows:
         event_id = row["event_id"]
+        verified_change_image_path = row["verified_change_image_path"]
+        verified_change_image_url = (
+            f"/images/{verified_change_image_path}"
+            if verified_change_image_path
+            else None
+        )
         # Fetch frames for this event
         async with app.state.db_lock:
             frames = sqlite_db.list_frames(app.state.db, event_id)
@@ -1057,6 +1101,10 @@ async def get_events(since: Optional[str] = None, limit: int = 30):
             "summary_text": row["summary_text"],
             "admin_checked": int(row["admin_checked"]) if row["admin_checked"] is not None else 0,
             "admin_label": row["admin_label"],
+
+            "verified_change_image_path": verified_change_image_path,
+            "verified_change_image_url": verified_change_image_url,
+
             "created_at": row["created_at"],
             "frames": processed_frames,
         })

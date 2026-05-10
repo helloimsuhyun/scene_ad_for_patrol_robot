@@ -323,6 +323,8 @@ def _run_gpa_frame(
         verifier_results.append({
             **reg,
             "verifier_score": float(out["score"]),
+            "verifier_dist_map": out["dist_map"],
+            "verifier_top_p_mask": out.get("top_p_mask", None),
             "verifier_feat_hw": out["feat_hw"],
             "verifier_top_p_thr": out["top_p_thr"],
             "verifier_top_k": out["top_k"],
@@ -358,6 +360,7 @@ def _run_gpa_frame(
         "fallback": False,
         "cc_score": float(best_score),
         "verifier_scores": verifier_scores_sorted,
+        "verifier_results_raw": verifier_results,
         "flagged_regions": [
             {
                 "score": float(r["score"]),
@@ -901,6 +904,7 @@ def infer_event(
     topk_sims_all: List[List[float]] = []
     patch_vis_all: List[Optional[Dict[str, Any]]] = []
     align_vis_all: List[Optional[Dict[str, Any]]] = []
+    debug_all: List[Dict[str, Any]] = []
 
     for fi, img_bgr in enumerate(imgs_bgr):
         q_out = None
@@ -935,6 +939,7 @@ def infer_event(
             vpr_model=vpr_model,
             cfg=cfg,
         )
+        debug_all.append(debug)
 
         is_change = dist > thr
         frame_scores.append(float(dist))
@@ -1044,6 +1049,28 @@ def infer_event(
         "ref_bank_id": ref_bank_id,
         "ref_topk_json": ref_topk_json,
         "summary": summary,
+
+        "stage6_vis": {
+            "frame_idx": rep_idx,
+            "threshold": float(thr),
+            "q_crop": (
+                debug_all[rep_idx]["best_debug"]["q_crop"]
+                if len(debug_all) > rep_idx
+                and isinstance(debug_all[rep_idx], dict)
+                and "best_debug" in debug_all[rep_idx]
+                and "q_crop" in debug_all[rep_idx]["best_debug"]
+                else None
+            ),
+            "verified_regions": (
+                [
+                    r for r in debug_all[rep_idx].get("verifier_results_raw", [])
+                    if float(r.get("verifier_score", 0.0)) > float(thr)
+                ]
+                if len(debug_all) > rep_idx
+                and isinstance(debug_all[rep_idx], dict)
+                else []
+            ),
+        },
         "patch_vis": {
             "frame_idx": rep_idx,
             "repr_mode": repr_mode,
@@ -1090,3 +1117,80 @@ def infer_event(
             ),
         },
     }
+
+def save_verified_change_overlay(
+    out_path,
+    q_crop: np.ndarray,
+    verified_regions: list,
+    alpha=0.45,
+    abs_min=0.0,
+    abs_max=1.0,
+    vis_thr_abs=0.30,
+):
+    if q_crop is None:
+        return False
+
+    vis = q_crop.copy()
+
+    for reg in verified_regions:
+        y0, x0, y1, x1 = reg["img_bbox"]
+
+        dist_map = reg.get("verifier_dist_map", None)
+        if dist_map is None:
+            continue
+
+        dist_map = dist_map.astype(np.float32)
+
+        if dist_map.size == 0 or (y1 - y0) <= 0 or (x1 - x0) <= 0:
+            continue
+
+        d_vis = np.clip(
+            (dist_map - abs_min) / max(abs_max - abs_min, 1e-8),
+            0.0,
+            1.0,
+        )
+
+        thr_norm = np.clip(
+            (vis_thr_abs - abs_min) / max(abs_max - abs_min, 1e-8),
+            0.0,
+            1.0,
+        )
+
+        mask = d_vis >= thr_norm
+        if mask.sum() == 0:
+            continue
+
+        heat = (d_vis * 255).astype(np.uint8)
+        heat = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
+        heat = cv2.resize(
+            heat,
+            (x1 - x0, y1 - y0),
+            interpolation=cv2.INTER_NEAREST,
+        )
+
+        mask_rs = cv2.resize(
+            mask.astype(np.uint8),
+            (x1 - x0, y1 - y0),
+            interpolation=cv2.INTER_NEAREST,
+        ).astype(bool)
+
+        roi = vis[y0:y1, x0:x1].copy()
+        blended = cv2.addWeighted(roi, 1 - alpha, heat, alpha, 0)
+        roi[mask_rs] = blended[mask_rs]
+        vis[y0:y1, x0:x1] = roi
+
+        cv2.rectangle(vis, (x0, y0), (x1 - 1, y1 - 1), (255, 255, 0), 2)
+
+        cv2.putText(
+            vis,
+            f"{reg['verifier_score']:.3f}",
+            (x0, max(15, y0 - 5)),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (255, 255, 255),
+            1,
+            cv2.LINE_AA,
+        )
+
+    cv2.imwrite(str(out_path), vis)
+    return True

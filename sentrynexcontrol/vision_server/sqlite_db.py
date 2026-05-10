@@ -49,6 +49,14 @@ def init_db(db: sqlite3.Connection) -> None:
         except:
             pass
 
+    try:
+        cur.execute("SELECT verified_change_image_path FROM events LIMIT 1")
+    except sqlite3.OperationalError:
+        try:
+            cur.execute("ALTER TABLE events ADD COLUMN verified_change_image_path TEXT")
+        except:
+            pass
+
     # 2. places 테이블 마이그레이션
     try:
         cur.execute("SELECT is_active FROM places LIMIT 1")
@@ -175,21 +183,22 @@ def init_db(db: sqlite3.Connection) -> None:
         -- events: 1행 = 이벤트 1건
         -- =========================
         CREATE TABLE IF NOT EXISTS events (
-          event_id        TEXT    PRIMARY KEY,          -- UUID 문자열
-          place_id        TEXT    NOT NULL,
-          captured_at     TEXT    NOT NULL,
-          anomaly_flag    INTEGER NOT NULL CHECK (anomaly_flag IN (0,1)),
+        event_id        TEXT    PRIMARY KEY,
+        place_id        TEXT    NOT NULL,
+        captured_at     TEXT    NOT NULL,
+        anomaly_flag    INTEGER NOT NULL CHECK (anomaly_flag IN (0,1)),
 
-          anomaly_score   REAL,
-          threshold_used  REAL,
-          ref_bank_id     TEXT,
-          ref_topk_json   TEXT,
-          summary_text    TEXT,
+        anomaly_score   REAL,
+        threshold_used  REAL,
+        ref_bank_id     TEXT,
+        ref_topk_json   TEXT,
+        summary_text    TEXT,
+        verified_change_image_path TEXT,
 
-          admin_checked   INTEGER NOT NULL DEFAULT 0,
-          admin_label     TEXT,
+        admin_checked   INTEGER NOT NULL DEFAULT 0,
+        admin_label     TEXT,
 
-          created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
+        created_at      TEXT    NOT NULL DEFAULT (datetime('now'))
         );
 
         -- =========================
@@ -590,6 +599,27 @@ def update_event_result(
             summary_text,
             event_id,
         ),
+    )
+    db.commit()
+
+def update_event_verified_change_image(
+    db: sqlite3.Connection,
+    event_id: str,
+    image_path: Optional[str],
+) -> None:
+    """
+    events 행에 verified change overlay 이미지 경로 저장.
+    image_path는 SAVE_ROOT 기준 상대 경로를 넣는 것을 권장.
+    예: P004/query/_verified_change/xxx_verified_change_overlay.png
+    """
+    cur = db.cursor()
+    cur.execute(
+        """
+        UPDATE events
+        SET verified_change_image_path = ?
+        WHERE event_id = ?
+        """,
+        (image_path, event_id),
     )
     db.commit()
 
