@@ -264,6 +264,7 @@ class ControlScreen extends ConsumerWidget {
                                         dropdownColor: const Color(0xFF26293A),
                                         style: const TextStyle(
                                           color: Colors.white,
+                                          fontFamily: 'Pretendard',
                                         ),
                                         underline: const SizedBox(),
                                         items: const [
