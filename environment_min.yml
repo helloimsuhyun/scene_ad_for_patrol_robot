@@ -42,3 +42,5 @@ dependencies:
       # Optional project utilities
       - psutil
       - termcolor
+    
+      - httpx
