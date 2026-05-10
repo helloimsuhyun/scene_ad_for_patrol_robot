@@ -81,9 +81,8 @@ sentrynexcontrol/.dart_tool/
 sentrynexcontrol/build/
 sentrynexcontrol/experiment/
 
-# assets 전체 무시
-assets/*
+!sentrynexcontrol/assets/
+!sentrynexcontrol/assets/**
 
-# map_metadata만 추적 허용
-!assets/map_metadata/
-!assets/map_metadata/**
+!docs/
+!docs/**
