@@ -1124,6 +1124,15 @@ async def get_event_detail(event_id: str):
 
         frames = sqlite_db.list_frames(app.state.db, event_id)
 
+    event = dict(event)
+
+    verified_change_image_path = event.get("verified_change_image_path")
+    event["verified_change_image_url"] = (
+        f"/images/{verified_change_image_path}"
+        if verified_change_image_path
+        else None
+    )
+
     return {
         "ok": True,
         "event": event,
@@ -2031,12 +2040,12 @@ async def create_mock_vision_event(payload: dict):
     now = datetime.now().isoformat()
     async with app.state.db_lock:
         sqlite_db.insert_event(
-            app.state.db,
-            eid,
-            place_id,
-            now,
-            payload.get("anomaly_flag", 1),
-            summary_text=payload.get("summary_text", "[테스트] 카메라 강제 진동 감지")
+            db=app.state.db,
+            event_id=eid,
+            place_id=place_id,
+            captured_at=now,
+            anomaly_flag=payload.get("anomaly_flag", 1),
+            summary_text=payload.get("summary_text", "[테스트] 카메라 강제 진동 감지"),
         )
         # 더미 프레임 추가 (프론트엔드에서 프레임 목록이 비어있으면 표시 안 될 수 있음)
         sqlite_db.insert_frames(
