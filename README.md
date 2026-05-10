@@ -191,7 +191,6 @@ cd ~/scene_ad_for_patrol_robot
 ```
 
 
-
 ---
 
 # 3. 전체 실행 순서 요약
@@ -220,4 +219,40 @@ cd ~/scene_ad_for_patrol_robot
 ```text
 같은 PC  : http://localhost:8095
 다른 PC : run_web_gui.sh 실행 시 출력되는 http://서버PC_IP:8095
+```
+
+# 4. 관리자 기능: 이벤트 초기화
+
+> 백엔드 서버(`./run_servers.sh`)가 실행 중인 상태에서 다른 터미널에서 실행합니다.
+
+```bash
+cd ~/scene_ad_for_patrol_robot
+conda activate dl
+```
+
+## 전체 초기화
+
+```bash
+python3 reset_events_admin.py --all
+```
+
+## 비전, 오디오, 인증만 초기화
+
+```bash
+python3 reset_events_admin.py --core
+```
+
+## 특정 이벤트만 초기화
+
+```bash
+python3 reset_events_admin.py --vision
+python3 reset_events_admin.py --audio
+python3 reset_events_admin.py --auth
+python3 reset_events_admin.py --yolo
+```
+
+## DB만 초기화하고 파일은 유지
+
+```bash
+python3 reset_events_admin.py --all --db_only
 ```
