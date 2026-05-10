@@ -1,3 +1,41 @@
+# Team H3C
+
+<p align="center">
+  <b>실내 보안 순찰 로봇을 위한 멀티모달 인지 및 웹 기반 통합 관제 시스템</b>
+</p>
+
+<p align="center">
+  Vision · Audio · RFID · Patrol Navigation · WebRTC · Flutter Web Dashboard
+</p>
+
+---
+
+## Overview
+
+<p align="center">
+  <img src="./docs/system_overview.png" width="850"/>
+</p>
+
+본 프로젝트는 순찰 로봇의 영상, 음향, 위치, 인증 이벤트를 서버에서 통합 처리하고,  
+Flutter Web GUI를 통해 실시간으로 모니터링하는 실내 보안 순찰 로봇 관제 시스템입니다.
+
+---
+
+## Web Dashboard
+
+<p align="center">
+  <img src="./docs/gui_screenshot_1.png" width="420"/>
+  <img src="./docs/gui_screenshot_2.png" width="420"/>
+</p>
+
+실시간 영상, 지도, 순찰 상태, 이벤트 로그, 인증 이벤트, 로봇 제어 기능을 하나의 웹 대시보드에서 제공합니다.
+
+> 자세한 시스템 구성 및 실험 결과는 아래 자료를 참고하세요.  
+> - [Presentation Slide](./docs/team_h3c_presentation.pdf)  
+> - [Paper](./docs/team_h3c_paper.pdf)
+
+---
+
 # 환경세팅 및 실행 가이드
 
 > Git repository: `https://github.com/H3cRobotics/capston_patrol_server.git`  
