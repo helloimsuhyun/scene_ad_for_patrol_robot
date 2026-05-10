@@ -79,3 +79,4 @@ build/
 # Flutter generated files
 sentrynexcontrol/.dart_tool/
 sentrynexcontrol/build/
+sentrynexcontrol/experiment/
