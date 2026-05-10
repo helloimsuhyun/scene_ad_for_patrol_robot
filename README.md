@@ -78,6 +78,7 @@ git clone https://github.com/H3cRobotics/capston_patrol_server.git scene_ad_for_
 cd ~/scene_ad_for_patrol_robot
 ```
 
+---
 
 ## 1-4. Conda 환경 생성
 
@@ -141,7 +142,29 @@ True
 
 ---
 
-## 1-6. Flutter Web 최초 빌드
+## 1-6. Flutter SDK 설치
+
+Flutter Web GUI 빌드를 위해 Flutter SDK가 필요합니다.
+
+설치 확인:
+
+```bash
+flutter --version
+```
+
+`flutter: command not found`가 나오면 아래 명령으로 설치합니다.
+
+```bash
+cd ~
+git clone https://github.com/flutter/flutter.git -b stable
+echo 'export PATH="$HOME/flutter/bin:$PATH"' >> ~/.bashrc
+source ~/.bashrc
+flutter --version
+```
+
+---
+
+## 1-7. Flutter Web 최초 빌드
 
 Flutter GUI를 Web으로 빌드합니다.
 
@@ -156,7 +179,7 @@ cd ~/scene_ad_for_patrol_robot
 ~/scene_ad_for_patrol_robot/sentrynexcontrol/build/web
 ```
 
-> 최초 빌드 또는 패키지 변경 후 빌드는 인터넷이 필요합니다
+> 최초 빌드 또는 패키지 변경 후 빌드는 인터넷이 필요합니다.
 
 ---
 
@@ -190,7 +213,6 @@ cd ~/scene_ad_for_patrol_robot
 다른 PC : run_web_gui.sh 실행 시 출력되는 http://서버PC_IP:8095
 ```
 
-
 ---
 
 # 3. 전체 실행 순서 요약
@@ -220,6 +242,8 @@ cd ~/scene_ad_for_patrol_robot
 같은 PC  : http://localhost:8095
 다른 PC : run_web_gui.sh 실행 시 출력되는 http://서버PC_IP:8095
 ```
+
+---
 
 # 4. 관리자 기능: 이벤트 초기화
 
