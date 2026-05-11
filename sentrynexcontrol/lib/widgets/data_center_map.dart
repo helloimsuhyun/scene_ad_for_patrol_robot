@@ -201,21 +201,39 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
         final transformed = transformer.transform(next.x!, next.y!, 0);
         
         if (_viewportSize.width > 0 && _viewportSize.height > 0) {
-          final scale = _viewportSize.width / transformer.imageWidth;
-          final pyScaled = transformed['py']! * scale;
+          // 1. 컨테이너를 가득 채우는 'Cover' 스케일 계산
+          final double scaleX = _viewportSize.width / transformer.imageWidth;
+          final double scaleY = _viewportSize.height / transformer.imageHeight;
+          final double coverScale = scaleX > scaleY ? scaleX : scaleY;
           
-          final childHeight = transformer.imageHeight * scale;
-          double clampedTx = 0;
-          double clampedTy = (_viewportSize.height / 2) - pyScaled;
+          // 현재 사용자가 더 많이 확대했다면 그 배율 유지, 아니면 coverScale 사용
+          final currentMatrix = _transformationController.value;
+          final double currentScale = currentMatrix.getMaxScaleOnAxis();
+          final double activeScale = currentScale > coverScale ? currentScale : coverScale;
           
-          if (childHeight > _viewportSize.height) {
-            final minTy = _viewportSize.height - childHeight;
-            clampedTy = clampedTy.clamp(minTy, 0.0);
-          } else {
-            clampedTy = (_viewportSize.height - childHeight) / 2;
-          }
+          final px = transformed['px']!;
+          final py = transformed['py']!;
           
-          _transformationController.value = Matrix4.identity()..translate(clampedTx, clampedTy);
+          // 2. 로봇을 중앙에 위치시키기 위한 tx, ty 계산
+          double tx = (_viewportSize.width / 2) - (px * activeScale);
+          double ty = (_viewportSize.height / 2) - (py * activeScale);
+          
+          // 3. 맵 범위를 벗어나지 않도록 클램핑 (여백 방지)
+          final double minTx = _viewportSize.width - (transformer.imageWidth * activeScale);
+          final double minTy = _viewportSize.height - (transformer.imageHeight * activeScale);
+          
+          // 이미지가 화면보다 큰 경우에만 클램핑
+          if (minTx < 0) tx = tx.clamp(minTx, 0.0);
+          else tx = (_viewportSize.width - (transformer.imageWidth * activeScale)) / 2;
+          
+          if (minTy < 0) ty = ty.clamp(minTy, 0.0);
+          else ty = (_viewportSize.height - (transformer.imageHeight * activeScale)) / 2;
+          
+          final newMatrix = Matrix4.identity()
+            ..translate(tx, ty)
+            ..scale(activeScale);
+            
+          _transformationController.value = newMatrix;
         }
       }
     });
@@ -233,7 +251,7 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
         borderRadius: BorderRadius.circular(20),
         border: Border.all(color: const Color(0xFF2D3041)),
       ),
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -257,14 +275,18 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                         '보안구역 표시',
                         style: TextStyle(color: Color(0xFF9FA4B9), fontSize: 12),
                       ),
-                      Switch(
-                        value: ref.watch(yoloShowRegionsProvider),
-                        onChanged: (val) => ref
-                            .read(yoloShowRegionsProvider.notifier)
-                            .state = val,
-                        activeColor: const Color(0xFF7F7CFF),
+                      const SizedBox(width: 4),
+                      SizedBox(
+                        height: 32,
+                        child: Switch(
+                          value: ref.watch(yoloShowRegionsProvider),
+                          onChanged: (val) => ref
+                              .read(yoloShowRegionsProvider.notifier)
+                              .state = val,
+                          activeColor: const Color(0xFF4ADE80),
+                        ),
                       ),
-                      const SizedBox(width: 8),
+                      const SizedBox(width: 12),
                       ElevatedButton.icon(
                         onPressed: () => ref
                             .read(yoloDrawingModeProvider.notifier)
@@ -283,13 +305,17 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                               : const Color(0xFF181924),
                           foregroundColor: Colors.white70,
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 12,
+                            horizontal: 16,
+                            vertical: 10,
                           ),
                           minimumSize: Size.zero,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(30),
-                            side: const BorderSide(color: Color(0xFF3D4060)),
+                            borderRadius: BorderRadius.circular(8),
+                            side: BorderSide(
+                              color: isDrawing
+                                  ? const Color(0xFF7F7CFF)
+                                  : const Color(0xFF2D3041),
+                            ),
                           ),
                         ),
                       ),
@@ -303,6 +329,10 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
           Expanded(
             child: Stack(
               children: [
+                if (_isTrackingMode)
+                  _TrackingOverlay(
+                    color: const Color(0xFF4ADE80).withOpacity(0.2),
+                  ),
                 ClipRRect(
                   borderRadius: BorderRadius.circular(18),
                   child: Container(
@@ -311,7 +341,6 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                       data: (imagePath) => mapTransformerAsync.when(
                         data: (transformer) {
                           final robotGoal = ref.watch(robotGoalProvider);
-                          // 목표 지점 찾기
                           Map<String, dynamic>? targetPlace;
                           if (robotGoal?.nextPlaceId != null &&
                               placesAsync.hasValue) {
@@ -329,7 +358,6 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                           }
                           return LayoutBuilder(
                             builder: (context, constraints) {
-                              // Constraints 사이즈를 렌더링 사이클 이후에 _viewportSize에 저장
                               WidgetsBinding.instance.addPostFrameCallback((_) {
                                 if (mounted) {
                                   _viewportSize = Size(
@@ -346,187 +374,152 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                                     _transformationController,
                                 panEnabled: !isDrawingMode && !isWaypointPicking,
                                 scaleEnabled: !isDrawingMode && !isWaypointPicking,
-                                child: Center(
-                                  child: FittedBox(
-                                    fit: BoxFit.contain,
-                                    alignment: Alignment.center,
-                                    child: GestureDetector(
-                                      onTapDown: (details) {
-                                        if (isWaypointPicking) {
-                                          final r = transformer.inverseTransform(
-                                            details.localPosition.dx,
-                                            details.localPosition.dy,
-                                            0,
-                                          );
-                                          _promptSaveWaypoint(r['x']!, r['y']!);
-                                        }
-                                      },
-                                      onPanUpdate: isDrawingMode
-                                          ? (details) {
-                                              setState(() {
-                                                _dragEnd = details.localPosition;
-                                              });
+                                child: SizedBox(
+                                  width: transformer.imageWidth,
+                                  height: transformer.imageHeight,
+                                  child: GestureDetector(
+                                    onPanStart: isDrawingMode
+                                        ? (details) {
+                                            setState(() {
+                                              _dragStart = details.localPosition;
+                                              _dragEnd = details.localPosition;
+                                            });
+                                          }
+                                        : null,
+                                    onTapDown: (details) {
+                                      if (isWaypointPicking) {
+                                        final r = transformer.inverseTransform(
+                                          details.localPosition.dx,
+                                          details.localPosition.dy,
+                                          0,
+                                        );
+                                        _promptSaveWaypoint(r['x']!, r['y']!);
+                                      }
+                                    },
+                                    onPanUpdate: isDrawingMode
+                                        ? (details) {
+                                            setState(() {
+                                              _dragEnd = details.localPosition;
+                                            });
+                                          }
+                                        : null,
+                                    onPanEnd: isDrawingMode
+                                        ? (details) {
+                                            if (_dragStart != null &&
+                                                _dragEnd != null) {
+                                              final rStart = transformer
+                                                  .inverseTransform(
+                                                    _dragStart!.dx,
+                                                    _dragStart!.dy,
+                                                    0,
+                                                  );
+                                              final rEnd = transformer
+                                                  .inverseTransform(
+                                                    _dragEnd!.dx,
+                                                    _dragEnd!.dy,
+                                                    0,
+                                                  );
+                                                  
+                                              final xMin = rStart['x']! < rEnd['x']! ? rStart['x']! : rEnd['x']!;
+                                              final xMax = rStart['x']! > rEnd['x']! ? rStart['x']! : rEnd['x']!;
+                                              final yMin = rStart['y']! < rEnd['y']! ? rStart['y']! : rEnd['y']!;
+                                              final yMax = rStart['y']! > rEnd['y']! ? rStart['y']! : rEnd['y']!;
+
+                                              _promptSaveRegion(xMin, xMax, yMin, yMax);
                                             }
-                                          : null,
-                                      onPanEnd: isDrawingMode
-                                          ? (details) {
-                                              if (_dragStart != null &&
-                                                  _dragEnd != null) {
-                                                final rStart = transformer
-                                                    .inverseTransform(
-                                                      _dragStart!.dx,
-                                                      _dragStart!.dy,
-                                                      0,
-                                                    );
-                                                final rEnd = transformer
-                                                    .inverseTransform(
-                                                      _dragEnd!.dx,
-                                                      _dragEnd!.dy,
-                                                      0,
-                                                    );
-                                                _promptSaveRegion(
-                                                  rStart['x']!,
-                                                  rEnd['x']!,
-                                                  rStart['y']!,
-                                                  rEnd['y']!,
-                                                );
-                                              }
-                                            }
-                                          : null,
-                                      child: Stack(
-                                        clipBehavior: Clip.none,
-                                        children: [
-                                          Image.asset(imagePath),
-
-                                          // 경유점 추가 모드 오버레이
-                                          if (isWaypointPicking)
-                                            Positioned.fill(
-                                              child: Container(
-                                                color: Colors.black.withOpacity(
-                                                  0.5,
-                                                ),
-                                                alignment: Alignment.center,
-                                                child: const Text(
-                                                  '원하는 위치를 클릭하여 경유점을 추가하세요',
-                                                  style: TextStyle(
-                                                    color: Colors.white,
-                                                    fontSize: 16,
-                                                    fontWeight: FontWeight.bold,
-                                                    shadows: [
-                                                      Shadow(
-                                                        color: Colors.black,
-                                                        blurRadius: 4,
-                                                      ),
-                                                    ],
-                                                  ),
+                                          }
+                                        : null,
+                                    child: Stack(
+                                      clipBehavior: Clip.none,
+                                      children: [
+                                        Image.asset(imagePath),
+                                        if (isWaypointPicking)
+                                          Positioned.fill(
+                                            child: Container(
+                                              color: Colors.black.withOpacity(
+                                                0.5,
+                                              ),
+                                              alignment: Alignment.center,
+                                              child: const Text(
+                                                '원하는 위치를 클릭하여 경유점을 추가하세요',
+                                                style: TextStyle(
+                                                  color: Colors.white,
+                                                  fontSize: 16,
+                                                  fontWeight: FontWeight.bold,
+                                                  shadows: [
+                                                    Shadow(
+                                                      color: Colors.black,
+                                                      blurRadius: 4,
+                                                    ),
+                                                  ],
                                                 ),
                                               ),
                                             ),
-
-                                          if (ref.watch(
-                                                yoloShowRegionsProvider,
-                                              ) &&
-                                              yoloRegionsAsync.value != null)
-                                            ...yoloRegionsAsync.value!.map(
-                                              (r) => _YoloRegionMarker(
-                                                region: r,
-                                                transformer: transformer,
-                                              ),
-                                            ),
-                                          if (placesAsync.hasValue &&
-                                              placesAsync.value?['places'] !=
-                                                  null)
-                                            ...(placesAsync.value?['places']
-                                                    as List<dynamic>)
-                                                .map((p) {
-                                              final placeId = p['place_id']
-                                                  .toString();
-                                              final pt = transformer.transform(
-                                                p['x'],
-                                                p['y'],
-                                                p['yaw'] ?? 0,
-                                              );
-                                              final isTarget = targetPlace !=
-                                                      null &&
-                                                  targetPlace?['place_id'] ==
-                                                      p['place_id'];
-
-                                              final event =
-                                                  latestEventsByPlace[placeId];
-
-                                              return _PlaceMarker(
-                                                place: p,
-                                                latestEvent: event,
-                                                transformer: transformer,
-                                                isTarget: isTarget,
-                                              );
-                                            }),
-
-                                          if (robotPose != null &&
-                                              robotPose.x != null &&
-                                              robotPose.y != null)
-                                            _RobotMarker(
-                                              pose: robotPose,
+                                          ),
+                                        if (ref.watch(
+                                              yoloShowRegionsProvider,
+                                            ) &&
+                                            yoloRegionsAsync.value != null)
+                                          ...yoloRegionsAsync.value!.map(
+                                            (r) => _YoloRegionMarker(
+                                              region: r,
                                               transformer: transformer,
                                             ),
+                                          ),
+                                        if (placesAsync.hasValue &&
+                                            placesAsync.value?['places'] !=
+                                                null)
+                                          ...(placesAsync.value?['places']
+                                                  as List<dynamic>)
+                                              .map((p) {
+                                            final placeId = p['place_id']
+                                                .toString();
+                                            final isTarget = targetPlace !=
+                                                    null &&
+                                                targetPlace?['place_id'] ==
+                                                    p['place_id'];
 
-                                          for (var audio in audioEvents)
-                                            _AudioMarker(
-                                              audio: audio,
+                                            final event =
+                                                latestEventsByPlace[placeId];
+
+                                            return _PlaceMarker(
+                                              place: p,
+                                              latestEvent: event,
                                               transformer: transformer,
-                                            ),
-
-                                          for (var auth in authEvents)
-                                            _AuthMarker(
-                                              event: auth,
-                                              transformer: transformer,
-                                            ),
-
-                                          if (isDrawingMode &&
-                                              _dragStart != null &&
-                                              _dragEnd != null)
-                                            Positioned.fill(
-                                              child: IgnorePointer(
-                                                child: CustomPaint(
-                                                  painter: _RegionPainter(
-                                                    start: _dragStart!,
-                                                    end: _dragEnd!,
-                                                  ),
+                                              isTarget: isTarget,
+                                            );
+                                          }),
+                                        if (robotPose != null &&
+                                            robotPose.x != null &&
+                                            robotPose.y != null)
+                                          _RobotMarker(
+                                            pose: robotPose,
+                                            transformer: transformer,
+                                          ),
+                                        for (var audio in audioEvents)
+                                          _AudioMarker(
+                                            audio: audio,
+                                            transformer: transformer,
+                                          ),
+                                        for (var auth in authEvents)
+                                          _AuthMarker(
+                                            event: auth,
+                                            transformer: transformer,
+                                          ),
+                                        if (isDrawingMode &&
+                                            _dragStart != null &&
+                                            _dragEnd != null)
+                                          Positioned.fill(
+                                            child: IgnorePointer(
+                                              child: CustomPaint(
+                                                painter: _RegionPainter(
+                                                  start: _dragStart!,
+                                                  end: _dragEnd!,
                                                 ),
                                               ),
                                             ),
-
-                                          if (ref.watch(yoloDrawingModeProvider))
-                                            Positioned.fill(
-                                              child: GestureDetector(
-                                                onPanStart: (details) {
-                                                  setState(() {
-                                                    _dragStart =
-                                                        details.localPosition;
-                                                    _dragEnd =
-                                                        details.localPosition;
-                                                  });
-                                                },
-                                                onPanUpdate: (details) {
-                                                  setState(() {
-                                                    _dragEnd =
-                                                        details.localPosition;
-                                                  });
-                                                },
-                                                onPanEnd: (_) {
-                                                  // 드래그 종료 처리는 상위 GestureDetector에서 수행
-                                                },
-                                              ),
-                                            ),
-
-                                          if (_isTrackingMode)
-                                            _TrackingOverlay(
-                                              color: const Color(
-                                                0xFF4ADE80,
-                                              ).withOpacity(0.2),
-                                            ),
-                                        ],
-                                      ),
+                                          ),
+                                      ],
                                     ),
                                   ),
                                 ),
@@ -571,7 +564,7 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                         child: FloatingActionButton(
                           mini: true,
                           backgroundColor: _isTrackingMode
-                              ? const Color(0xFF7F7CFF)
+                              ? const Color(0xFF4ADE80)
                               : const Color(0xFF1C1E2B),
                           foregroundColor: Colors.white70,
                           onPressed: () {
@@ -795,6 +788,8 @@ class _PlaceMarkerState extends ConsumerState<_PlaceMarker>
 
     if (widget.isTarget) {
       _controller.repeat(reverse: true);
+    } else {
+      _controller.value = 1.0;
     }
   }
 
@@ -1118,16 +1113,23 @@ class _PlaceMarkerState extends ConsumerState<_PlaceMarker>
                         borderRadius: BorderRadius.circular(4),
                         border: isTarget
                             ? Border.all(color: const Color(0xFFFACC15), width: 1)
-                            : null,
+                            : Border.all(color: Colors.white.withOpacity(0.2), width: 0.5),
                       ),
-                      child: Text(
-                        displayName,
-                        style: TextStyle(
-                          color: isTarget ? const Color(0xFFFACC15) : Colors.white,
-                          fontSize: isTarget ? 13 : 11,
-                          fontWeight: FontWeight.bold,
+                        child: Text(
+                          displayName,
+                          style: TextStyle(
+                            color: isTarget ? const Color(0xFFFACC15) : Colors.white,
+                            fontSize: isTarget ? 14 : 12,
+                            fontWeight: FontWeight.bold,
+                            shadows: [
+                              Shadow(
+                                color: Colors.black.withOpacity(0.8),
+                                blurRadius: 4,
+                                offset: const Offset(0, 1),
+                              ),
+                            ],
+                          ),
                         ),
-                      ),
                     ),
                   ],
                 ),
@@ -1693,14 +1695,14 @@ class _RegionPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final paint = Paint()
-      ..color = const Color(0xFF7F7CFF).withOpacity(0.3)
+      ..color = const Color(0xFF4ADE80).withOpacity(0.3)
       ..style = PaintingStyle.fill;
 
     final rect = Rect.fromPoints(start, end);
     canvas.drawRect(rect, paint);
 
     final borderPaint = Paint()
-      ..color = const Color(0xFF7F7CFF)
+      ..color = const Color(0xFF4ADE80)
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2;
     canvas.drawRect(rect, borderPaint);
