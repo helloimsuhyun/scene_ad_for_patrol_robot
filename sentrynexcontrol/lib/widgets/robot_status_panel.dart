@@ -43,7 +43,7 @@ class _RobotStatusPanelState extends ConsumerState<RobotStatusPanel> {
           : null;
 
       final response = await http.post(
-        Uri.parse('http://${config.serverIp}:8090/patrol/$endpoint'),
+        Uri.parse('http://192.168.0.24:8090/patrol/$endpoint'),
         headers: body != null ? {'Content-Type': 'application/json'} : null,
         body: body,
       );

@@ -223,10 +223,10 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
           final double minTy = _viewportSize.height - (transformer.imageHeight * activeScale);
           
           // 이미지가 화면보다 큰 경우에만 클램핑
-          if (minTx < 0) tx = tx.clamp(minTx, 0.0);
+          if (minTx < 0) tx = tx.clamp(minTx, 0.0).toDouble();
           else tx = (_viewportSize.width - (transformer.imageWidth * activeScale)) / 2;
           
-          if (minTy < 0) ty = ty.clamp(minTy, 0.0);
+          if (minTy < 0) ty = ty.clamp(minTy, 0.0).toDouble();
           else ty = (_viewportSize.height - (transformer.imageHeight * activeScale)) / 2;
           
           final newMatrix = Matrix4.identity()
@@ -277,7 +277,7 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                       ),
                       const SizedBox(width: 4),
                       SizedBox(
-                        height: 32,
+                        height: 26,
                         child: Switch(
                           value: ref.watch(yoloShowRegionsProvider),
                           onChanged: (val) => ref
@@ -305,17 +305,17 @@ class _DataCenterMapState extends ConsumerState<DataCenterMap> {
                               : const Color(0xFF181924),
                           foregroundColor: Colors.white70,
                           padding: const EdgeInsets.symmetric(
-                            horizontal: 16,
-                            vertical: 10,
+                            horizontal: 14,
+                            vertical: 12,
                           ),
                           minimumSize: Size.zero,
                           shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                            side: BorderSide(
-                              color: isDrawing
-                                  ? const Color(0xFF7F7CFF)
-                                  : const Color(0xFF2D3041),
-                            ),
+                            borderRadius: BorderRadius.circular(20),
+                          ),
+                          side: BorderSide(
+                            color: isDrawing
+                                ? const Color(0xFF7F7CFF)
+                                : const Color(0xFF2D3041),
                           ),
                         ),
                       ),
@@ -836,9 +836,9 @@ class _PlaceMarkerState extends ConsumerState<_PlaceMarker>
 
     if (place['x'] != null && place['y'] != null) {
       final transformed = transformer.transform(
-        place['x'],
-        place['y'],
-        place['yaw'] ?? 0,
+        double.tryParse(place['x'].toString()) ?? 0.0,
+        double.tryParse(place['y'].toString()) ?? 0.0,
+        double.tryParse((place['yaw'] ?? 0).toString()) ?? 0.0,
       );
       px = transformed['px']!;
       py = transformed['py']!;
@@ -1268,32 +1268,37 @@ class _AudioMarkerState extends State<_AudioMarker>
     final py = transformed['py']!;
 
     return Positioned(
-      left: px - 12,
-      top: py - 12,
-      child: Stack(
-        clipBehavior: Clip.none,
-        alignment: Alignment.center,
-        children: [
-          // 레이더 효과 (중심각 30도)
-          AnimatedBuilder(
-            animation: _blinkController,
-            builder: (context, child) {
-              final opacity = _isBlinking ? _blinkController.value * 0.6 : 0.35;
-              return CustomPaint(
-                painter: _RadarConePainter(
-                  yaw: (audio.yaw ?? 0).toDouble(),
-                  color: const Color(0xFFBA68C8),
-                  opacity: opacity,
-                ),
-              );
-            },
-          ),
-          const _PulsingDot(
-            color: Color(0xFFBA68C8),
-            size: 18,
-            icon: Icons.volume_up,
-          ),
-        ],
+      left: px - 60,
+      top: py - 60,
+      child: SizedBox(
+        width: 120,
+        height: 120,
+        child: Stack(
+          clipBehavior: Clip.none,
+          alignment: Alignment.center,
+          children: [
+            // 레이더 효과 (중심각 30도)
+            AnimatedBuilder(
+              animation: _blinkController,
+              builder: (context, child) {
+                final opacity = _isBlinking ? _blinkController.value * 0.6 : 0.35;
+                return CustomPaint(
+                  size: const Size(120, 120),
+                  painter: _RadarConePainter(
+                    yaw: (audio.yaw ?? 0).toDouble(),
+                    color: const Color(0xFFBA68C8),
+                    opacity: opacity,
+                  ),
+                );
+              },
+            ),
+            const _PulsingDot(
+              color: Color(0xFFBA68C8),
+              size: 18,
+              icon: Icons.volume_up,
+            ),
+          ],
+        ),
       ),
     );
   }

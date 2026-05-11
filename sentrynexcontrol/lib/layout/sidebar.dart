@@ -30,8 +30,7 @@ class Sidebar extends StatelessWidget {
             children: [
               const Icon(Icons.shield, size: 18, color: Colors.white),
               const SizedBox(width: 6),
-              Text(
-                'SENTRYNEX Control.',
+              Text('H3C Control.',
                 style: TextStyle(
                   color: Colors.white,
                   fontSize: 18,
