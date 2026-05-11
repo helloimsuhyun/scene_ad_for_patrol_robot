@@ -29,244 +29,288 @@ void showEventDetailDialog(BuildContext context, WidgetRef ref, Event event) {
 
   final isAlarm = event.anomalyFlag == 1;
   final mainColor = isAlarm ? const Color(0xFFEF4444) : const Color(0xFF38BDF8);
+  final hasHeatmap = event.verifiedChangeImageUrl != null &&
+      event.verifiedChangeImageUrl!.isNotEmpty;
 
   showDialog(
     context: context,
     builder: (context) {
-      return Dialog(
-        backgroundColor: const Color(0xFF0D0E15),
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(4),
-          side: BorderSide(color: mainColor, width: 2),
-        ),
-        child: Container(
-          width: 500,
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      bool showHeatmap = false;
+
+      return StatefulBuilder(
+        builder: (context, setState) {
+          final String originalImageUrl = event.frames.isNotEmpty
+              ? '${config.baseUrl}/images/${event.frames.first.imagePath.replaceFirst("recv/", "")}'
+              : '';
+          final String heatmapUrl =
+              hasHeatmap ? '${config.baseUrl}${event.verifiedChangeImageUrl}' : '';
+
+          return Dialog(
+            backgroundColor: const Color(0xFF0D0E15),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(4),
+              side: BorderSide(color: mainColor, width: 2),
+            ),
+            child: Container(
+              width: 500,
+              padding: const EdgeInsets.all(24),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 10,
-                      vertical: 4,
-                    ),
-                    color: mainColor,
-                    child: Text(
-                      isAlarm ? 'WARNING : 비전 이상 감지' : 'INFO : 시스템 알림',
-                      style: const TextStyle(
-                        color: Colors.white,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 1.0,
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 10,
+                          vertical: 4,
+                        ),
+                        color: mainColor,
+                        child: Text(
+                          isAlarm ? 'WARNING : 비전 이상 감지' : 'INFO : 시스템 알림',
+                          style: const TextStyle(
+                            color: Colors.white,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w900,
+                            letterSpacing: 1.0,
+                          ),
+                        ),
                       ),
+                      Row(
+                        children: [
+                          if (hasHeatmap)
+                            TextButton.icon(
+                              onPressed: () {
+                                setState(() {
+                                  showHeatmap = !showHeatmap;
+                                });
+                              },
+                              icon: Icon(
+                                showHeatmap ? Icons.image : Icons.layers,
+                                color: showHeatmap ? Colors.white : const Color(0xFFFACC15),
+                                size: 18,
+                              ),
+                              label: Text(
+                                showHeatmap ? '원본 보기' : '변화 영역 보기',
+                                style: TextStyle(
+                                  color: showHeatmap ? Colors.white : const Color(0xFFFACC15),
+                                  fontSize: 13,
+                                  fontWeight: FontWeight.bold,
+                                ),
+                              ),
+                              style: TextButton.styleFrom(
+                                backgroundColor: showHeatmap 
+                                  ? Colors.white.withOpacity(0.1) 
+                                  : const Color(0xFFFACC15).withOpacity(0.1),
+                                padding: const EdgeInsets.symmetric(horizontal: 12),
+                              ),
+                            ),
+                          const SizedBox(width: 8),
+                          IconButton(
+                            icon: const Icon(Icons.close, color: Colors.white),
+                            onPressed: () => Navigator.of(context).pop(),
+                          ),
+                        ],
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Container(
+                    decoration: BoxDecoration(
+                      border: Border.all(color: const Color(0xFF2D3041)),
                     ),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.close, color: Colors.white),
-                    onPressed: () => Navigator.of(context).pop(),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              Container(
-                decoration: BoxDecoration(
-                  border: Border.all(color: const Color(0xFF2D3041)),
-                ),
-                // 장소 이벤트 이미지: frames 리스트의 첫 번째 이미지 경로로 URL 조합
-              // 서버가 "recv/" 이후 경로만 내려주므로 /images/ 엔드포인트에 붙여 사용
-              child: event.frames.isNotEmpty
-                  ? Image.network(
-                      '${config.baseUrl}/images/${event.frames.first.imagePath.replaceFirst("recv/", "")}',
-                      width: double.infinity,
-                      height: 300,
-                      fit: BoxFit.cover,
-                      errorBuilder: (context, error, stackTrace) {
-                        return Container(
-                          width: double.infinity,
-                          height: 300,
-                          color: const Color(0xFF1C1E2B),
-                          child: const Center(
-                            child: Text(
-                              '이미지 연결 실패',
-                              style: TextStyle(
-                                color: Color(0xFFEF4444),
-                                fontWeight: FontWeight.bold,
+                    child: (event.frames.isNotEmpty || (showHeatmap && hasHeatmap))
+                        ? Image.network(
+                            showHeatmap ? heatmapUrl : originalImageUrl,
+                            width: double.infinity,
+                            height: 300,
+                            fit: BoxFit.cover,
+                            key: ValueKey(showHeatmap), // 애니메이션/갱신을 위한 키
+                            errorBuilder: (context, error, stackTrace) {
+                              return Container(
+                                width: double.infinity,
+                                height: 300,
+                                color: const Color(0xFF1C1E2B),
+                                child: const Center(
+                                  child: Text(
+                                    '이미지 연결 실패',
+                                    style: TextStyle(
+                                      color: Color(0xFFEF4444),
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                              );
+                            },
+                          )
+                        : Container(
+                            width: double.infinity,
+                            height: 300,
+                            color: const Color(0xFF1C1E2B),
+                            child: const Center(
+                              child: Text(
+                                '이미지 없음',
+                                style: TextStyle(
+                                  color: Color(0xFF4A4E63),
+                                  fontWeight: FontWeight.bold,
+                                ),
                               ),
                             ),
                           ),
-                        );
-                      },
-                    )
-                  // frames가 없으면 외부 요청 없이 로컬 박스로 대체
-                  : Container(
-                      width: double.infinity,
-                      height: 300,
-                      color: const Color(0xFF1C1E2B),
-                      child: const Center(
-                        child: Text(
-                          '이미지 없음',
-                          style: TextStyle(
-                            color: Color(0xFF4A4E63),
-                            fontWeight: FontWeight.bold,
+                  ),
+                  const SizedBox(height: 16),
+                  Text(
+                    event.summaryText ?? "알 수 없는 이벤트",
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 17,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                  if (event.adminLabel != null && event.adminLabel!.isNotEmpty) ...[
+                    const SizedBox(height: 8),
+                    Text(
+                      '상태 : (${event.adminLabel})',
+                      style: const TextStyle(
+                        color: Color(0xFF4ADE80),
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 20),
+                  const Divider(color: Color(0xFF2D3041), height: 1),
+                  const SizedBox(height: 16),
+                  _DetailRow(
+                    label: '발생 시간',
+                    value: formatEventTime(event.capturedAt),
+                  ),
+                  const SizedBox(height: 12),
+                  _DetailRow(label: '감시 구역 ID', value: event.placeId),
+                  if (event.anomalyScore != null) ...[
+                    const SizedBox(height: 12),
+                    _DetailRow(
+                      label: '위험성 (Confidence)',
+                      value: '${event.anomalyScore!.toStringAsFixed(1)}%',
+                      valueColor: mainColor,
+                    ),
+                  ],
+                  const SizedBox(height: 16),
+                  const Divider(color: Color(0xFF2D3041), height: 1),
+                  const SizedBox(height: 24),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: const Color(
+                              0xFF22C55E,
+                            ).withOpacity(0.15),
+                            foregroundColor: const Color(0xFF22C55E),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            elevation: 0,
                           ),
+                          child: const Text(
+                            '정상 (오탐지 - 뱅크 추가)',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          onPressed: () async {
+                            try {
+                              Navigator.of(context).pop();
+                              final response = await http.post(
+                                Uri.parse('${config.baseUrl}/move_event'),
+                                headers: {'Content-Type': 'application/json'},
+                                body:
+                                    '{"event_id": "${event.eventId}", "move": true}',
+                              );
+                              if (response.statusCode == 200) {
+                                ref.invalidate(eventListProvider);
+                              }
+                            } catch (e) {
+                              debugPrint('Error: $e');
+                            }
+                          },
                         ),
                       ),
-                    ),
-              ),
-              const SizedBox(height: 16),
-              Text(
-                event.summaryText ?? "알 수 없는 이벤트",
-                style: const TextStyle(
-                  color: Colors.white,
-                  fontSize: 17,
-                  fontWeight: FontWeight.bold,
-                ),
-              ),
-              if (event.adminLabel != null && event.adminLabel!.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(
-                  '상태 : (${event.adminLabel})',
-                  style: const TextStyle(
-                    color: Color(0xFF4ADE80),
-                    fontSize: 13,
-                    fontWeight: FontWeight.bold,
+                    ],
                   ),
-                ),
-              ],
-              const SizedBox(height: 20),
-              const Divider(color: Color(0xFF2D3041), height: 1),
-              const SizedBox(height: 16),
-              _DetailRow(
-                label: '발생 시간',
-                value: formatEventTime(event.capturedAt),
-              ),
-              const SizedBox(height: 12),
-              _DetailRow(label: '감시 구역 ID', value: event.placeId),
-              if (event.anomalyScore != null) ...[
-                const SizedBox(height: 12),
-                _DetailRow(
-                  label: '위험성 (Confidence)',
-                  value: '${event.anomalyScore!.toStringAsFixed(1)}%',
-                  valueColor: mainColor,
-                ),
-              ],
-              const SizedBox(height: 16),
-              const Divider(color: Color(0xFF2D3041), height: 1),
-              const SizedBox(height: 24),
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton(
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: const Color(
-                          0xFF22C55E,
-                        ).withOpacity(0.15),
-                        foregroundColor: const Color(0xFF22C55E),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(4),
+                  const SizedBox(height: 12),
+                  Row(
+                    children: [
+                      Expanded(
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFFEF4444),
+                            side: const BorderSide(color: Color(0xFFEF4444)),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                          ),
+                          child: const Text(
+                            '파손/침입 경보',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          onPressed: () async {
+                            Navigator.of(context).pop();
+                            try {
+                              await http.patch(
+                                Uri.parse(
+                                  '${config.baseUrl}/events/${event.eventId}/label',
+                                ),
+                                headers: {'Content-Type': 'application/json'},
+                                body: '{"admin_label": "파손/침입"}',
+                              );
+                              ref.invalidate(eventListProvider);
+                            } catch (e) {
+                              debugPrint('Label error: $e');
+                            }
+                          },
                         ),
-                        elevation: 0,
                       ),
-                      child: const Text(
-                        '정상 (오탐지 - 뱅크 추가)',
-                        style: TextStyle(fontWeight: FontWeight.bold),
+                      const SizedBox(width: 12),
+                      Expanded(
+                        child: OutlinedButton(
+                          style: OutlinedButton.styleFrom(
+                            foregroundColor: const Color(0xFFF97316),
+                            side: const BorderSide(color: Color(0xFFF97316)),
+                            padding: const EdgeInsets.symmetric(vertical: 16),
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                          ),
+                          child: const Text(
+                            '기타 이상 현상',
+                            style: TextStyle(fontWeight: FontWeight.bold),
+                          ),
+                          onPressed: () async {
+                            Navigator.of(context).pop();
+                            try {
+                              await http.patch(
+                                Uri.parse(
+                                  '${config.baseUrl}/events/${event.eventId}/label',
+                                ),
+                                headers: {'Content-Type': 'application/json'},
+                                body: '{"admin_label": "기타 이상"}',
+                              );
+                              ref.invalidate(eventListProvider);
+                            } catch (e) {
+                              debugPrint('Label error: $e');
+                            }
+                          },
+                        ),
                       ),
-                      onPressed: () async {
-                        try {
-                          Navigator.of(context).pop();
-                          final response = await http.post(
-                            Uri.parse('${config.baseUrl}/move_event'),
-                            headers: {'Content-Type': 'application/json'},
-                            body:
-                                '{"event_id": "${event.eventId}", "move": true}',
-                          );
-                          if (response.statusCode == 200) {
-                            ref.invalidate(eventListProvider);
-                          }
-                        } catch (e) {
-                          debugPrint('Error: $e');
-                        }
-                      },
-                    ),
+                    ],
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFFEF4444),
-                        side: const BorderSide(color: Color(0xFFEF4444)),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                      child: const Text(
-                        '파손/침입 경보',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      onPressed: () async {
-                        Navigator.of(context).pop();
-                        try {
-                          await http.patch(
-                            Uri.parse(
-                              '${config.baseUrl}/events/${event.eventId}/label',
-                            ),
-                            headers: {'Content-Type': 'application/json'},
-                            body: '{"admin_label": "파손/침입"}',
-                          );
-                          ref.invalidate(eventListProvider);
-                        } catch (e) {
-                          debugPrint('Label error: $e');
-                        }
-                      },
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: OutlinedButton(
-                      style: OutlinedButton.styleFrom(
-                        foregroundColor: const Color(0xFFF97316),
-                        side: const BorderSide(color: Color(0xFFF97316)),
-                        padding: const EdgeInsets.symmetric(vertical: 16),
-                        shape: RoundedRectangleBorder(
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                      ),
-                      child: const Text(
-                        '기타 이상 현상',
-                        style: TextStyle(fontWeight: FontWeight.bold),
-                      ),
-                      onPressed: () async {
-                        Navigator.of(context).pop();
-                        try {
-                          await http.patch(
-                            Uri.parse(
-                              '${config.baseUrl}/events/${event.eventId}/label',
-                            ),
-                            headers: {'Content-Type': 'application/json'},
-                            body: '{"admin_label": "기타 이상"}',
-                          );
-                          ref.invalidate(eventListProvider);
-                        } catch (e) {
-                          debugPrint('Label error: $e');
-                        }
-                      },
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
+            ),
+          );
+        },
       );
     },
   );

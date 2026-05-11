@@ -188,6 +188,20 @@ class _CombinedAlertTile extends ConsumerWidget {
                       style: TextStyle(color: badgeColor, fontSize: 9, fontWeight: FontWeight.bold),
                     ),
                   ),
+                  if (event is Event && event.verifiedChangeImageUrl != null && event.verifiedChangeImageUrl!.isNotEmpty) ...[
+                    const SizedBox(width: 4),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: const Color(0xFFFACC15).withOpacity(0.14),
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                      child: const Text(
+                        'HEATMAP',
+                        style: TextStyle(color: Color(0xFFFACC15), fontSize: 8, fontWeight: FontWeight.bold),
+                      ),
+                    ),
+                  ],
                   if (isChecked)
                     Row(
                       mainAxisSize: MainAxisSize.min,

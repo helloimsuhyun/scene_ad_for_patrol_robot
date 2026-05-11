@@ -43,6 +43,7 @@ class Event {
   final double? x;
   final double? y;
   final double? yaw;
+  final String? verifiedChangeImageUrl;
   
   // 백엔드에서 조인해서 보내줄 경우를 위한 frame 리스트
   final List<Frame> frames;
@@ -63,6 +64,7 @@ class Event {
     this.x,
     this.y,
     this.yaw,
+    this.verifiedChangeImageUrl,
     this.frames = const [],
   });
 
@@ -88,6 +90,7 @@ class Event {
       x: json['x']?.toDouble(),
       y: json['y']?.toDouble(),
       yaw: json['yaw']?.toDouble(),
+      verifiedChangeImageUrl: json['verified_change_image_url'],
       frames: parsedFrames,
     );
   }
