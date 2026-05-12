@@ -59,13 +59,13 @@
     "global_patch_with_aligned": {
       "preselect": {
         "mode": "vpr",
-        "top_m": 3
+        "top_m": 10
       },
       "cc": {
-        "radius": 1,
+        "radius": 3,
         "top_p": 0.05,
         "alpha": 0.6,
-        "min_cut": 0.20,
+        "min_cut": 0.30,
         "singleton_weight": 0.25,
         "component_min_area": 2
       },
