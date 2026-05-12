@@ -196,7 +196,6 @@ def _run_gpa_frame(
     proposal_cfg = cfgb["proposal"]
     ver_cfg = cfgb["verifier"]
 
-
     preselect_m = int(gp_cfg.get("top_m", 5))
 
     cc_radius = int(cc_cfg.get("radius", 1))
@@ -217,8 +216,9 @@ def _run_gpa_frame(
 
     tensor_device = torch.device(device)
 
-
-    # 1. preselect 모드에 맞추어 emb를 추출
+    # ------------------------------------------------------------
+    # 1. preselect 모드에 맞추어 query embedding 추출
+    # ------------------------------------------------------------
     preselect_mode = gp_cfg.get("mode", "dino")
 
     if preselect_mode == "dino":
@@ -236,8 +236,10 @@ def _run_gpa_frame(
     else:
         raise ValueError(f"unknown preselect mode: {preselect_mode}")
 
-    # 2. preselct emb로 상위 유사도 preselect_m개의 inx를 return
-    cand_ref_idx, ref_paths  = run_preselect(
+    # ------------------------------------------------------------
+    # 2. VPR/DINO preselect로 후보 ref index 추출
+    # ------------------------------------------------------------
+    cand_ref_idx, ref_paths = run_preselect(
         q_preselect_emb=q_preselect_emb,
         ref_bank=ref_bank,
         mode=preselect_mode,
@@ -247,7 +249,12 @@ def _run_gpa_frame(
     cand_scores = []
     cand_infos = []
 
-    # 3. preselect된 ref들에 대해서 cc점수화 (각 이미지에서 max cc의 점수를 기준으로 정상 이미지중 max cc가 제일 낮은 이미지를 best ref로 ) ----------------
+    # ------------------------------------------------------------
+    # 3. preselect된 ref들에 대해:
+    #    - SuperGlue/Homography 정합
+    #    - aligned CC score 계산
+    #    - 정합 품질 align_q 저장
+    # ------------------------------------------------------------
     for ref_i in cand_ref_idx:
         r_path = ref_paths[ref_i]
         r_bgr = cv2.imread(str(r_path), cv2.IMREAD_COLOR)
@@ -267,15 +274,27 @@ def _run_gpa_frame(
             singleton_weight=cc_singleton_weight,
             component_min_area=cc_component_min_area,
         )
+
         if score is None:
             continue
+
+        # distance_util.score_one_pair() debug에서 정합 품질 추출
+        align_q = {
+            "num_matches": int(debug.get("num_matches", 0)),
+            "num_inliers": int(debug.get("num_inliers", debug.get("inliers", 0))),
+            "inlier_ratio": float(debug.get("inlier_ratio", 0.0)),
+            "median_reproj_error": float(debug.get("median_reproj_error", 999.0)),
+            "mean_reproj_error": float(debug.get("mean_reproj_error", 999.0)),
+            "valid_patch_ratio": float(debug.get("valid_patch_ratio", 0.0)),
+        }
 
         cand_scores.append(float(score))
         cand_infos.append({
             "ref_i": int(ref_i),
             "r_path": r_path,
-            "score": float(score),
+            "score": float(score),     # CC score
             "debug": debug,
+            "align_q": align_q,        # Homography 정합 품질
         })
 
     if len(cand_scores) == 0:
@@ -285,20 +304,47 @@ def _run_gpa_frame(
             "ref_paths": ref_paths,
         }
 
-    # best ref 선택 ( argmin )
-    best_idx = int(np.argmin(cand_scores))
-    best_score = float(cand_scores[best_idx])
-    best_info = cand_infos[best_idx]
+    # ------------------------------------------------------------
+    # 4. best ref 선택 방식 변경
+    #
+    # 기존:
+    #   전체 후보 중 CC score 최소 ref 선택
+    #
+    # 변경:
+    #   1) median_reproj_error 낮은 순으로 정합 랭킹
+    #   2) 같거나 비슷하면 num_inliers 많은 후보 우선
+    #   3) 정합 품질 상위 3개 shortlist
+    #   4) shortlist 안에서 CC score 최소 ref 선택
+    # ------------------------------------------------------------
+    align_sorted = sorted(
+        cand_infos,
+        key=lambda x: (
+            x.get("align_q", {}).get("median_reproj_error", 999.0),
+            -x.get("align_q", {}).get("num_inliers", 0),
+        )
+    )
+
+    shortlist = align_sorted[:1]
+
+    best_info = shortlist[0]
+    best_score = float(best_info["score"])
     best_debug = best_info["debug"]
 
+    select_reason = "best_alignment_only"
+
+    # ------------------------------------------------------------
+    # 5. best ref와의 CC 결과에서 상위 component proposal 추출
+    # ------------------------------------------------------------
     all_comps = best_debug.get("all_comp_scores", [])
     topk_comps = sorted(
         all_comps,
         key=lambda x: float(x.get("score", 0.0)),
         reverse=True,
-    )[:proposal_top_k] # best ref와의 cc 결과에서 proposal_top_k개의 cc를 local verification
+    )[:proposal_top_k]
 
-    # cc 영역을 bbox crop으로 변환
+    # ------------------------------------------------------------
+    # 6. CC 영역을 bbox crop으로 변환
+    # ------------------------------------------------------------
     flagged_regions = build_flagged_component_regions(
         flagged_comps=topk_comps,
         q_crop=best_debug["q_crop"],
@@ -310,6 +356,9 @@ def _run_gpa_frame(
         min_crop_size=min_crop_size,
     )
 
+    # ------------------------------------------------------------
+    # 7. proposal bbox에 대해 local verifier 수행
+    # ------------------------------------------------------------
     verifier_results = []
     for reg in flagged_regions:
         out = verify_bbox_with_local_search(
@@ -335,32 +384,66 @@ def _run_gpa_frame(
         [r["verifier_score"] for r in verifier_results],
         reverse=True,
     )
+
     final_score = float(max(verifier_scores_sorted)) if verifier_scores_sorted else 0.0
 
-    # infer_event 호환용 top-k
+    # ------------------------------------------------------------
+    # 8. infer_event 호환용 top-k
+    #    기존처럼 CC score 기준 top-k를 유지
+    # ------------------------------------------------------------
     cand_infos_sorted = sorted(cand_infos, key=lambda x: x["score"])
     topk_infos = cand_infos_sorted[:max(1, min(k, len(cand_infos_sorted)))]
+
     topk_score = torch.tensor(
         [float(x["score"]) for x in topk_infos],
         device=tensor_device,
         dtype=torch.float32,
     )
+
     topk_idx = torch.tensor(
         [int(x["ref_i"]) for x in topk_infos],
         device=tensor_device,
         dtype=torch.long,
     )
+
     best_img_idx = torch.tensor(
         int(best_info["ref_i"]),
         device=tensor_device,
         dtype=torch.long,
     )
 
+    # ------------------------------------------------------------
+    # 9. debug 정보 구성
+    # ------------------------------------------------------------
     debug = {
         "fallback": False,
+
+        # ref 선택 방식 확인용
+        "select_reason": select_reason,
         "cc_score": float(best_score),
+        "best_align_quality": best_info.get("align_q", {}),
+        "alignment_rank_top3": [
+            {
+                "ref_i": int(c["ref_i"]),
+                "r_path": str(c["r_path"]),
+                "cc_score": float(c["score"]),
+                "align_q": c.get("align_q", {}),
+            }
+            for c in shortlist
+        ],
+        "candidate_alignment_summary": [
+            {
+                "ref_i": int(c["ref_i"]),
+                "r_path": str(c["r_path"]),
+                "cc_score": float(c["score"]),
+                "align_q": c.get("align_q", {}),
+            }
+            for c in cand_infos
+        ],
+
         "verifier_scores": verifier_scores_sorted,
         "verifier_results_raw": verifier_results,
+
         "flagged_regions": [
             {
                 "score": float(r["score"]),
@@ -376,7 +459,9 @@ def _run_gpa_frame(
             }
             for r in verifier_results
         ],
+
         "global_topk": (None, None),
+
         "patch_topk": {
             "best_ref_img_path": str(best_info["r_path"]),
             "topk_score": topk_score,
@@ -387,11 +472,14 @@ def _run_gpa_frame(
             "top_patch_vals": torch.empty(0, device=tensor_device, dtype=torch.float32),
             "top_patch_match_idx": torch.empty(0, device=tensor_device, dtype=torch.long),
         },
+
         "align_debug": {
             "crop_bbox": best_debug.get("bbox"),
             "grid_hw": list(best_debug["valid_mask"].shape[:2]) if "valid_mask" in best_debug else None,
             "crop_shape": list(best_debug["q_crop"].shape[:2]) if "q_crop" in best_debug else None,
+            "best_align_quality": best_info.get("align_q", {}),
         },
+
         "best_debug": best_debug,
     }
 

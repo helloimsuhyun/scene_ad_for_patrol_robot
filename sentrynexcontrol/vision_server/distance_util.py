@@ -135,45 +135,146 @@ def score_one_pair(
     singleton_weight: float = 0.25,
     component_min_area: int = 2,
 ):
+    # ------------------------------------------------------------
+    # 1. SuperGlue + RANSAC Homography
+    # ------------------------------------------------------------
     match_res = sg.match_and_estimate(q_bgr, r_bgr)
     if not match_res.get("ok", False):
-        return None, {"reason": "align_fail", "detail": match_res.get("reason", "")}
+        return None, {
+            "reason": "align_fail",
+            "detail": match_res.get("reason", ""),
+            "num_matches": int(match_res.get("num_matches", 0)),
+            "inliers": int(match_res.get("inliers", 0)),
+            "num_inliers": int(match_res.get("inliers", 0)),
+            "inlier_ratio": float(match_res.get("inlier_ratio", 0.0)),
+            "median_reproj_error": float(match_res.get("reproj_error_median", 999.0)),
+            "mean_reproj_error": float(match_res.get("reproj_error_mean", 999.0)),
+        }
 
     H = match_res["H"]
     if H is None or not isinstance(H, np.ndarray) or H.shape != (3, 3):
-        return None, {"reason": "invalid_H"}
+        return None, {
+            "reason": "invalid_H",
+            "num_matches": int(match_res.get("num_matches", 0)),
+            "inliers": int(match_res.get("inliers", 0)),
+            "num_inliers": int(match_res.get("inliers", 0)),
+            "inlier_ratio": float(match_res.get("inlier_ratio", 0.0)),
+            "median_reproj_error": float(match_res.get("reproj_error_median", 999.0)),
+            "mean_reproj_error": float(match_res.get("reproj_error_mean", 999.0)),
+        }
 
-    warped_q, warped_mask = warp_query_to_bank(q_bgr, H.astype(np.float64), r_bgr.shape[:2])
-    q_crop, r_crop, mask_crop, bbox = crop_common_safe_region(warped_q, r_bgr, warped_mask)
+    # ------------------------------------------------------------
+    # 2. alignment quality 값 정리
+    # match_and_estimate()에서 이미 계산한 reprojection error를 받음
+    # ------------------------------------------------------------
+    num_matches = int(match_res.get("num_matches", 0))
+    num_inliers = int(match_res.get("inliers", 0))
+    inlier_ratio = float(match_res.get("inlier_ratio", 0.0))
+    median_reproj_error = float(match_res.get("reproj_error_median", 999.0))
+    mean_reproj_error = float(match_res.get("reproj_error_mean", 999.0))
+
+    # ------------------------------------------------------------
+    # 3. query -> bank 좌표계 warp
+    # ------------------------------------------------------------
+    warped_q, warped_mask = warp_query_to_bank(
+        q_bgr,
+        H.astype(np.float64),
+        r_bgr.shape[:2],
+    )
+
+    q_crop, r_crop, mask_crop, bbox = crop_common_safe_region(
+        warped_q,
+        r_bgr,
+        warped_mask,
+    )
+
     if q_crop is None:
-        return None, {"reason": "crop_fail"}
+        return None, {
+            "reason": "crop_fail",
+            "num_matches": num_matches,
+            "inliers": num_inliers,
+            "num_inliers": num_inliers,
+            "inlier_ratio": inlier_ratio,
+            "median_reproj_error": median_reproj_error,
+            "mean_reproj_error": mean_reproj_error,
+        }
 
+    # ------------------------------------------------------------
+    # 4. feature 추출
+    # ------------------------------------------------------------
     q_feat, _ = backbone.extract_grid(q_crop, device)
     r_feat, _ = backbone.extract_grid(r_crop, device)
 
     grid_h, grid_w = q_feat.shape[1], q_feat.shape[2]
     valid_mask = make_patch_valid_mask(mask_crop, grid_h, grid_w)
 
-    if int(valid_mask.sum()) < 10:
-        return None, {"reason": "too_few_valid_patches", "valid_count": int(valid_mask.sum())}
+    valid_count = int(valid_mask.sum())
+    valid_patch_ratio = float(valid_mask.mean()) if valid_mask.size > 0 else 0.0
 
-    dist_map = compute_dist_map_local_search(q_feat, r_feat, valid_mask=valid_mask, radius=radius)
+    if valid_count < 10:
+        return None, {
+            "reason": "too_few_valid_patches",
+            "valid_count": valid_count,
+            "valid_patch_ratio": valid_patch_ratio,
+            "num_matches": num_matches,
+            "inliers": num_inliers,
+            "num_inliers": num_inliers,
+            "inlier_ratio": inlier_ratio,
+            "median_reproj_error": median_reproj_error,
+            "mean_reproj_error": mean_reproj_error,
+        }
 
-    result = compute_compound_score(
-        dist_map, valid_mask,
-        top_p=top_p, alpha=alpha, min_cut=min_cut,
-        singleton_weight=singleton_weight, component_min_area=component_min_area,
+    # ------------------------------------------------------------
+    # 5. local search 기반 dist map 계산
+    # ------------------------------------------------------------
+    dist_map = compute_dist_map_local_search(
+        q_feat,
+        r_feat,
+        valid_mask=valid_mask,
+        radius=radius,
     )
 
+    # ------------------------------------------------------------
+    # 6. connected component 기반 변화 score 계산
+    # ------------------------------------------------------------
+    result = compute_compound_score(
+        dist_map,
+        valid_mask,
+        top_p=top_p,
+        alpha=alpha,
+        min_cut=min_cut,
+        singleton_weight=singleton_weight,
+        component_min_area=component_min_area,
+    )
+
+    # ------------------------------------------------------------
+    # 7. debug 반환
+    # distance.py에서 정합 랭킹에 쓸 값:
+    # - median_reproj_error
+    # - num_inliers
+    # - inlier_ratio
+    # - valid_patch_ratio
+    # ------------------------------------------------------------
     debug = {
         "reason": "ok",
-        "score": result["score"],
-        "area": result["area"],
-        "peak": result["peak"],
-        "mean": result["mean"],
-        "cut": result["cut"],
-        "inliers": int(match_res.get("inliers", 0)),
-        "inlier_ratio": float(match_res.get("inlier_ratio", 0.0)),
+        "score": float(result["score"]),
+        "area": int(result["area"]),
+        "peak": float(result["peak"]),
+        "mean": float(result["mean"]),
+        "cut": float(result["cut"]),
+
+        # alignment quality
+        "num_matches": num_matches,
+        "inliers": num_inliers,
+        "num_inliers": num_inliers,
+        "inlier_ratio": inlier_ratio,
+        "median_reproj_error": median_reproj_error,
+        "mean_reproj_error": mean_reproj_error,
+
+        # valid overlap quality
+        "valid_count": valid_count,
+        "valid_patch_ratio": valid_patch_ratio,
+
         "bbox": [int(v) for v in bbox] if bbox is not None else None,
         "q_crop": q_crop,
         "r_crop": r_crop,
@@ -183,7 +284,8 @@ def score_one_pair(
         "best_comp_mask": result["best_comp_mask"],
         "all_comp_scores": result["all_comp_scores"],
     }
-    return result["score"], debug
+
+    return float(result["score"]), debug
 
 
 
