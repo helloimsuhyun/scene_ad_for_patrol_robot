@@ -304,34 +304,68 @@ def _run_gpa_frame(
             "ref_paths": ref_paths,
         }
 
-    # ------------------------------------------------------------
-    # 4. best ref 선택 방식 변경
-    #
-    # 기존:
-    #   전체 후보 중 CC score 최소 ref 선택
-    #
-    # 변경:
-    #   1) median_reproj_error 낮은 순으로 정합 랭킹
-    #   2) 같거나 비슷하면 num_inliers 많은 후보 우선
-    #   3) 정합 품질 상위 3개 shortlist
-    #   4) shortlist 안에서 CC score 최소 ref 선택
-    # ------------------------------------------------------------
+
+    strict_candidates = [
+        c for c in cand_infos
+        if c.get("align_q", {}).get("valid_patch_ratio", 0.0) >= 0.70
+        and c.get("align_q", {}).get("num_inliers", 0) >= 40
+        and c.get("align_q", {}).get("median_reproj_error", 999.0) <= 3.0
+    ]
+
+    if len(strict_candidates) > 0:
+        valid_candidates = strict_candidates
+        select_reason = "strict_gate_reproj_top2_then_min_cc"
+
+    else:
+        relaxed_candidates = [
+            c for c in cand_infos
+            if c.get("align_q", {}).get("num_inliers", 0) >= 15
+            and c.get("align_q", {}).get("median_reproj_error", 999.0) <= 5.0
+        ]
+
+        if len(relaxed_candidates) > 0:
+            valid_candidates = relaxed_candidates
+            select_reason = "relaxed_gate_reproj_top2_then_min_cc"
+        else:
+            valid_candidates = cand_infos
+            select_reason = "fallback_all_reproj_top2_then_min_cc"
+
+    # relaxed/fallback 발생 시 로그
+    if select_reason != "strict_gate_reproj_top2_then_min_cc":
+        print(
+            f"[ALIGN SELECT WARN] reason={select_reason} | "
+            f"n_cand={len(cand_infos)} | "
+            f"n_valid={len(valid_candidates)}",
+            flush=True,
+        )
+
+        for c in cand_infos:
+            aq = c.get("align_q", {})
+            print(
+                f"  ref_i={c['ref_i']} | "
+                f"cc={float(c['score']):.4f} | "
+                f"reproj={float(aq.get('median_reproj_error', 999.0)):.3f} | "
+                f"inliers={int(aq.get('num_inliers', 0))} | "
+                f"inlier_ratio={float(aq.get('inlier_ratio', 0.0)):.3f} | "
+                f"valid_patch={float(aq.get('valid_patch_ratio', 0.0)):.3f} | "
+                f"path={c['r_path']}",
+                flush=True,
+            )
+
     align_sorted = sorted(
-        cand_infos,
+        valid_candidates,
         key=lambda x: (
             x.get("align_q", {}).get("median_reproj_error", 999.0),
             -x.get("align_q", {}).get("num_inliers", 0),
+            -x.get("align_q", {}).get("valid_patch_ratio", 0.0),
         )
     )
 
-    shortlist = align_sorted[:1]
+    shortlist = align_sorted[:min(2, len(align_sorted))]
 
-    best_info = shortlist[0]
+    best_info = min(shortlist, key=lambda x: float(x["score"]))
     best_score = float(best_info["score"])
     best_debug = best_info["debug"]
-
-    select_reason = "best_alignment_only"
-
     # ------------------------------------------------------------
     # 5. best ref와의 CC 결과에서 상위 component proposal 추출
     # ------------------------------------------------------------

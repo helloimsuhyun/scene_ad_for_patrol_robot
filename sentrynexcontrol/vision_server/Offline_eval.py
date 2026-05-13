@@ -1,6 +1,6 @@
 """
 cd sentrynexcontrol
-python -m vision_server.Offline_eval --places P006
+python -m vision_server.Offline_eval --places 00 01 02 03 04 05
 """
 
 import argparse

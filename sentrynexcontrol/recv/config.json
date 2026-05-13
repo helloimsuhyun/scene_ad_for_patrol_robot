@@ -62,10 +62,10 @@
         "top_m": 5
       },
       "cc": {
-        "radius": 3,
+        "radius": 2,
         "top_p": 0.05,
         "alpha": 0.6,
-        "min_cut": 0.30,
+        "min_cut": 0.20,
         "singleton_weight": 0.25,
         "component_min_area": 2
       },
