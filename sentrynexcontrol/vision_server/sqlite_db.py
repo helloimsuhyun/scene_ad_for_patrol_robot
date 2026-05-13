@@ -170,12 +170,18 @@ def init_db(db: sqlite3.Connection) -> None:
     try:
         cur.execute("SELECT source_region_id FROM audio_events LIMIT 1")
     except sqlite3.OperationalError:
-        cur.execute("ALTER TABLE audio_events ADD COLUMN source_region_id INTEGER")
+        try:
+            cur.execute("ALTER TABLE audio_events ADD COLUMN source_region_id INTEGER")
+        except sqlite3.OperationalError:
+            pass
 
     try:
         cur.execute("SELECT source_region_name FROM audio_events LIMIT 1")
     except sqlite3.OperationalError:
-        cur.execute("ALTER TABLE audio_events ADD COLUMN source_region_name TEXT")
+        try:
+            cur.execute("ALTER TABLE audio_events ADD COLUMN source_region_name TEXT")
+        except sqlite3.OperationalError:
+            pass
 
     cur.executescript(
         """
