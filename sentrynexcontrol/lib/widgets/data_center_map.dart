@@ -14,6 +14,7 @@ import '../models/robot_state.dart';
 import '../models/event_model.dart';
 import '../utils/map_transformer.dart';
 import 'event_detail_dialog.dart';
+import 'auth_event_detail_dialog.dart';
 import '../providers/auth_event_provider.dart';
 import '../models/auth_event_model.dart';
 import '../providers/server_config_provider.dart';
@@ -1215,16 +1216,16 @@ class _PulsingDotState extends State<_PulsingDot>
   }
 }
 
-class _AudioMarker extends StatefulWidget {
+class _AudioMarker extends ConsumerStatefulWidget {
   final dynamic audio;
   final MapTransformer transformer;
   const _AudioMarker({required this.audio, required this.transformer});
 
   @override
-  State<_AudioMarker> createState() => _AudioMarkerState();
+  ConsumerState<_AudioMarker> createState() => _AudioMarkerState();
 }
 
-class _AudioMarkerState extends State<_AudioMarker>
+class _AudioMarkerState extends ConsumerState<_AudioMarker>
     with SingleTickerProviderStateMixin {
   late AnimationController _blinkController;
   bool _isBlinking = true;
@@ -1292,10 +1293,14 @@ class _AudioMarkerState extends State<_AudioMarker>
                 );
               },
             ),
-            const _PulsingDot(
-              color: Color(0xFFBA68C8),
-              size: 18,
-              icon: Icons.volume_up,
+            // 탭 시 상세 팝업 열기
+            GestureDetector(
+              onTap: () => showAudioEventDetailDialog(context, ref, audio),
+              child: const _PulsingDot(
+                color: Color(0xFFBA68C8),
+                size: 18,
+                icon: Icons.volume_up,
+              ),
             ),
           ],
         ),
@@ -1553,14 +1558,18 @@ class _DynamicLinePainter extends CustomPainter {
       oldDelegate.targetX != targetX;
 }
 
-class _AuthMarker extends StatelessWidget {
+class _AuthMarker extends ConsumerWidget {
   final AuthEvent event;
   final MapTransformer transformer;
 
   const _AuthMarker({required this.event, required this.transformer});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    // 관리자가 이미 확인한 경우 지도에서 숨김
+    if (event.adminChecked == 1 || (event.adminLabel != null && event.adminLabel!.isNotEmpty)) {
+      return const SizedBox.shrink();
+    }
     if (event.x == null || event.y == null) return const SizedBox.shrink();
 
     final transformed = transformer.transform(
@@ -1599,27 +1608,34 @@ class _AuthMarker extends StatelessWidget {
     return Positioned(
       left: px - 12,
       top: py - 12,
-      child: Tooltip(
-        message: '[$statusLabel] ${event.employeeName ?? ""}',
-        child: Container(
-          width: 24,
-          height: 24,
-          decoration: BoxDecoration(
-            color: markerColor.withOpacity(0.15),
-            shape: BoxShape.circle,
-            border: Border.all(color: markerColor, width: 2),
-            boxShadow: [
-              BoxShadow(
-                color: markerColor.withOpacity(0.3),
-                blurRadius: 8,
-                spreadRadius: 1,
-              ),
-            ],
-          ),
-          child: Icon(
-            event.status == 'success' ? Icons.person : Icons.person_search,
-            color: markerColor,
-            size: 14,
+      child: GestureDetector(
+        // 탭 시 2차인증 상세 팝업 열기
+        onTap: () => showDialog(
+          context: context,
+          builder: (_) => AuthEventDetailDialog(event: event),
+        ),
+        child: Tooltip(
+          message: '[$statusLabel] ${event.employeeName ?? ""}',
+          child: Container(
+            width: 24,
+            height: 24,
+            decoration: BoxDecoration(
+              color: markerColor.withOpacity(0.15),
+              shape: BoxShape.circle,
+              border: Border.all(color: markerColor, width: 2),
+              boxShadow: [
+                BoxShadow(
+                  color: markerColor.withOpacity(0.3),
+                  blurRadius: 8,
+                  spreadRadius: 1,
+                ),
+              ],
+            ),
+            child: Icon(
+              event.status == 'success' ? Icons.person : Icons.person_search,
+              color: markerColor,
+              size: 14,
+            ),
           ),
         ),
       ),
@@ -1641,7 +1657,7 @@ class _RadarConePainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final center = Offset(size.width / 2, size.height / 2);
-    final radius = size.width * 2.5; // 레이더 도달 거리
+    final radius = size.width * 0.75; // 레이더 도달 거리 (SizedBox 120px 기준 약 90px)
 
     final paint = Paint()
       ..shader = ui.Gradient.radial(

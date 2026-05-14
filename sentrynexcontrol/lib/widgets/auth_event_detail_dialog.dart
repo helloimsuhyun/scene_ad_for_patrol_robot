@@ -40,13 +40,15 @@ class AuthEventDetailDialog extends ConsumerWidget {
     return Dialog(
       backgroundColor: const Color(0xFF1C1E2B),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-      child: Container(
-        width: 600,
-        padding: const EdgeInsets.all(24),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
+      insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 620),
+        child: SingleChildScrollView(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
             // 헤더
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
@@ -192,8 +194,9 @@ class AuthEventDetailDialog extends ConsumerWidget {
               ),
             ]
           ],
-        ),
-      ),
+          ),        // Column
+        ),          // SingleChildScrollView
+        ),          // ConstrainedBox
     );
   }
 

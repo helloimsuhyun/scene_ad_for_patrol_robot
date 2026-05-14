@@ -51,13 +51,15 @@ void showEventDetailDialog(BuildContext context, WidgetRef ref, Event event) {
               borderRadius: BorderRadius.circular(4),
               side: BorderSide(color: mainColor, width: 2),
             ),
-            child: Container(
-              width: 500,
-              padding: const EdgeInsets.all(24),
-              child: Column(
-                mainAxisSize: MainAxisSize.min,
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
+            insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxWidth: 520),
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
                   Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
@@ -307,8 +309,9 @@ void showEventDetailDialog(BuildContext context, WidgetRef ref, Event event) {
                     ],
                   ),
                 ],
-              ),
-            ),
+              ),    // Column
+            ),      // SingleChildScrollView
+            ),      // ConstrainedBox
           );
         },
       );
@@ -332,13 +335,15 @@ void showAudioEventDetailDialog(
           borderRadius: BorderRadius.circular(4),
           side: BorderSide(color: mainColor, width: 2),
         ),
-        child: Container(
-          width: 450,
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 460),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -445,8 +450,9 @@ void showAudioEventDetailDialog(
                 ),
               ],
             ],
-          ),
-        ),
+          ),        // Column
+        ),          // SingleChildScrollView
+        ),          // ConstrainedBox
       );
     },
   );
@@ -470,13 +476,15 @@ void showYoloEventDetailDialog(
           borderRadius: BorderRadius.circular(4),
           side: BorderSide(color: mainColor, width: 2),
         ),
-        child: Container(
-          width: 500,
-          padding: const EdgeInsets.all(24),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
+        insetPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 24),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520),
+          child: SingleChildScrollView(
+            padding: const EdgeInsets.all(24),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -595,8 +603,9 @@ void showYoloEventDetailDialog(
                 ),
               ],
             ],
-          ),
-        ),
+          ),        // Column
+        ),          // SingleChildScrollView
+        ),          // ConstrainedBox
       );
     },
   );

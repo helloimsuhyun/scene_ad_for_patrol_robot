@@ -3,10 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../providers/event_provider.dart';
 import '../providers/audio_provider.dart';
 import '../providers/yolo_provider.dart';
+import '../providers/auth_event_provider.dart';
 import '../models/event_model.dart';
 import '../models/audio_event_model.dart';
 import '../models/yolo_event_model.dart';
+import '../models/auth_event_model.dart';
 import 'event_detail_dialog.dart';
+import 'auth_event_detail_dialog.dart';
 
 class CombinedEventList extends ConsumerWidget {
   final bool showOnlyUnchecked;
@@ -23,6 +26,7 @@ class CombinedEventList extends ConsumerWidget {
     final visionEvents = ref.watch(eventListProvider);
     final audioEvents = ref.watch(audioEventListProvider);
     final yoloEvents = ref.watch(yoloEventsProvider);
+    final authEvents = ref.watch(authEventListProvider);
 
     final List<dynamic> allEvents = [];
 
@@ -30,10 +34,13 @@ class CombinedEventList extends ConsumerWidget {
       allEvents.addAll(visionEvents.where((e) => (e.adminChecked == 0 && (e.adminLabel == null || e.adminLabel!.isEmpty))));
       allEvents.addAll(audioEvents.where((e) => (e.adminChecked == 0 && (e.adminLabel == null || e.adminLabel!.isEmpty))));
       allEvents.addAll(yoloEvents.where((e) => (e.adminChecked == 0 && (e.adminLabel == null || e.adminLabel!.isEmpty))));
+      // 2차인증 미확인 경보: success/fail/timeout 중 아직 admin이 처리 안 한 것
+      allEvents.addAll(authEvents.where((e) => e.adminChecked == 0 && (e.adminLabel == null || e.adminLabel!.isEmpty)));
     } else {
       allEvents.addAll(visionEvents);
       allEvents.addAll(audioEvents);
       allEvents.addAll(yoloEvents);
+      allEvents.addAll(authEvents);
     }
 
     // 미확인 먼저, 동일 그룹 내에선 최신순(시간 역순) 정렬
@@ -45,8 +52,11 @@ class CombinedEventList extends ConsumerWidget {
         return aChecked ? 1 : -1;
       }
       
-      final tA = DateTime.parse(a is Event ? a.capturedAt : a.timestamp).toLocal();
-      final tB = DateTime.parse(b is Event ? b.capturedAt : b.timestamp).toLocal();
+      // AuthEvent는 timestamp, Event는 capturedAt, 나머지는 timestamp 사용
+      String tsA = a is Event ? a.capturedAt : a.timestamp;
+      String tsB = b is Event ? b.capturedAt : b.timestamp;
+      final tA = DateTime.tryParse(tsA)?.toLocal() ?? DateTime(2000);
+      final tB = DateTime.tryParse(tsB)?.toLocal() ?? DateTime(2000);
       return tB.compareTo(tA);
     });
 
@@ -142,6 +152,21 @@ class _CombinedAlertTile extends ConsumerWidget {
       badgeLabel = isChecked ? 'CHECKED' : 'YOLO ALARM';
       summaryStr = '${event.eventType ?? "인물 감지"} (${event.personCount}명)';
       placeStr = event.sourceRegionName ?? 'YOLO 감시구역';
+    } else if (event is AuthEvent) {
+      isChecked = event.adminChecked == 1 || (event.adminLabel != null && event.adminLabel!.isNotEmpty);
+      // 2차인증 결과에 따라 배지 색상 구분
+      if (isChecked) {
+        badgeColor = const Color(0xFF7A7F96);
+        badgeLabel = 'CHECKED';
+      } else if (event.status == 'fail' || event.status == 'timeout') {
+        badgeColor = const Color(0xFFEF4444);
+        badgeLabel = 'AUTH ALARM';
+      } else {
+        badgeColor = const Color(0xFFFACC15);
+        badgeLabel = 'AUTH';
+      }
+      summaryStr = event.resultMessage ?? '2차 인증 이벤트';
+      placeStr = event.sourceRegionName ?? '인증 구역';
     } else {
       return const SizedBox.shrink();
     }
@@ -154,6 +179,11 @@ class _CombinedAlertTile extends ConsumerWidget {
           showAudioEventDetailDialog(context, ref, event);
         } else if (event is YoloEvent) {
           showYoloEventDetailDialog(context, ref, event);
+        } else if (event is AuthEvent) {
+          showDialog(
+            context: context,
+            builder: (_) => AuthEventDetailDialog(event: event),
+          );
         }
       },
       child: Opacity(
