@@ -172,6 +172,9 @@ def score_one_pair(
     inlier_ratio = float(match_res.get("inlier_ratio", 0.0))
     median_reproj_error = float(match_res.get("reproj_error_median", 999.0))
     mean_reproj_error = float(match_res.get("reproj_error_mean", 999.0))
+    query_inlier_grid_coverage = float(match_res.get("query_inlier_grid_coverage", 0.0))
+    bank_inlier_grid_coverage = float(match_res.get("bank_inlier_grid_coverage", 0.0))
+    inlier_grid_coverage = float(match_res.get("inlier_grid_coverage", 0.0))
 
     # ------------------------------------------------------------
     # 3. query -> bank 좌표계 warp
@@ -270,6 +273,9 @@ def score_one_pair(
         "inlier_ratio": inlier_ratio,
         "median_reproj_error": median_reproj_error,
         "mean_reproj_error": mean_reproj_error,
+        "query_inlier_grid_coverage": query_inlier_grid_coverage,
+        "bank_inlier_grid_coverage": bank_inlier_grid_coverage,
+        "inlier_grid_coverage": inlier_grid_coverage,
 
         # valid overlap quality
         "valid_count": valid_count,

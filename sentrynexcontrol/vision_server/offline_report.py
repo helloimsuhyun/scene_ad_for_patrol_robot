@@ -4,34 +4,26 @@
 """
 Offline evaluation 부산물 기반 통계/곡선 리포트 생성 스크립트
 
-핵심:
-- event_score를 threshold와 직접 비교하지 않음.
-- 각 event의 frame_scores를 frame threshold와 비교.
-- threshold를 넘은 frame 개수가 vote 조건을 만족하면 event abnormal.
-- PR/ROC/best threshold는 frame-score threshold 기준으로 sweep.
-- 최종 성능지표는 event label vs vote-based event prediction 기준.
-- 데모용 오탐 관리 operating point로 Precision >= 0.95 조건도 함께 계산.
+핵심 정의:
+1) ROC/PR curve:
+   - frame 단위
+   - 각 frame_score를 하나의 샘플로 사용
+   - frame label은 해당 event label을 그대로 부여
+     예: abnormal event 안의 frame들은 모두 positive frame으로 간주
+
+2) Best threshold:
+   - frame_score threshold 기준
+   - best-F1 threshold 1개
+   - 오탐 방지용 target precision threshold 1개, 기본 Precision >= 0.95
+
+3) 최종 평가지표:
+   - event 단위
+   - 선택된 frame threshold를 각 event의 frame_scores에 적용
+   - frame_flags -> vote -> event_pred
+   - event label과 event_pred로 TP/TN/FP/FN/Accuracy/Precision/Recall/F1 계산
 
 전제:
-먼저 Offline_eval.py를 실행해서 아래 구조가 있어야 함.
-
-recv/_offline_out/
-  01/
-    offline_eval_results.json
-  06/
-    offline_eval_results.json
-  ...
-
-offline_eval_results.json 내부 이벤트 예:
-{
-  "event_key": "...",
-  "label": 0 or 1,
-  "pred": 0 or 1,
-  "threshold": float,
-  "frame_scores": [...],
-  "frame_change_flags": [...],
-  "event_score": float
-}
+recv/_offline_out/<place>/offline_eval_results.json 구조가 있어야 함.
 
 사용 예시:
 cd sentrynexcontrol
@@ -40,14 +32,16 @@ python -m vision_server.offline_report \
   --out_root ./recv/_offline_out \
   --report_root ./recv/val_offline_report \
   --places 01 06 07 08 \
-  --vote_rule majority
+  --vote_rule majority \
+  --target_precision 0.95
 
 
 python -m vision_server.offline_report \
   --out_root ./recv/_offline_out \
   --report_root ./recv/test_offline_report \
   --places P001 P002 P003 \
-  --vote_rule majority
+  --vote_rule majority \
+  --target_precision 0.95
 """
 
 import argparse
@@ -108,6 +102,23 @@ def make_csv_safe_events(events: List[Dict]) -> List[Dict]:
     return out
 
 
+def make_frame_sample_rows(events: List[Dict]) -> List[Dict]:
+    rows = []
+    for ev in events:
+        label = int(ev["label"])
+        place = ev.get("place", "")
+        event_key = ev.get("event_key", "")
+        for i, s in enumerate(ev.get("frame_scores", [])):
+            rows.append({
+                "place": place,
+                "event_key": event_key,
+                "frame_idx": i,
+                "frame_label_from_event": label,
+                "frame_score": float(s),
+            })
+    return rows
+
+
 # =========================================================
 # Metric utils
 # =========================================================
@@ -121,12 +132,7 @@ def confusion_counts(y_true: np.ndarray, y_pred: np.ndarray) -> Dict[str, int]:
     fp = int(np.sum((y_true == 0) & (y_pred == 1)))
     fn = int(np.sum((y_true == 1) & (y_pred == 0)))
 
-    return {
-        "tp": tp,
-        "tn": tn,
-        "fp": fp,
-        "fn": fn,
-    }
+    return {"tp": tp, "tn": tn, "fp": fp, "fn": fn}
 
 
 def metrics_from_counts(c: Dict[str, int]) -> Dict[str, float]:
@@ -164,11 +170,7 @@ def metrics_from_counts(c: Dict[str, int]) -> Dict[str, float]:
 def compute_metrics(y_true: np.ndarray, y_pred: np.ndarray) -> Dict:
     c = confusion_counts(y_true, y_pred)
     m = metrics_from_counts(c)
-    return {
-        **c,
-        **m,
-        "n": int(len(y_true)),
-    }
+    return {**c, **m, "n": int(len(y_true))}
 
 
 def safe_auc(x: np.ndarray, y: np.ndarray) -> Optional[float]:
@@ -183,13 +185,35 @@ def safe_auc(x: np.ndarray, y: np.ndarray) -> Optional[float]:
 
 
 def threshold_candidates(scores: np.ndarray) -> List[float]:
+    """
+    threshold sweep 후보.
+    실제 infer_event는 dist > threshold 구조이므로,
+    equality ambiguity를 줄이기 위해 unique score 사이 midpoint를 사용한다.
+    """
+    scores = np.asarray(scores, dtype=float)
+    scores = scores[np.isfinite(scores)]
+
     if len(scores) == 0:
         return []
 
     unique = sorted(set(float(x) for x in scores), reverse=True)
-    eps = 1e-9
 
-    return [max(unique) + eps] + unique + [min(unique) - eps]
+    if len(unique) == 1:
+        v = unique[0]
+        eps = max(abs(v) * 1e-9, 1e-9)
+        return [v + eps, v - eps]
+
+    thrs = []
+    eps_hi = max(abs(unique[0]) * 1e-9, 1e-9)
+    eps_lo = max(abs(unique[-1]) * 1e-9, 1e-9)
+
+    thrs.append(unique[0] + eps_hi)
+
+    for a, b in zip(unique[:-1], unique[1:]):
+        thrs.append((a + b) / 2.0)
+
+    thrs.append(unique[-1] - eps_lo)
+    return [float(t) for t in thrs]
 
 
 def best_threshold_by_f1(sweep_rows: List[Dict]) -> Optional[Dict]:
@@ -202,6 +226,7 @@ def best_threshold_by_f1(sweep_rows: List[Dict]) -> Optional[Dict]:
             float(r["f1"]),
             float(r["recall"]),
             float(r["precision"]),
+            -float(r["threshold"]),
         )
     )
 
@@ -210,11 +235,7 @@ def best_threshold_by_min_recall(
     sweep_rows: List[Dict],
     min_recall: float = 0.90,
 ) -> Optional[Dict]:
-    candidates = [
-        r for r in sweep_rows
-        if float(r["recall"]) >= float(min_recall)
-    ]
-
+    candidates = [r for r in sweep_rows if float(r["recall"]) >= float(min_recall)]
     if len(candidates) == 0:
         return None
 
@@ -224,6 +245,7 @@ def best_threshold_by_min_recall(
             float(r["precision"]),
             float(r["f1"]),
             float(r["recall"]),
+            float(r["threshold"]),
         )
     )
 
@@ -232,11 +254,7 @@ def best_threshold_by_min_precision(
     sweep_rows: List[Dict],
     min_precision: float = 0.95,
 ) -> Optional[Dict]:
-    candidates = [
-        r for r in sweep_rows
-        if float(r["precision"]) >= float(min_precision)
-    ]
-
+    candidates = [r for r in sweep_rows if float(r["precision"]) >= float(min_precision)]
     if len(candidates) == 0:
         return None
 
@@ -246,39 +264,15 @@ def best_threshold_by_min_precision(
             float(r["recall"]),
             float(r["f1"]),
             float(r["precision"]),
-        )
-    )
-
-
-def best_threshold_by_max_fp(
-    sweep_rows: List[Dict],
-    max_fp: int = 2,
-) -> Optional[Dict]:
-    candidates = [
-        r for r in sweep_rows
-        if int(r["fp"]) <= int(max_fp)
-    ]
-
-    if len(candidates) == 0:
-        return None
-
-    return max(
-        candidates,
-        key=lambda r: (
-            float(r["recall"]),
-            float(r["precision"]),
-            float(r["f1"]),
+            -float(r["threshold"]),
         )
     )
 
 
 def average_precision_score_manual(y_true: np.ndarray, scores: np.ndarray) -> Optional[float]:
     """
-    sklearn 없이 AP 계산.
-    event-level score 기준 AP.
-
-    여기서 score는 event_score가 아니라 vote_score임.
-    vote_score는 frame threshold + vote와 동등한 event-level decision score.
+    sklearn 없이 Average Precision 계산.
+    여기서는 frame-level AP 계산에 사용한다.
     """
     y_true = y_true.astype(int)
     scores = scores.astype(float)
@@ -312,13 +306,12 @@ def required_votes_for_event(
     min_positive_frames: int,
 ) -> int:
     """
-    event가 abnormal이 되기 위해 threshold 이상이어야 하는 frame 개수.
+    event가 abnormal이 되기 위해 threshold를 초과해야 하는 frame 개수.
 
-    vote_rule:
-    - any: 1장 이상
-    - majority: 절반 이상. 5장이면 3장.
-    - ratio: ceil(num_frames * vote_ratio)
-    - min_count: min_positive_frames장 이상
+    실제 infer_event의 vote는:
+      anomaly_flag = 1 if n_ab > (n / 2) else 0
+
+    따라서 majority는 floor(n/2)+1.
     """
     if num_frames <= 0:
         return 1
@@ -327,7 +320,7 @@ def required_votes_for_event(
         return 1
 
     if vote_rule == "majority":
-        return int(math.ceil(num_frames * 0.5))
+        return int(math.floor(num_frames * 0.5)) + 1
 
     if vote_rule == "ratio":
         return max(1, int(math.ceil(num_frames * float(vote_ratio))))
@@ -346,8 +339,8 @@ def pred_from_frame_threshold(
     min_positive_frames: int,
 ) -> int:
     """
-    실제 판정 방식:
-    frame_scores >= threshold인 frame 개수를 세고,
+    실제 판정 방식과 맞춤:
+    frame_score > threshold 인 frame 개수를 세고,
     vote 조건을 만족하면 event abnormal.
     """
     if len(frame_scores) == 0:
@@ -360,8 +353,7 @@ def pred_from_frame_threshold(
         min_positive_frames=min_positive_frames,
     )
 
-    num_positive = int(np.sum(np.array(frame_scores, dtype=float) >= float(threshold)))
-
+    num_positive = int(np.sum(np.array(frame_scores, dtype=float) > float(threshold)))
     return 1 if num_positive >= required else 0
 
 
@@ -372,25 +364,9 @@ def vote_score_from_frame_scores(
     min_positive_frames: int,
 ) -> float:
     """
-    frame threshold + vote와 수학적으로 동일한 event-level score를 만든다.
-
-    예:
-    frame_scores = [10, 25, 30, 5, 40]
-
-    any vote:
-      required=1
-      vote_score=max=40
-      threshold <= 40이면 abnormal
-
-    majority vote, 5장:
-      required=3
-      내림차순 [40, 30, 25, 10, 5]
-      3번째 큰 값=25
-      threshold <= 25이면 3장 이상 threshold를 넘으므로 abnormal
-
-    즉:
-    event_pred = vote_score >= threshold
-    는 frame_scores를 threshold와 비교한 뒤 vote하는 것과 동일함.
+    참고용 event-level score.
+    frame threshold + vote와 대응되는 kth largest score.
+    ROC/PR/best threshold에는 사용하지 않는다.
     """
     if len(frame_scores) == 0:
         return float("-inf")
@@ -405,7 +381,6 @@ def vote_score_from_frame_scores(
     )
 
     required = min(max(required, 1), len(scores))
-
     return float(scores[required - 1])
 
 
@@ -419,7 +394,6 @@ def add_vote_scores(
 
     for ev in events:
         row = dict(ev)
-
         frame_scores = row.get("frame_scores", [])
 
         row["required_votes"] = required_votes_for_event(
@@ -442,22 +416,44 @@ def add_vote_scores(
 
 
 # =========================================================
-# Threshold sweep based on frame threshold + vote
+# Frame-level threshold sweep
 # =========================================================
 
-def sweep_vote_scores(
-    y_true: np.ndarray,
-    vote_scores: np.ndarray,
+def flatten_frame_samples(events: List[Dict]) -> Tuple[np.ndarray, np.ndarray]:
+    """
+    각 frame_score를 ROC/PR 샘플로 사용한다.
+
+    주의:
+    현재 offline 결과에는 frame-level label이 없으므로,
+    event label을 해당 event의 모든 frame에 동일하게 부여한다.
+    """
+    y_frames = []
+    s_frames = []
+
+    for ev in events:
+        label = int(ev["label"])
+        for s in ev.get("frame_scores", []):
+            y_frames.append(label)
+            s_frames.append(float(s))
+
+    return (
+        np.array(y_frames, dtype=int),
+        np.array(s_frames, dtype=float),
+    )
+
+
+def sweep_frame_scores(
+    y_frame_true: np.ndarray,
+    frame_scores: np.ndarray,
 ) -> List[Dict]:
     """
-    vote_score >= threshold 로 event pred 계산.
-    이 threshold는 실제로 frame_score threshold와 동일한 의미를 가짐.
+    각 frame_score를 직접 threshold sweep한다.
     """
     rows = []
 
-    for thr in threshold_candidates(vote_scores):
-        y_pred = (vote_scores >= float(thr)).astype(int)
-        met = compute_metrics(y_true, y_pred)
+    for thr in threshold_candidates(frame_scores):
+        y_frame_pred = (frame_scores > float(thr)).astype(int)
+        met = compute_metrics(y_frame_true, y_frame_pred)
 
         rows.append({
             "threshold": float(thr),
@@ -467,33 +463,60 @@ def sweep_vote_scores(
     return rows
 
 
+def event_metrics_at_frame_threshold(
+    events: List[Dict],
+    threshold: float,
+    vote_rule: str,
+    vote_ratio: float,
+    min_positive_frames: int,
+) -> Dict:
+    """
+    frame 기준으로 선택된 threshold를 event별 frame_scores에 적용한 뒤,
+    vote로 event prediction을 만들고 event-level metric을 계산한다.
+    """
+    y_true = np.array([int(ev["label"]) for ev in events], dtype=int)
+
+    y_pred = np.array([
+        pred_from_frame_threshold(
+            frame_scores=ev.get("frame_scores", []),
+            threshold=float(threshold),
+            vote_rule=vote_rule,
+            vote_ratio=vote_ratio,
+            min_positive_frames=min_positive_frames,
+        )
+        for ev in events
+    ], dtype=int)
+
+    out = compute_metrics(y_true, y_pred)
+    out["threshold"] = float(threshold)
+    return out
+
+
 def roc_curve_points(
     y_true: np.ndarray,
-    vote_scores: np.ndarray,
+    scores: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, List[float]]:
-    rows = sweep_vote_scores(y_true, vote_scores)
+    rows = sweep_frame_scores(y_true, scores)
 
     fpr = np.array([r["fpr"] for r in rows], dtype=np.float32)
     tpr = np.array([r["recall"] for r in rows], dtype=np.float32)
     thrs = [float(r["threshold"]) for r in rows]
 
     order = np.argsort(fpr)
-
     return fpr[order], tpr[order], [thrs[i] for i in order]
 
 
 def pr_curve_points(
     y_true: np.ndarray,
-    vote_scores: np.ndarray,
+    scores: np.ndarray,
 ) -> Tuple[np.ndarray, np.ndarray, List[float]]:
-    rows = sweep_vote_scores(y_true, vote_scores)
+    rows = sweep_frame_scores(y_true, scores)
 
     precision = np.array([r["precision"] for r in rows], dtype=np.float32)
     recall = np.array([r["recall"] for r in rows], dtype=np.float32)
     thrs = [float(r["threshold"]) for r in rows]
 
     order = np.argsort(recall)
-
     return recall[order], precision[order], [thrs[i] for i in order]
 
 
@@ -502,10 +525,6 @@ def pr_curve_points(
 # =========================================================
 
 def collect_events(out_root: Path, places: Optional[List[str]] = None) -> List[Dict]:
-    """
-    recv/_offline_out/<place>/offline_eval_results.json 전체 수집.
-    frame_scores를 반드시 보존한다.
-    """
     rows = []
 
     if not out_root.exists():
@@ -580,14 +599,14 @@ def collect_events(out_root: Path, places: Optional[List[str]] = None) -> List[D
                 "event_key": str(ev.get("event_key", "")),
                 "label": label,
 
-                # 기존 Offline_eval의 최종 pred.
+                # 기존 Offline_eval의 최종 event-level pred.
                 # current operating point 평가에 사용.
                 "pred": pred,
 
                 # 참고용. threshold sweep에는 사용하지 않음.
                 "event_score": event_score,
 
-                # 실제 threshold sweep에 사용.
+                # frame-level ROC/PR 및 threshold sweep에 사용.
                 "frame_scores": frame_scores,
                 "frame_change_flags": frame_change_flags,
 
@@ -612,6 +631,10 @@ def collect_events(out_root: Path, places: Optional[List[str]] = None) -> List[D
 
 def build_place_stats(
     events: List[Dict],
+    vote_rule: str,
+    vote_ratio: float,
+    min_positive_frames: int,
+    target_precision: float,
 ) -> List[Dict]:
     by_place: Dict[str, List[Dict]] = {}
     for ev in events:
@@ -620,21 +643,43 @@ def build_place_stats(
     rows = []
 
     for plc, items in sorted(by_place.items()):
-        y_true = np.array([ev["label"] for ev in items], dtype=int)
+        y_true_event = np.array([ev["label"] for ev in items], dtype=int)
         y_pred_current = np.array([ev["pred"] for ev in items], dtype=int)
-        vote_scores = np.array([ev["vote_score"] for ev in items], dtype=float)
+        current = compute_metrics(y_true_event, y_pred_current)
 
-        current = compute_metrics(y_true, y_pred_current)
+        y_frame_true, frame_scores_flat = flatten_frame_samples(items)
+        frame_sweep = sweep_frame_scores(y_frame_true, frame_scores_flat)
 
-        sweep = sweep_vote_scores(y_true, vote_scores)
-        best = best_threshold_by_f1(sweep)
-        recall90 = best_threshold_by_min_recall(sweep, min_recall=0.90)
-        precision80 = best_threshold_by_min_precision(sweep, min_precision=0.80)
-        precision95 = best_threshold_by_min_precision(sweep, min_precision=0.95)
-        fp2 = best_threshold_by_max_fp(sweep, max_fp=2)
+        best_frame_f1 = best_threshold_by_f1(frame_sweep)
+        target_precision_frame = best_threshold_by_min_precision(
+            frame_sweep,
+            min_precision=target_precision,
+        )
 
-        n_normal = int(np.sum(y_true == 0))
-        n_abnormal = int(np.sum(y_true == 1))
+        best_event = (
+            event_metrics_at_frame_threshold(
+                items,
+                float(best_frame_f1["threshold"]),
+                vote_rule,
+                vote_ratio,
+                min_positive_frames,
+            )
+            if best_frame_f1 else None
+        )
+
+        target_event = (
+            event_metrics_at_frame_threshold(
+                items,
+                float(target_precision_frame["threshold"]),
+                vote_rule,
+                vote_ratio,
+                min_positive_frames,
+            )
+            if target_precision_frame else None
+        )
+
+        n_normal = int(np.sum(y_true_event == 0))
+        n_abnormal = int(np.sum(y_true_event == 1))
 
         all_frame_scores = []
         normal_frame_scores = []
@@ -643,11 +688,12 @@ def build_place_stats(
         for ev in items:
             fs = ev.get("frame_scores", [])
             all_frame_scores.extend(fs)
-
             if int(ev["label"]) == 0:
                 normal_frame_scores.extend(fs)
             else:
                 abnormal_frame_scores.extend(fs)
+
+        vote_scores = np.array([ev["vote_score"] for ev in items], dtype=float)
 
         row = {
             "place": plc,
@@ -655,16 +701,18 @@ def build_place_stats(
             "n_normal": n_normal,
             "n_abnormal": n_abnormal,
 
-            "tp": current["tp"],
-            "tn": current["tn"],
-            "fp": current["fp"],
-            "fn": current["fn"],
-            "accuracy": current["accuracy"],
-            "precision": current["precision"],
-            "recall": current["recall"],
-            "specificity": current["specificity"],
-            "f1": current["f1"],
+            # current event-level
+            "current_tp": current["tp"],
+            "current_tn": current["tn"],
+            "current_fp": current["fp"],
+            "current_fn": current["fn"],
+            "current_accuracy": current["accuracy"],
+            "current_precision": current["precision"],
+            "current_recall": current["recall"],
+            "current_specificity": current["specificity"],
+            "current_f1": current["f1"],
 
+            # frame score stats
             "frame_score_mean": float(np.mean(all_frame_scores)) if all_frame_scores else math.nan,
             "frame_score_std": float(np.std(all_frame_scores)) if all_frame_scores else math.nan,
             "normal_frame_score_mean": float(np.mean(normal_frame_scores)) if normal_frame_scores else math.nan,
@@ -673,36 +721,38 @@ def build_place_stats(
             "vote_score_mean": float(np.mean(vote_scores)) if len(vote_scores) else math.nan,
             "vote_score_std": float(np.std(vote_scores)) if len(vote_scores) else math.nan,
 
-            "best_f1_threshold": float(best["threshold"]) if best else math.nan,
-            "best_f1": float(best["f1"]) if best else math.nan,
-            "best_precision": float(best["precision"]) if best else math.nan,
-            "best_recall": float(best["recall"]) if best else math.nan,
-            "best_accuracy": float(best["accuracy"]) if best else math.nan,
+            # best frame-F1 threshold: frame-level metrics
+            "best_frame_f1_threshold": float(best_frame_f1["threshold"]) if best_frame_f1 else math.nan,
+            "best_frame_f1_frame_precision": float(best_frame_f1["precision"]) if best_frame_f1 else math.nan,
+            "best_frame_f1_frame_recall": float(best_frame_f1["recall"]) if best_frame_f1 else math.nan,
+            "best_frame_f1_frame_f1": float(best_frame_f1["f1"]) if best_frame_f1 else math.nan,
 
-            "recall90_threshold": float(recall90["threshold"]) if recall90 else math.nan,
-            "recall90_precision": float(recall90["precision"]) if recall90 else math.nan,
-            "recall90_recall": float(recall90["recall"]) if recall90 else math.nan,
-            "recall90_f1": float(recall90["f1"]) if recall90 else math.nan,
+            # best frame-F1 threshold applied to event-level vote
+            "best_frame_f1_event_tp": int(best_event["tp"]) if best_event else -1,
+            "best_frame_f1_event_tn": int(best_event["tn"]) if best_event else -1,
+            "best_frame_f1_event_fp": int(best_event["fp"]) if best_event else -1,
+            "best_frame_f1_event_fn": int(best_event["fn"]) if best_event else -1,
+            "best_frame_f1_event_accuracy": float(best_event["accuracy"]) if best_event else math.nan,
+            "best_frame_f1_event_precision": float(best_event["precision"]) if best_event else math.nan,
+            "best_frame_f1_event_recall": float(best_event["recall"]) if best_event else math.nan,
+            "best_frame_f1_event_f1": float(best_event["f1"]) if best_event else math.nan,
 
-            "precision80_threshold": float(precision80["threshold"]) if precision80 else math.nan,
-            "precision80_precision": float(precision80["precision"]) if precision80 else math.nan,
-            "precision80_recall": float(precision80["recall"]) if precision80 else math.nan,
-            "precision80_f1": float(precision80["f1"]) if precision80 else math.nan,
+            # target precision threshold: frame-level metrics
+            "target_precision": float(target_precision),
+            "target_precision_threshold": float(target_precision_frame["threshold"]) if target_precision_frame else math.nan,
+            "target_precision_frame_precision": float(target_precision_frame["precision"]) if target_precision_frame else math.nan,
+            "target_precision_frame_recall": float(target_precision_frame["recall"]) if target_precision_frame else math.nan,
+            "target_precision_frame_f1": float(target_precision_frame["f1"]) if target_precision_frame else math.nan,
 
-            "precision95_threshold": float(precision95["threshold"]) if precision95 else math.nan,
-            "precision95_precision": float(precision95["precision"]) if precision95 else math.nan,
-            "precision95_recall": float(precision95["recall"]) if precision95 else math.nan,
-            "precision95_f1": float(precision95["f1"]) if precision95 else math.nan,
-            "precision95_accuracy": float(precision95["accuracy"]) if precision95 else math.nan,
-            "precision95_fp": int(precision95["fp"]) if precision95 else -1,
-            "precision95_fn": int(precision95["fn"]) if precision95 else -1,
-
-            "fp2_threshold": float(fp2["threshold"]) if fp2 else math.nan,
-            "fp2_precision": float(fp2["precision"]) if fp2 else math.nan,
-            "fp2_recall": float(fp2["recall"]) if fp2 else math.nan,
-            "fp2_f1": float(fp2["f1"]) if fp2 else math.nan,
-            "fp2_fp": int(fp2["fp"]) if fp2 else -1,
-            "fp2_fn": int(fp2["fn"]) if fp2 else -1,
+            # target precision threshold applied to event-level vote
+            "target_precision_event_tp": int(target_event["tp"]) if target_event else -1,
+            "target_precision_event_tn": int(target_event["tn"]) if target_event else -1,
+            "target_precision_event_fp": int(target_event["fp"]) if target_event else -1,
+            "target_precision_event_fn": int(target_event["fn"]) if target_event else -1,
+            "target_precision_event_accuracy": float(target_event["accuracy"]) if target_event else math.nan,
+            "target_precision_event_precision": float(target_event["precision"]) if target_event else math.nan,
+            "target_precision_event_recall": float(target_event["recall"]) if target_event else math.nan,
+            "target_precision_event_f1": float(target_event["f1"]) if target_event else math.nan,
         }
 
         rows.append(row)
@@ -715,74 +765,106 @@ def build_overall_summary(
     vote_rule: str,
     vote_ratio: float,
     min_positive_frames: int,
+    target_precision: float,
 ) -> Dict:
     if len(events) == 0:
         return {}
 
-    y_true = np.array([ev["label"] for ev in events], dtype=int)
+    y_true_event = np.array([ev["label"] for ev in events], dtype=int)
     y_pred_current = np.array([ev["pred"] for ev in events], dtype=int)
-    vote_scores = np.array([ev["vote_score"] for ev in events], dtype=float)
+    current_event = compute_metrics(y_true_event, y_pred_current)
 
-    current = compute_metrics(y_true, y_pred_current)
+    y_frame_true, frame_scores_flat = flatten_frame_samples(events)
+    frame_sweep = sweep_frame_scores(y_frame_true, frame_scores_flat)
 
-    sweep = sweep_vote_scores(y_true, vote_scores)
-    best = best_threshold_by_f1(sweep)
-    recall90 = best_threshold_by_min_recall(sweep, min_recall=0.90)
-    precision80 = best_threshold_by_min_precision(sweep, min_precision=0.80)
-    precision95 = best_threshold_by_min_precision(sweep, min_precision=0.95)
-    fp2 = best_threshold_by_max_fp(sweep, max_fp=2)
+    best_frame_f1 = best_threshold_by_f1(frame_sweep)
+    target_precision_frame = best_threshold_by_min_precision(
+        frame_sweep,
+        min_precision=target_precision,
+    )
 
-    has_pos = np.any(y_true == 1)
-    has_neg = np.any(y_true == 0)
+    best_event_from_frame_f1 = (
+        event_metrics_at_frame_threshold(
+            events,
+            float(best_frame_f1["threshold"]),
+            vote_rule,
+            vote_ratio,
+            min_positive_frames,
+        )
+        if best_frame_f1 else None
+    )
+
+    target_precision_event = (
+        event_metrics_at_frame_threshold(
+            events,
+            float(target_precision_frame["threshold"]),
+            vote_rule,
+            vote_ratio,
+            min_positive_frames,
+        )
+        if target_precision_frame else None
+    )
+
+    has_pos_frame = np.any(y_frame_true == 1)
+    has_neg_frame = np.any(y_frame_true == 0)
 
     roc_auc = None
     pr_auc = None
     ap = None
 
-    if has_pos and has_neg:
-        fpr, tpr, _ = roc_curve_points(y_true, vote_scores)
+    if len(frame_scores_flat) > 0 and has_pos_frame and has_neg_frame:
+        fpr, tpr, _ = roc_curve_points(y_frame_true, frame_scores_flat)
         roc_auc = safe_auc(fpr, tpr)
 
-    if has_pos:
-        recall, precision, _ = pr_curve_points(y_true, vote_scores)
+    if len(frame_scores_flat) > 0 and has_pos_frame:
+        recall, precision, _ = pr_curve_points(y_frame_true, frame_scores_flat)
         pr_auc = safe_auc(recall, precision)
-        ap = average_precision_score_manual(y_true, vote_scores)
+        ap = average_precision_score_manual(y_frame_true, frame_scores_flat)
 
-    all_frame_scores = []
-    for ev in events:
-        all_frame_scores.extend(ev.get("frame_scores", []))
-
+    vote_scores = np.array([ev["vote_score"] for ev in events], dtype=float)
     num_frames_set = sorted(set(int(ev.get("num_frames", 0)) for ev in events))
 
     return {
         "num_events": int(len(events)),
         "num_places": int(len(set(ev["place"] for ev in events))),
-        "num_normal": int(np.sum(y_true == 0)),
-        "num_abnormal": int(np.sum(y_true == 1)),
+        "num_normal_events": int(np.sum(y_true_event == 0)),
+        "num_abnormal_events": int(np.sum(y_true_event == 1)),
+        "num_frame_samples": int(len(frame_scores_flat)),
+        "num_normal_frame_samples": int(np.sum(y_frame_true == 0)) if len(y_frame_true) else 0,
+        "num_abnormal_frame_samples": int(np.sum(y_frame_true == 1)) if len(y_frame_true) else 0,
 
+        "curve_level": "frame_level",
+        "threshold_selection_level": "frame_level",
+        "final_metric_level": "event_level_after_vote",
         "threshold_type": "frame_score_threshold",
-        "decision_rule": "frame_scores -> threshold -> frame_flags -> vote -> event_pred",
-        "metric_level": "event_level",
+        "decision_rule": "frame_scores -> frame_threshold -> frame_flags -> vote -> event_pred",
         "vote_rule": vote_rule,
         "vote_ratio": float(vote_ratio),
         "min_positive_frames": int(min_positive_frames),
+        "target_precision": float(target_precision),
         "num_frames_per_event_set": num_frames_set,
 
-        "current_operating_point": current,
-        "best_f1_operating_point": best,
-        "recall90_operating_point": recall90,
-        "precision80_operating_point": precision80,
-        "precision95_operating_point": precision95,
-        "fp2_operating_point": fp2,
+        # event-level current result from offline_eval_results.json pred
+        "current_event_operating_point": current_event,
 
-        "roc_auc": roc_auc,
-        "pr_auc_trapezoid": pr_auc,
-        "average_precision": ap,
+        # threshold selected by frame-level F1
+        "best_frame_f1_operating_point": best_frame_f1,
+        "best_frame_f1_event_operating_point": best_event_from_frame_f1,
 
-        "frame_score_mean": float(np.mean(all_frame_scores)) if all_frame_scores else math.nan,
-        "frame_score_std": float(np.std(all_frame_scores)) if all_frame_scores else math.nan,
-        "frame_score_min": float(np.min(all_frame_scores)) if all_frame_scores else math.nan,
-        "frame_score_max": float(np.max(all_frame_scores)) if all_frame_scores else math.nan,
+        # threshold selected by frame-level target precision
+        "target_precision_frame_operating_point": target_precision_frame,
+        "target_precision_event_operating_point": target_precision_event,
+
+        # frame-level curves
+        "frame_level_roc_auc": roc_auc,
+        "frame_level_pr_auc_trapezoid": pr_auc,
+        "frame_level_average_precision": ap,
+
+        # score distributions
+        "frame_score_mean": float(np.mean(frame_scores_flat)) if len(frame_scores_flat) else math.nan,
+        "frame_score_std": float(np.std(frame_scores_flat)) if len(frame_scores_flat) else math.nan,
+        "frame_score_min": float(np.min(frame_scores_flat)) if len(frame_scores_flat) else math.nan,
+        "frame_score_max": float(np.max(frame_scores_flat)) if len(frame_scores_flat) else math.nan,
 
         "vote_score_mean": float(np.mean(vote_scores)) if len(vote_scores) else math.nan,
         "vote_score_std": float(np.std(vote_scores)) if len(vote_scores) else math.nan,
@@ -797,14 +879,14 @@ def build_overall_summary(
 
 def plot_roc(
     y_true: np.ndarray,
-    vote_scores: np.ndarray,
+    scores: np.ndarray,
     out_path: Path,
 ):
-    if not (np.any(y_true == 1) and np.any(y_true == 0)):
+    if len(scores) == 0 or not (np.any(y_true == 1) and np.any(y_true == 0)):
         print("[WARN] ROC curve skipped: positive/negative class가 모두 있어야 함")
         return
 
-    fpr, tpr, _ = roc_curve_points(y_true, vote_scores)
+    fpr, tpr, _ = roc_curve_points(y_true, scores)
     auc = safe_auc(fpr, tpr)
 
     fpr = np.asarray(fpr, dtype=float)
@@ -819,15 +901,13 @@ def plot_roc(
     tpr = np.array([p[1] for p in points], dtype=float)
 
     plt.figure(figsize=(6, 6))
-
     plt.step(
         fpr,
         tpr,
         where="post",
         linewidth=2.5,
-        label=f"ROC-AUC = {auc:.3f}" if auc is not None else "ROC curve",
+        label=f"Frame-level ROC-AUC = {auc:.3f}" if auc is not None else "Frame-level ROC",
     )
-
     plt.plot(
         [0, 1],
         [0, 1],
@@ -836,12 +916,11 @@ def plot_roc(
         alpha=0.8,
         label="Random classifier",
     )
-
     plt.xlim(0.0, 1.0)
     plt.ylim(0.0, 1.0)
     plt.xlabel("False Positive Rate", fontsize=12)
     plt.ylabel("True Positive Rate", fontsize=12)
-    plt.title("ROC Curve", fontsize=14)
+    plt.title("Frame-level ROC Curve", fontsize=14)
     plt.legend(fontsize=10, loc="lower right")
     plt.grid(True, alpha=0.25)
     plt.tight_layout()
@@ -851,16 +930,16 @@ def plot_roc(
 
 def plot_pr(
     y_true: np.ndarray,
-    vote_scores: np.ndarray,
+    scores: np.ndarray,
     out_path: Path,
 ):
-    if not np.any(y_true == 1):
+    if len(scores) == 0 or not np.any(y_true == 1):
         print("[WARN] PR curve skipped: positive class가 없음")
         return
 
-    recall, precision, _ = pr_curve_points(y_true, vote_scores)
+    recall, precision, _ = pr_curve_points(y_true, scores)
     pr_auc = safe_auc(recall, precision)
-    ap = average_precision_score_manual(y_true, vote_scores)
+    ap = average_precision_score_manual(y_true, scores)
 
     recall = np.asarray(recall, dtype=float)
     precision = np.asarray(precision, dtype=float)
@@ -881,14 +960,13 @@ def plot_pr(
         recall = np.insert(recall, 0, 0.0)
         precision = np.insert(precision, 0, 1.0)
 
-    label = "PR curve"
+    label = "Frame-level PR curve"
     if ap is not None:
         label += f" / AP = {ap:.3f}"
     if pr_auc is not None:
         label += f" / AUC = {pr_auc:.3f}"
 
     plt.figure(figsize=(6, 6))
-
     plt.step(
         recall,
         precision,
@@ -896,12 +974,11 @@ def plot_pr(
         linewidth=2.5,
         label=label,
     )
-
     plt.xlim(0.0, 1.0)
     plt.ylim(0.0, 1.02)
     plt.xlabel("Recall", fontsize=12)
     plt.ylabel("Precision", fontsize=12)
-    plt.title("Precision-Recall Curve", fontsize=14)
+    plt.title("Frame-level Precision-Recall Curve", fontsize=14)
     plt.legend(fontsize=10, loc="lower left")
     plt.grid(True, alpha=0.25)
     plt.tight_layout()
@@ -909,57 +986,57 @@ def plot_pr(
     plt.close()
 
 
-def plot_place_f1(place_stats: List[Dict], out_path: Path):
+def plot_place_current_f1(place_stats: List[Dict], out_path: Path):
     if len(place_stats) == 0:
         return
 
     places = [r["place"] for r in place_stats]
-    f1s = [r["f1"] for r in place_stats]
+    f1s = [r["current_f1"] for r in place_stats]
 
     plt.figure(figsize=(max(7, len(places) * 0.8), 4))
     plt.bar(places, f1s)
     plt.ylim(0.0, 1.0)
     plt.xlabel("Place")
-    plt.ylabel("F1")
-    plt.title("F1 by Place - Current Operating Point")
+    plt.ylabel("Event-level F1")
+    plt.title("Event-level F1 by Place - Current Operating Point")
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path, dpi=160)
     plt.close()
 
 
-def plot_place_best_f1(place_stats: List[Dict], out_path: Path):
+def plot_place_best_event_f1(place_stats: List[Dict], out_path: Path):
     if len(place_stats) == 0:
         return
 
     places = [r["place"] for r in place_stats]
-    f1s = [r["best_f1"] for r in place_stats]
+    f1s = [r["best_frame_f1_event_f1"] for r in place_stats]
 
     plt.figure(figsize=(max(7, len(places) * 0.8), 4))
     plt.bar(places, f1s)
     plt.ylim(0.0, 1.0)
     plt.xlabel("Place")
-    plt.ylabel("Best F1")
-    plt.title("Best F1 by Place - Frame Threshold Sweep + Vote")
+    plt.ylabel("Event-level F1")
+    plt.title("Event-level F1 by Place - Best Frame-F1 Threshold Applied")
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path, dpi=160)
     plt.close()
 
 
-def plot_place_precision95_f1(place_stats: List[Dict], out_path: Path):
+def plot_place_target_precision_event_f1(place_stats: List[Dict], out_path: Path):
     if len(place_stats) == 0:
         return
 
     places = [r["place"] for r in place_stats]
-    f1s = [r["precision95_f1"] for r in place_stats]
+    f1s = [r["target_precision_event_f1"] for r in place_stats]
 
     plt.figure(figsize=(max(7, len(places) * 0.8), 4))
     plt.bar(places, f1s)
     plt.ylim(0.0, 1.0)
     plt.xlabel("Place")
-    plt.ylabel("F1")
-    plt.title("F1 by Place - Precision >= 0.95 Operating Point")
+    plt.ylabel("Event-level F1")
+    plt.title("Event-level F1 by Place - Target Precision Frame Threshold Applied")
     plt.grid(axis="y", alpha=0.3)
     plt.tight_layout()
     plt.savefig(out_path, dpi=160)
@@ -1018,16 +1095,8 @@ def plot_frame_score_hist_by_label(events: List[Dict], out_path: Path):
 
 
 def plot_vote_score_hist_by_label(events: List[Dict], out_path: Path):
-    normal_scores = [
-        float(ev["vote_score"])
-        for ev in events
-        if int(ev["label"]) == 0
-    ]
-    abnormal_scores = [
-        float(ev["vote_score"])
-        for ev in events
-        if int(ev["label"]) == 1
-    ]
+    normal_scores = [float(ev["vote_score"]) for ev in events if int(ev["label"]) == 0]
+    abnormal_scores = [float(ev["vote_score"]) for ev in events if int(ev["label"]) == 1]
 
     plt.figure(figsize=(7, 5))
 
@@ -1056,35 +1125,51 @@ def plot_per_place_roc_pr(events: List[Dict], report_root: Path):
         by_place.setdefault(ev["place"], []).append(ev)
 
     for plc, items in sorted(by_place.items()):
-        y_true = np.array([ev["label"] for ev in items], dtype=int)
-        vote_scores = np.array([ev["vote_score"] for ev in items], dtype=float)
+        y_frame_true, frame_scores_flat = flatten_frame_samples(items)
 
-        if np.any(y_true == 1) and np.any(y_true == 0):
-            plot_roc(y_true, vote_scores, curve_dir / f"{plc}_roc.png")
-        else:
-            print(f"[WARN] place={plc} ROC skipped: one-class labels")
+        if len(frame_scores_flat) == 0:
+            print(f"[WARN] place={plc} curves skipped: no frame scores")
+            continue
 
-        if np.any(y_true == 1):
-            plot_pr(y_true, vote_scores, curve_dir / f"{plc}_pr.png")
+        if np.any(y_frame_true == 1) and np.any(y_frame_true == 0):
+            plot_roc(y_frame_true, frame_scores_flat, curve_dir / f"{plc}_frame_roc.png")
         else:
-            print(f"[WARN] place={plc} PR skipped: no positive labels")
+            print(f"[WARN] place={plc} ROC skipped: one-class frame labels")
+
+        if np.any(y_frame_true == 1):
+            plot_pr(y_frame_true, frame_scores_flat, curve_dir / f"{plc}_frame_pr.png")
+        else:
+            print(f"[WARN] place={plc} PR skipped: no positive frame labels")
 
 
 # =========================================================
 # Report
 # =========================================================
 
+def _metric_line(prefix: str, m: Optional[Dict]) -> List[str]:
+    if not m:
+        return [f"- {prefix}: NA"]
+
+    return [
+        f"- {prefix} threshold: {float(m['threshold']):.6f}",
+        f"- {prefix} TP / TN / FP / FN: {int(m['tp'])} / {int(m['tn'])} / {int(m['fp'])} / {int(m['fn'])}",
+        f"- {prefix} Accuracy: {float(m['accuracy']):.4f}",
+        f"- {prefix} Precision: {float(m['precision']):.4f}",
+        f"- {prefix} Recall: {float(m['recall']):.4f}",
+        f"- {prefix} F1: {float(m['f1']):.4f}",
+    ]
+
+
 def make_markdown_report(summary: Dict, place_stats: List[Dict], out_path: Path):
     if not summary:
         out_path.write_text("# Offline Evaluation Report\n\nNo events found.\n", encoding="utf-8")
         return
 
-    cur = summary["current_operating_point"]
-    best = summary.get("best_f1_operating_point") or {}
-    recall90 = summary.get("recall90_operating_point") or {}
-    precision80 = summary.get("precision80_operating_point") or {}
-    precision95 = summary.get("precision95_operating_point") or {}
-    fp2 = summary.get("fp2_operating_point") or {}
+    cur = summary["current_event_operating_point"]
+    best_frame = summary.get("best_frame_f1_operating_point") or {}
+    best_event = summary.get("best_frame_f1_event_operating_point") or {}
+    target_frame = summary.get("target_precision_frame_operating_point") or {}
+    target_event = summary.get("target_precision_event_operating_point") or {}
 
     lines = []
 
@@ -1092,22 +1177,28 @@ def make_markdown_report(summary: Dict, place_stats: List[Dict], out_path: Path)
     lines.append("")
     lines.append("## Evaluation Definition")
     lines.append("")
-    lines.append("- Threshold type: frame-score threshold")
-    lines.append("- Prediction rule: frame_scores → threshold → frame_flags → vote → event_pred")
-    lines.append("- Metric level: event-level label vs event-level prediction")
+    lines.append("- ROC/PR curve level: frame-level")
+    lines.append("- Best threshold selection level: frame-level")
+    lines.append("- Final metric level: event-level after vote")
+    lines.append("- Frame label rule: each frame inherits its event label")
+    lines.append("- Decision rule: frame_scores → frame_threshold → frame_flags → vote → event_pred")
     lines.append(f"- Vote rule: {summary['vote_rule']}")
     lines.append(f"- Vote ratio: {summary['vote_ratio']}")
     lines.append(f"- Min positive frames: {summary['min_positive_frames']}")
+    lines.append(f"- Target precision for false-positive control: {summary['target_precision']}")
     lines.append(f"- Num frames per event set: {summary['num_frames_per_event_set']}")
     lines.append("")
-    lines.append("## Overall")
+    lines.append("## Dataset")
     lines.append("")
     lines.append(f"- Events: {summary['num_events']}")
     lines.append(f"- Places: {summary['num_places']}")
-    lines.append(f"- Normal events: {summary['num_normal']}")
-    lines.append(f"- Abnormal events: {summary['num_abnormal']}")
+    lines.append(f"- Normal events: {summary['num_normal_events']}")
+    lines.append(f"- Abnormal events: {summary['num_abnormal_events']}")
+    lines.append(f"- Frame samples: {summary['num_frame_samples']}")
+    lines.append(f"- Normal frame samples: {summary['num_normal_frame_samples']}")
+    lines.append(f"- Abnormal frame samples: {summary['num_abnormal_frame_samples']}")
     lines.append("")
-    lines.append("### Current Operating Point")
+    lines.append("## Event-level Current Operating Point")
     lines.append("")
     lines.append(f"- TP / TN / FP / FN: {cur['tp']} / {cur['tn']} / {cur['fp']} / {cur['fn']}")
     lines.append(f"- Accuracy: {cur['accuracy']:.4f}")
@@ -1116,106 +1207,65 @@ def make_markdown_report(summary: Dict, place_stats: List[Dict], out_path: Path)
     lines.append(f"- Specificity: {cur['specificity']:.4f}")
     lines.append(f"- F1: {cur['f1']:.4f}")
     lines.append("")
-    lines.append("### Best-F1 Frame Threshold")
+
+    lines.append("## Best Threshold by Frame-level F1")
+    lines.append("")
+    lines.extend(_metric_line("Frame-level best-F1", best_frame))
+    lines.append("")
+    lines.extend(_metric_line("Event-level after vote using best-F1 frame threshold", best_event))
     lines.append("")
 
-    if best:
-        lines.append(f"- Best threshold: {float(best['threshold']):.6f}")
-        lines.append(f"- TP / TN / FP / FN: {best['tp']} / {best['tn']} / {best['fp']} / {best['fn']}")
-        lines.append(f"- Accuracy: {float(best['accuracy']):.4f}")
-        lines.append(f"- Precision: {float(best['precision']):.4f}")
-        lines.append(f"- Recall: {float(best['recall']):.4f}")
-        lines.append(f"- F1: {float(best['f1']):.4f}")
-
+    lines.append("## False-positive-control Threshold")
     lines.append("")
-    lines.append("### Optional Operating Points")
+    lines.extend(_metric_line(f"Frame-level precision≥{summary['target_precision']:.2f}", target_frame))
+    lines.append("")
+    lines.extend(_metric_line(f"Event-level after vote using precision≥{summary['target_precision']:.2f} frame threshold", target_event))
     lines.append("")
 
-    if recall90:
-        lines.append(
-            f"- Recall≥0.90 threshold: {float(recall90['threshold']):.6f}, "
-            f"P={float(recall90['precision']):.4f}, "
-            f"R={float(recall90['recall']):.4f}, "
-            f"F1={float(recall90['f1']):.4f}, "
-            f"FP={int(recall90['fp'])}, "
-            f"FN={int(recall90['fn'])}"
-        )
-    else:
-        lines.append("- Recall≥0.90 threshold: NA")
-
-    if precision80:
-        lines.append(
-            f"- Precision≥0.80 threshold: {float(precision80['threshold']):.6f}, "
-            f"P={float(precision80['precision']):.4f}, "
-            f"R={float(precision80['recall']):.4f}, "
-            f"F1={float(precision80['f1']):.4f}, "
-            f"FP={int(precision80['fp'])}, "
-            f"FN={int(precision80['fn'])}"
-        )
-    else:
-        lines.append("- Precision≥0.80 threshold: NA")
-
-    if precision95:
-        lines.append(
-            f"- Precision≥0.95 threshold: {float(precision95['threshold']):.6f}, "
-            f"P={float(precision95['precision']):.4f}, "
-            f"R={float(precision95['recall']):.4f}, "
-            f"F1={float(precision95['f1']):.4f}, "
-            f"FP={int(precision95['fp'])}, "
-            f"FN={int(precision95['fn'])}"
-        )
-    else:
-        lines.append("- Precision≥0.95 threshold: NA")
-
-    if fp2:
-        lines.append(
-            f"- FP≤2 threshold: {float(fp2['threshold']):.6f}, "
-            f"P={float(fp2['precision']):.4f}, "
-            f"R={float(fp2['recall']):.4f}, "
-            f"F1={float(fp2['f1']):.4f}, "
-            f"FP={int(fp2['fp'])}, "
-            f"FN={int(fp2['fn'])}"
-        )
-    else:
-        lines.append("- FP≤2 threshold: NA")
-
+    lines.append("## Frame-level Curves")
     lines.append("")
-    lines.append("### Curves")
+    lines.append(f"- Frame-level ROC-AUC: {summary['frame_level_roc_auc'] if summary['frame_level_roc_auc'] is not None else 'NA'}")
+    lines.append(f"- Frame-level PR-AUC trapezoid: {summary['frame_level_pr_auc_trapezoid'] if summary['frame_level_pr_auc_trapezoid'] is not None else 'NA'}")
+    lines.append(f"- Frame-level Average Precision: {summary['frame_level_average_precision'] if summary['frame_level_average_precision'] is not None else 'NA'}")
     lines.append("")
-    lines.append(f"- ROC-AUC: {summary['roc_auc'] if summary['roc_auc'] is not None else 'NA'}")
-    lines.append(f"- PR-AUC trapezoid: {summary['pr_auc_trapezoid'] if summary['pr_auc_trapezoid'] is not None else 'NA'}")
-    lines.append(f"- Average Precision: {summary['average_precision'] if summary['average_precision'] is not None else 'NA'}")
-    lines.append("")
+
     lines.append("## Per-place Statistics")
     lines.append("")
     lines.append(
-        "| Place | N | Normal | Abnormal | TP | TN | FP | FN | "
-        "Precision | Recall | F1 | Best F1 | Best Thr | "
-        "Recall90 Thr | Precision80 Thr | Precision95 Thr | FP≤2 Thr |"
+        "| Place | N | Normal | Abnormal | Current F1 | "
+        "Best Frame Thr | Best Event TP/TN/FP/FN | Best Event F1 | "
+        "TargetP Frame Thr | TargetP Event TP/TN/FP/FN | TargetP Event F1 |"
     )
     lines.append(
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+        "|---|---:|---:|---:|---:|---:|---|---:|---:|---|---:|"
     )
 
     for r in place_stats:
+        best_counts = (
+            f"{r['best_frame_f1_event_tp']}/"
+            f"{r['best_frame_f1_event_tn']}/"
+            f"{r['best_frame_f1_event_fp']}/"
+            f"{r['best_frame_f1_event_fn']}"
+        )
+        target_counts = (
+            f"{r['target_precision_event_tp']}/"
+            f"{r['target_precision_event_tn']}/"
+            f"{r['target_precision_event_fp']}/"
+            f"{r['target_precision_event_fn']}"
+        )
+
         lines.append(
             f"| {r['place']} "
             f"| {r['n']} "
             f"| {r['n_normal']} "
             f"| {r['n_abnormal']} "
-            f"| {r['tp']} "
-            f"| {r['tn']} "
-            f"| {r['fp']} "
-            f"| {r['fn']} "
-            f"| {r['precision']:.4f} "
-            f"| {r['recall']:.4f} "
-            f"| {r['f1']:.4f} "
-            f"| {r['best_f1']:.4f} "
-            f"| {r['best_f1_threshold']:.6f} "
-            f"| {r['recall90_threshold']:.6f} "
-            f"| {r['precision80_threshold']:.6f} "
-            f"| {r['precision95_threshold']:.6f} "
-            f"| {r['fp2_threshold']:.6f} |"
+            f"| {r['current_f1']:.4f} "
+            f"| {r['best_frame_f1_threshold']:.6f} "
+            f"| {best_counts} "
+            f"| {r['best_frame_f1_event_f1']:.4f} "
+            f"| {r['target_precision_threshold']:.6f} "
+            f"| {target_counts} "
+            f"| {r['target_precision_event_f1']:.4f} |"
         )
 
     out_path.write_text("\n".join(lines), encoding="utf-8")
@@ -1251,6 +1301,12 @@ def main():
         default=1,
         help="vote_rule=min_count일 때 사용하는 최소 positive frame 수",
     )
+    parser.add_argument(
+        "--target_precision",
+        type=float,
+        default=0.95,
+        help="오탐 방지용 frame-level precision lower bound",
+    )
 
     args = parser.parse_args()
 
@@ -1264,6 +1320,7 @@ def main():
     print(f"[INFO] vote_rule={args.vote_rule}")
     print(f"[INFO] vote_ratio={args.vote_ratio}")
     print(f"[INFO] min_positive_frames={args.min_positive_frames}")
+    print(f"[INFO] target_precision={args.target_precision}")
 
     events = collect_events(out_root, places=args.places)
 
@@ -1279,7 +1336,13 @@ def main():
     )
 
     # -----------------------------
-    # Event-level table 저장
+    # Frame-level samples
+    # -----------------------------
+    frame_rows = make_frame_sample_rows(events)
+    write_csv(report_root / "frame_level_samples.csv", frame_rows)
+
+    # -----------------------------
+    # Event-level table
     # -----------------------------
     write_csv(
         report_root / "event_level_results.csv",
@@ -1289,36 +1352,90 @@ def main():
     # -----------------------------
     # Overall / place stats
     # -----------------------------
-    place_stats = build_place_stats(events)
+    place_stats = build_place_stats(
+        events=events,
+        vote_rule=args.vote_rule,
+        vote_ratio=args.vote_ratio,
+        min_positive_frames=args.min_positive_frames,
+        target_precision=args.target_precision,
+    )
 
     summary = build_overall_summary(
         events=events,
         vote_rule=args.vote_rule,
         vote_ratio=args.vote_ratio,
         min_positive_frames=args.min_positive_frames,
+        target_precision=args.target_precision,
     )
 
     write_csv(report_root / "place_stats.csv", place_stats)
     dump_json(report_root / "summary.json", summary)
 
     # -----------------------------
-    # Threshold sweep 저장
+    # Frame-level threshold sweep
     # -----------------------------
-    y_true = np.array([ev["label"] for ev in events], dtype=int)
-    vote_scores = np.array([ev["vote_score"] for ev in events], dtype=float)
-
-    sweep_rows = sweep_vote_scores(y_true, vote_scores)
-    write_csv(report_root / "threshold_sweep_overall.csv", sweep_rows)
+    y_frame_true, frame_scores_flat = flatten_frame_samples(events)
+    frame_sweep_rows = sweep_frame_scores(y_frame_true, frame_scores_flat)
+    write_csv(report_root / "threshold_sweep_frame_level.csv", frame_sweep_rows)
 
     # -----------------------------
-    # Plots
+    # Event-level threshold application tables
     # -----------------------------
-    plot_roc(y_true, vote_scores, report_root / "roc_curve_overall.png")
-    plot_pr(y_true, vote_scores, report_root / "pr_curve_overall.png")
+    selected_rows = []
 
-    plot_place_f1(place_stats, report_root / "place_f1_current.png")
-    plot_place_best_f1(place_stats, report_root / "place_f1_best_threshold.png")
-    plot_place_precision95_f1(place_stats, report_root / "place_f1_precision95.png")
+    best_frame = summary.get("best_frame_f1_operating_point")
+    best_event = summary.get("best_frame_f1_event_operating_point")
+    if best_frame and best_event:
+        selected_rows.append({
+            "name": "best_frame_f1",
+            "threshold": float(best_frame["threshold"]),
+            "selection_level": "frame",
+            "selection_metric": "f1",
+            "frame_precision": float(best_frame["precision"]),
+            "frame_recall": float(best_frame["recall"]),
+            "frame_f1": float(best_frame["f1"]),
+            "event_tp": int(best_event["tp"]),
+            "event_tn": int(best_event["tn"]),
+            "event_fp": int(best_event["fp"]),
+            "event_fn": int(best_event["fn"]),
+            "event_accuracy": float(best_event["accuracy"]),
+            "event_precision": float(best_event["precision"]),
+            "event_recall": float(best_event["recall"]),
+            "event_f1": float(best_event["f1"]),
+        })
+
+    target_frame = summary.get("target_precision_frame_operating_point")
+    target_event = summary.get("target_precision_event_operating_point")
+    if target_frame and target_event:
+        selected_rows.append({
+            "name": f"frame_precision_ge_{args.target_precision:.2f}",
+            "threshold": float(target_frame["threshold"]),
+            "selection_level": "frame",
+            "selection_metric": f"precision>={args.target_precision:.2f}",
+            "frame_precision": float(target_frame["precision"]),
+            "frame_recall": float(target_frame["recall"]),
+            "frame_f1": float(target_frame["f1"]),
+            "event_tp": int(target_event["tp"]),
+            "event_tn": int(target_event["tn"]),
+            "event_fp": int(target_event["fp"]),
+            "event_fn": int(target_event["fn"]),
+            "event_accuracy": float(target_event["accuracy"]),
+            "event_precision": float(target_event["precision"]),
+            "event_recall": float(target_event["recall"]),
+            "event_f1": float(target_event["f1"]),
+        })
+
+    write_csv(report_root / "selected_threshold_event_metrics.csv", selected_rows)
+
+    # -----------------------------
+    # Plots: frame-level ROC/PR
+    # -----------------------------
+    plot_roc(y_frame_true, frame_scores_flat, report_root / "frame_roc_curve_overall.png")
+    plot_pr(y_frame_true, frame_scores_flat, report_root / "frame_pr_curve_overall.png")
+
+    plot_place_current_f1(place_stats, report_root / "place_event_f1_current.png")
+    plot_place_best_event_f1(place_stats, report_root / "place_event_f1_best_frame_threshold.png")
+    plot_place_target_precision_event_f1(place_stats, report_root / "place_event_f1_target_precision_threshold.png")
 
     plot_vote_score_box_by_place(events, report_root / "vote_score_box_by_place.png")
     plot_frame_score_hist_by_label(events, report_root / "frame_score_hist_by_label.png")
@@ -1334,25 +1451,27 @@ def main():
     # -----------------------------
     # Console summary
     # -----------------------------
-    cur = summary["current_operating_point"]
-    best = summary.get("best_f1_operating_point") or {}
-    recall90 = summary.get("recall90_operating_point") or {}
-    precision80 = summary.get("precision80_operating_point") or {}
-    precision95 = summary.get("precision95_operating_point") or {}
-    fp2 = summary.get("fp2_operating_point") or {}
+    cur = summary["current_event_operating_point"]
+    best_frame = summary.get("best_frame_f1_operating_point") or {}
+    best_event = summary.get("best_frame_f1_event_operating_point") or {}
+    target_frame = summary.get("target_precision_frame_operating_point") or {}
+    target_event = summary.get("target_precision_event_operating_point") or {}
 
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("[EVALUATION DEFINITION]")
-    print("=" * 60)
-    print("threshold_type = frame_score_threshold")
-    print("prediction     = frame_scores -> threshold -> vote -> event_pred")
-    print("metric_level   = event_level")
-    print(f"vote_rule      = {summary['vote_rule']}")
-    print(f"num_frames_set = {summary['num_frames_per_event_set']}")
+    print("=" * 70)
+    print("ROC/PR curve level        = frame_level")
+    print("best threshold level      = frame_level")
+    print("final metric level        = event_level_after_vote")
+    print("frame label rule          = frame inherits event label")
+    print("prediction                = frame_scores -> threshold -> vote -> event_pred")
+    print(f"vote_rule                 = {summary['vote_rule']}")
+    print(f"num_frames_set            = {summary['num_frames_per_event_set']}")
+    print(f"target_precision          = {summary['target_precision']}")
 
-    print("\n" + "=" * 60)
-    print("[OVERALL CURRENT]")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("[EVENT-LEVEL CURRENT OPERATING POINT]")
+    print("=" * 70)
     print(f"N={cur['n']}")
     print(f"TP={cur['tp']} TN={cur['tn']} FP={cur['fp']} FN={cur['fn']}")
     print(f"Accuracy ={cur['accuracy']:.4f}")
@@ -1360,92 +1479,72 @@ def main():
     print(f"Recall   ={cur['recall']:.4f}")
     print(f"F1       ={cur['f1']:.4f}")
 
-    print("\n" + "=" * 60)
-    print("[OVERALL BEST FRAME THRESHOLD BY F1]")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print("[BEST THRESHOLD BY FRAME-LEVEL F1]")
+    print("=" * 70)
 
-    if best:
-        print(f"threshold={best['threshold']:.6f}")
-        print(f"TP={best['tp']} TN={best['tn']} FP={best['fp']} FN={best['fn']}")
-        print(f"Accuracy ={best['accuracy']:.4f}")
-        print(f"Precision={best['precision']:.4f}")
-        print(f"Recall   ={best['recall']:.4f}")
-        print(f"F1       ={best['f1']:.4f}")
+    if best_frame:
+        print(f"frame_threshold={best_frame['threshold']:.6f}")
+        print("[Frame-level]")
+        print(f"TP={best_frame['tp']} TN={best_frame['tn']} FP={best_frame['fp']} FN={best_frame['fn']}")
+        print(f"Precision={best_frame['precision']:.4f}")
+        print(f"Recall   ={best_frame['recall']:.4f}")
+        print(f"F1       ={best_frame['f1']:.4f}")
+
+    if best_event:
+        print("[Event-level after vote]")
+        print(f"TP={best_event['tp']} TN={best_event['tn']} FP={best_event['fp']} FN={best_event['fn']}")
+        print(f"Accuracy ={best_event['accuracy']:.4f}")
+        print(f"Precision={best_event['precision']:.4f}")
+        print(f"Recall   ={best_event['recall']:.4f}")
+        print(f"F1       ={best_event['f1']:.4f}")
     else:
         print("NA")
 
-    print("\n" + "=" * 60)
-    print("[OPTIONAL OPERATING POINTS]")
-    print("=" * 60)
+    print("\n" + "=" * 70)
+    print(f"[FALSE-POSITIVE-CONTROL THRESHOLD BY FRAME-LEVEL PRECISION >= {args.target_precision:.2f}]")
+    print("=" * 70)
 
-    if recall90:
-        print(
-            f"Recall>=0.90: threshold={recall90['threshold']:.6f}, "
-            f"P={recall90['precision']:.4f}, "
-            f"R={recall90['recall']:.4f}, "
-            f"F1={recall90['f1']:.4f}, "
-            f"FP={recall90['fp']}, "
-            f"FN={recall90['fn']}"
-        )
+    if target_frame:
+        print(f"frame_threshold={target_frame['threshold']:.6f}")
+        print("[Frame-level]")
+        print(f"TP={target_frame['tp']} TN={target_frame['tn']} FP={target_frame['fp']} FN={target_frame['fn']}")
+        print(f"Precision={target_frame['precision']:.4f}")
+        print(f"Recall   ={target_frame['recall']:.4f}")
+        print(f"F1       ={target_frame['f1']:.4f}")
+
+    if target_event:
+        print("[Event-level after vote]")
+        print(f"TP={target_event['tp']} TN={target_event['tn']} FP={target_event['fp']} FN={target_event['fn']}")
+        print(f"Accuracy ={target_event['accuracy']:.4f}")
+        print(f"Precision={target_event['precision']:.4f}")
+        print(f"Recall   ={target_event['recall']:.4f}")
+        print(f"F1       ={target_event['f1']:.4f}")
     else:
-        print("Recall>=0.90: NA")
+        print("NA")
 
-    if precision80:
-        print(
-            f"Precision>=0.80: threshold={precision80['threshold']:.6f}, "
-            f"P={precision80['precision']:.4f}, "
-            f"R={precision80['recall']:.4f}, "
-            f"F1={precision80['f1']:.4f}, "
-            f"FP={precision80['fp']}, "
-            f"FN={precision80['fn']}"
-        )
-    else:
-        print("Precision>=0.80: NA")
+    print("\n" + "=" * 70)
+    print("[FRAME-LEVEL CURVES]")
+    print("=" * 70)
+    print(f"ROC AUC={summary['frame_level_roc_auc']}")
+    print(f"PR AUC ={summary['frame_level_pr_auc_trapezoid']}")
+    print(f"AP     ={summary['frame_level_average_precision']}")
 
-    if precision95:
-        print(
-            f"Precision>=0.95: threshold={precision95['threshold']:.6f}, "
-            f"P={precision95['precision']:.4f}, "
-            f"R={precision95['recall']:.4f}, "
-            f"F1={precision95['f1']:.4f}, "
-            f"FP={precision95['fp']}, "
-            f"FN={precision95['fn']}"
-        )
-    else:
-        print("Precision>=0.95: NA")
-
-    if fp2:
-        print(
-            f"FP<=2: threshold={fp2['threshold']:.6f}, "
-            f"P={fp2['precision']:.4f}, "
-            f"R={fp2['recall']:.4f}, "
-            f"F1={fp2['f1']:.4f}, "
-            f"FP={fp2['fp']}, "
-            f"FN={fp2['fn']}"
-        )
-    else:
-        print("FP<=2: NA")
-
-    print("\n" + "=" * 60)
-    print("[CURVES]")
-    print("=" * 60)
-    print(f"ROC AUC={summary['roc_auc']}")
-    print(f"PR AUC ={summary['pr_auc_trapezoid']}")
-    print(f"AP     ={summary['average_precision']}")
-
-    print("\n" + "=" * 60)
+    print("\n" + "=" * 70)
     print("[OUTPUT FILES]")
-    print("=" * 60)
+    print("=" * 70)
+    print(f"- {report_root / 'frame_level_samples.csv'}")
     print(f"- {report_root / 'event_level_results.csv'}")
     print(f"- {report_root / 'place_stats.csv'}")
-    print(f"- {report_root / 'threshold_sweep_overall.csv'}")
+    print(f"- {report_root / 'threshold_sweep_frame_level.csv'}")
+    print(f"- {report_root / 'selected_threshold_event_metrics.csv'}")
     print(f"- {report_root / 'summary.json'}")
     print(f"- {report_root / 'report.md'}")
-    print(f"- {report_root / 'roc_curve_overall.png'}")
-    print(f"- {report_root / 'pr_curve_overall.png'}")
-    print(f"- {report_root / 'place_f1_current.png'}")
-    print(f"- {report_root / 'place_f1_best_threshold.png'}")
-    print(f"- {report_root / 'place_f1_precision95.png'}")
+    print(f"- {report_root / 'frame_roc_curve_overall.png'}")
+    print(f"- {report_root / 'frame_pr_curve_overall.png'}")
+    print(f"- {report_root / 'place_event_f1_current.png'}")
+    print(f"- {report_root / 'place_event_f1_best_frame_threshold.png'}")
+    print(f"- {report_root / 'place_event_f1_target_precision_threshold.png'}")
     print(f"- {report_root / 'vote_score_box_by_place.png'}")
     print(f"- {report_root / 'frame_score_hist_by_label.png'}")
     print(f"- {report_root / 'vote_score_hist_by_label.png'}")

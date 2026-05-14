@@ -42,6 +42,48 @@ class SuperGlueMatcher:
         resized = cv2.resize(img, (nw, nh))
         return resized, scale
 
+    @staticmethod
+    def _grid_coverage(pts_xy, img_shape, grid_size=4, min_pts_per_cell=1):
+        """
+        pts_xy: (N, 2), x-y 좌표
+        img_shape: (H, W) 또는 image.shape[:2]
+        return: 0.0 ~ 1.0
+        """
+        if pts_xy is None or len(pts_xy) == 0:
+            return 0.0
+
+        h, w = img_shape[:2]
+        if h <= 0 or w <= 0:
+            return 0.0
+
+        pts = np.asarray(pts_xy, dtype=np.float32)
+
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+
+        valid = (xs >= 0) & (xs < w) & (ys >= 0) & (ys < h)
+        pts = pts[valid]
+
+        if len(pts) == 0:
+            return 0.0
+
+        xs = pts[:, 0]
+        ys = pts[:, 1]
+
+        gx = np.floor(xs / max(w, 1) * grid_size).astype(np.int32)
+        gy = np.floor(ys / max(h, 1) * grid_size).astype(np.int32)
+
+        gx = np.clip(gx, 0, grid_size - 1)
+        gy = np.clip(gy, 0, grid_size - 1)
+
+        counts = np.zeros((grid_size, grid_size), dtype=np.int32)
+
+        for x_cell, y_cell in zip(gx, gy):
+            counts[y_cell, x_cell] += 1
+
+        occupied = counts >= min_pts_per_cell
+        return float(occupied.sum() / float(grid_size * grid_size))
+
     def match_and_estimate(self, query_bgr, bank_bgr):
         q, scale_q = self._resize(query_bgr)
         b, scale_b = self._resize(bank_bgr)
@@ -97,6 +139,22 @@ class SuperGlueMatcher:
         pts_q_orig = pts_q[inlier_mask] / scale_q
         pts_b_orig = pts_b[inlier_mask] / scale_b
 
+        query_grid_coverage = self._grid_coverage(
+            pts_q_orig,
+            query_bgr.shape[:2],
+            grid_size=4,
+            min_pts_per_cell=1,
+        )
+
+        bank_grid_coverage = self._grid_coverage(
+            pts_b_orig,
+            bank_bgr.shape[:2],
+            grid_size=4,
+            min_pts_per_cell=1,
+        )
+
+        inlier_grid_coverage = min(query_grid_coverage, bank_grid_coverage)
+
         pts_q_orig_h = pts_q_orig.reshape(-1, 1, 2).astype(np.float32)
         pts_b_orig_h = pts_b_orig.reshape(-1, 1, 2).astype(np.float32)
 
@@ -117,4 +175,9 @@ class SuperGlueMatcher:
             "reproj_error_mean": mean_error,
             "reproj_error_median": median_error,
             "num_matches": int(valid.sum()),
+
+            # 전체 정합 품질 판단용
+            "query_inlier_grid_coverage": float(query_grid_coverage),
+            "bank_inlier_grid_coverage": float(bank_grid_coverage),
+            "inlier_grid_coverage": float(inlier_grid_coverage),
         }

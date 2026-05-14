@@ -59,7 +59,8 @@
     "global_patch_with_aligned": {
       "preselect": {
         "mode": "vpr",
-        "top_m": 5
+        "top_m": 5,
+        "retry_top_m": 10
       },
       "cc": {
         "radius": 1,
@@ -82,7 +83,7 @@
       },
       "calibration": {
         "threshold_param": 97,
-        "threshold_floor": 0.39,
+        "threshold_floor": 0.42,
         "max_calib_images": 100,
         "min_th_calib_images": 30
       }
