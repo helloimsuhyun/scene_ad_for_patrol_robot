@@ -1,6 +1,6 @@
 """
 cd sentrynexcontrol
-python -m vision_server.Offline_eval --places 00 01 02 03 04 05
+python -m vision_server.Offline_eval --places P001 P002 P003
 """
 
 import argparse
@@ -9,6 +9,9 @@ import random
 from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from PIL import Image
+import numpy as np
 
 import cv2
 import matplotlib.pyplot as plt
@@ -44,8 +47,13 @@ def list_images(folder: Path) -> List[Path]:
 
 
 def safe_read_bgr(path: Path) -> Optional[np.ndarray]:
-    img = cv2.imread(str(path), cv2.IMREAD_COLOR)
-    return img
+    try:
+        rgb = np.array(Image.open(path).convert("RGB"), dtype=np.uint8)
+        bgr = rgb[:, :, ::-1].copy()
+        return bgr
+    except Exception as e:
+        print(f"[WARN] failed to read image: {path}, exc={e}", flush=True)
+        return None
 
 
 def ensure_dir(path: Path):
