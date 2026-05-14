@@ -134,6 +134,7 @@ def rebuild_bank(save_root, plc_idx, model, device, mode="bank", cfg=None, vpr_m
                 raise ValueError("vpr_model required")
 
             emb = vpr_model.encode_image(img_np)
+
             global_list.append(emb.detach().cpu().numpy().astype(np.float32))
 
             x = tfm(img)

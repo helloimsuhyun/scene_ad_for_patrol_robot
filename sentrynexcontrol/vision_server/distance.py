@@ -196,8 +196,9 @@ def _run_gpa_frame(
     proposal_cfg = cfgb["proposal"]
     ver_cfg = cfgb["verifier"]
 
-
     preselect_m = int(gp_cfg.get("top_m", 5))
+    retry_top_m = int(gp_cfg.get("retry_top_m", preselect_m))
+    retry_top_m = max(preselect_m, retry_top_m)
 
     cc_radius = int(cc_cfg.get("radius", 1))
     cc_top_p = float(cc_cfg.get("top_p", 0.05))
@@ -217,8 +218,9 @@ def _run_gpa_frame(
 
     tensor_device = torch.device(device)
 
-
-    # 1. preselect 모드에 맞추어 emb를 추출
+    # ------------------------------------------------------------
+    # 1. preselect 모드에 맞추어 query embedding 추출
+    # ------------------------------------------------------------
     preselect_mode = gp_cfg.get("mode", "dino")
 
     if preselect_mode == "dino":
@@ -236,8 +238,11 @@ def _run_gpa_frame(
     else:
         raise ValueError(f"unknown preselect mode: {preselect_mode}")
 
-    # 2. preselct emb로 상위 유사도 preselect_m개의 inx를 return
-    cand_ref_idx, ref_paths  = run_preselect(
+    # ------------------------------------------------------------
+    # 2. VPR/DINO preselect로 1차 후보 ref index 추출
+    #    기본 top_m만 평가하고, strict 후보가 없을 때만 retry_top_m까지 확장
+    # ------------------------------------------------------------
+    cand_ref_idx, ref_paths = run_preselect(
         q_preselect_emb=q_preselect_emb,
         ref_bank=ref_bank,
         mode=preselect_mode,
@@ -247,36 +252,163 @@ def _run_gpa_frame(
     cand_scores = []
     cand_infos = []
 
-    # 3. preselect된 ref들에 대해서 cc점수화 (각 이미지에서 max cc의 점수를 기준으로 정상 이미지중 max cc가 제일 낮은 이미지를 best ref로 ) ----------------
-    for ref_i in cand_ref_idx:
-        r_path = ref_paths[ref_i]
-        r_bgr = cv2.imread(str(r_path), cv2.IMREAD_COLOR)
-        if r_bgr is None:
-            continue
-
-        score, debug = score_one_pair(
-            q_bgr=q_bgr,
-            r_bgr=r_bgr,
-            sg=sg_matcher,
-            backbone=cc_backbone,
-            device=device,
-            radius=cc_radius,
-            top_p=cc_top_p,
-            alpha=cc_alpha,
-            min_cut=cc_min_cut,
-            singleton_weight=cc_singleton_weight,
-            component_min_area=cc_component_min_area,
+    def is_strict_candidate(c):
+        aq = c.get("align_q", {})
+        return (
+            aq.get("valid_patch_ratio", 0.0) >= 0.70
+            and aq.get("num_inliers", 0) >= 40
+            and aq.get("median_reproj_error", 999.0) <= 3.0
+            and aq.get("inlier_grid_coverage", 0.0) >= 0.35
         )
-        if score is None:
-            continue
 
-        cand_scores.append(float(score))
-        cand_infos.append({
-            "ref_i": int(ref_i),
-            "r_path": r_path,
-            "score": float(score),
-            "debug": debug,
-        })
+    def align_quality_key(c):
+        aq = c.get("align_q", {})
+        return (
+            aq.get("median_reproj_error", 999.0),
+            -aq.get("inlier_grid_coverage", 0.0),
+            -aq.get("valid_patch_ratio", 0.0),
+            -aq.get("num_inliers", 0),
+            -aq.get("inlier_ratio", 0.0),
+            int(c.get("pre_rank", 999)),
+        )
+
+    def eval_candidates(ref_indices, rank_map):
+        """
+        ref_indices: 이번에 새로 평가할 ref index list
+        rank_map: 전체 VPR 순위 저장용 dict {ref_i: pre_rank}
+        """
+        local_scores = []
+        local_infos = []
+
+        for ref_i in ref_indices:
+            r_path = ref_paths[ref_i]
+            r_bgr = cv2.imread(str(r_path), cv2.IMREAD_COLOR)
+            if r_bgr is None:
+                continue
+
+            score, debug = score_one_pair(
+                q_bgr=q_bgr,
+                r_bgr=r_bgr,
+                sg=sg_matcher,
+                backbone=cc_backbone,
+                device=device,
+                radius=cc_radius,
+                top_p=cc_top_p,
+                alpha=cc_alpha,
+                min_cut=cc_min_cut,
+                singleton_weight=cc_singleton_weight,
+                component_min_area=cc_component_min_area,
+            )
+
+            if score is None:
+                continue
+
+            align_q = {
+                "num_matches": int(debug.get("num_matches", 0)),
+                "num_inliers": int(debug.get("num_inliers", debug.get("inliers", 0))),
+                "inlier_ratio": float(debug.get("inlier_ratio", 0.0)),
+                "median_reproj_error": float(debug.get("median_reproj_error", 999.0)),
+                "mean_reproj_error": float(debug.get("mean_reproj_error", 999.0)),
+                "valid_patch_ratio": float(debug.get("valid_patch_ratio", 0.0)),
+
+                "inlier_grid_coverage": float(debug.get("inlier_grid_coverage", 0.0)),
+                "query_inlier_grid_coverage": float(debug.get("query_inlier_grid_coverage", 0.0)),
+                "bank_inlier_grid_coverage": float(debug.get("bank_inlier_grid_coverage", 0.0)),
+            }
+
+            local_scores.append(float(score))
+            local_infos.append({
+                "ref_i": int(ref_i),
+                "r_path": r_path,
+                "score": float(score),          # CC score
+                "debug": debug,
+                "align_q": align_q,             # Homography 정합 품질
+                "pre_rank": int(rank_map.get(int(ref_i), 999)),
+            })
+
+        return local_scores, local_infos
+
+    # ------------------------------------------------------------
+    # 3. 1차 top_m 후보 평가
+    # ------------------------------------------------------------
+    primary_rank_map = {
+        int(ref_i): int(rank)
+        for rank, ref_i in enumerate(cand_ref_idx)
+    }
+
+    scores_1st, infos_1st = eval_candidates(
+        ref_indices=cand_ref_idx,
+        rank_map=primary_rank_map,
+    )
+
+    cand_scores.extend(scores_1st)
+    cand_infos.extend(infos_1st)
+
+    strict_candidates = [
+        c for c in cand_infos
+        if is_strict_candidate(c)
+    ]
+    expanded_retry = False
+
+    # ------------------------------------------------------------
+    # 4. strict 후보가 없으면 VPR 후보 범위를 retry_top_m까지 확장
+    #    이미 평가한 후보는 다시 평가하지 않음
+    # ------------------------------------------------------------
+    if len(strict_candidates) == 0 and retry_top_m > preselect_m:
+        retry_ref_idx, ref_paths = run_preselect(
+            q_preselect_emb=q_preselect_emb,
+            ref_bank=ref_bank,
+            mode=preselect_mode,
+            top_m=retry_top_m,
+        )
+
+        retry_rank_map = {
+            int(ref_i): int(rank)
+            for rank, ref_i in enumerate(retry_ref_idx)
+        }
+
+        already_eval = set(int(c["ref_i"]) for c in cand_infos)
+        extra_ref_idx = [
+            int(ref_i)
+            for ref_i in retry_ref_idx
+            if int(ref_i) not in already_eval
+        ]
+
+        if len(extra_ref_idx) > 0:
+            print(
+                f"[ALIGN RETRY] no strict candidate in top_m={preselect_m} | "
+                f"expand to retry_top_m={retry_top_m} | "
+                f"extra={len(extra_ref_idx)}",
+                flush=True,
+            )
+
+            scores_extra, infos_extra = eval_candidates(
+                ref_indices=extra_ref_idx,
+                rank_map=retry_rank_map,
+            )
+
+            cand_scores.extend(scores_extra)
+            cand_infos.extend(infos_extra)
+            expanded_retry = True
+
+        cand_ref_idx = retry_ref_idx
+
+        strict_candidates = [
+            c for c in cand_infos
+            if is_strict_candidate(c)
+        ]
+        
+        if expanded_retry and len(strict_candidates) > 0:
+            print(
+                f"[ALIGN RETRY OK] strict candidate found after retry | "
+                f"initial_top_m={preselect_m} | "
+                f"retry_top_m={retry_top_m} | "
+                f"n_strict={len(strict_candidates)}",
+                flush=True,
+            )
+        
+
+
 
     if len(cand_scores) == 0:
         return {
@@ -285,20 +417,113 @@ def _run_gpa_frame(
             "ref_paths": ref_paths,
         }
 
-    # best ref 선택 ( argmin )
-    best_idx = int(np.argmin(cand_scores))
-    best_score = float(cand_scores[best_idx])
-    best_info = cand_infos[best_idx]
-    best_debug = best_info["debug"]
+    # ------------------------------------------------------------
+    # 5. 최종 reference 선택
+    #    - strict 후보 있으면: strict 후보 중 CC score 최저 선택
+    #    - strict 후보가 끝까지 없으면: 전체 평가 후보 중 정합 품질 최상 선택
+    # ------------------------------------------------------------
+    if len(strict_candidates) > 0:
+        valid_candidates = strict_candidates
+        select_reason = (
+            "strict_gate_min_cc_after_retry"
+            if expanded_retry else
+            "strict_gate_min_cc"
+        )
+        low_confidence_reference = False
 
+        # strict하게 정합된 후보 안에서는 CC score를 믿고 최소값 선택
+        best_info = min(valid_candidates, key=lambda x: float(x["score"]))
+
+    else:
+        valid_candidates = cand_infos
+        select_reason = (
+            "no_strict_after_retry_best_alignment"
+            if expanded_retry else
+            "no_strict_best_alignment"
+        )
+        low_confidence_reference = True
+
+        # strict가 하나도 없으면 CC를 믿지 않고 정합 품질이 제일 나은 후보 선택
+        best_info = min(valid_candidates, key=align_quality_key)
+
+        print(
+            f"[ALIGN FALLBACK] no strict candidate | "
+            f"reason={select_reason} | "
+            f"initial_top_m={preselect_m} | "
+            f"retry_top_m={retry_top_m} | "
+            f"expanded_retry={expanded_retry} | "
+            f"n_cand={len(cand_infos)} | "
+            f"selected_rank={int(best_info.get('pre_rank', 999))} | "
+            f"selected_ref_i={int(best_info['ref_i'])}",
+            flush=True,
+        )
+
+    # warning 로그
+    if low_confidence_reference:
+        print(
+            f"[ALIGN SELECT WARN] reason={select_reason} | "
+            f"n_cand={len(cand_infos)} | "
+            f"n_valid={len(valid_candidates)} | "
+            f"low_conf={low_confidence_reference}",
+            flush=True,
+        )
+
+        for c in sorted(cand_infos, key=lambda x: int(x.get("pre_rank", 999))):
+            aq = c.get("align_q", {})
+            print(
+                f"  rank={int(c.get('pre_rank', 999))} | "
+                f"ref_i={c['ref_i']} | "
+                f"cc={float(c['score']):.4f} | "
+                f"reproj={float(aq.get('median_reproj_error', 999.0)):.3f} | "
+                f"inliers={int(aq.get('num_inliers', 0))} | "
+                f"inlier_ratio={float(aq.get('inlier_ratio', 0.0)):.3f} | "
+                f"valid_patch={float(aq.get('valid_patch_ratio', 0.0)):.3f} | "
+                f"grid_cov={float(aq.get('inlier_grid_coverage', 0.0)):.3f} | "
+                f"path={c['r_path']}",
+                flush=True,
+            )
+
+    # debug 출력용 shortlist
+    shortlist = sorted(
+        valid_candidates,
+        key=lambda x: (
+            int(x.get("pre_rank", 999)),
+            float(x.get("align_q", {}).get("median_reproj_error", 999.0)),
+            -float(x.get("align_q", {}).get("valid_patch_ratio", 0.0)),
+            -float(x.get("align_q", {}).get("num_inliers", 0)),
+        )
+    )[:min(5, len(valid_candidates))]
+    """
+    print(
+        f"[ALIGN SELECT] reason={select_reason} | "
+        f"low_conf={low_confidence_reference} | "
+        f"expanded_retry={expanded_retry} | "
+        f"best_rank={int(best_info.get('pre_rank', 999))} | "
+        f"best_ref_i={int(best_info['ref_i'])} | "
+        f"cc={float(best_info['score']):.4f} | "
+        f"reproj={float(best_info.get('align_q', {}).get('median_reproj_error', 999.0)):.3f} | "
+        f"inliers={int(best_info.get('align_q', {}).get('num_inliers', 0))} | "
+        f"valid_patch={float(best_info.get('align_q', {}).get('valid_patch_ratio', 0.0)):.3f} | "
+        f"path={best_info['r_path']}",
+        flush=True,
+    )
+    """
+
+    best_score = float(best_info["score"])
+    best_debug = best_info["debug"]
+    # ------------------------------------------------------------
+    # 5. best ref와의 CC 결과에서 상위 component proposal 추출
+    # ------------------------------------------------------------
     all_comps = best_debug.get("all_comp_scores", [])
     topk_comps = sorted(
         all_comps,
         key=lambda x: float(x.get("score", 0.0)),
         reverse=True,
-    )[:proposal_top_k] # best ref와의 cc 결과에서 proposal_top_k개의 cc를 local verification
+    )[:proposal_top_k]
 
-    # cc 영역을 bbox crop으로 변환
+    # ------------------------------------------------------------
+    # 6. CC 영역을 bbox crop으로 변환
+    # ------------------------------------------------------------
     flagged_regions = build_flagged_component_regions(
         flagged_comps=topk_comps,
         q_crop=best_debug["q_crop"],
@@ -310,6 +535,9 @@ def _run_gpa_frame(
         min_crop_size=min_crop_size,
     )
 
+    # ------------------------------------------------------------
+    # 7. proposal bbox에 대해 local verifier 수행
+    # ------------------------------------------------------------
     verifier_results = []
     for reg in flagged_regions:
         out = verify_bbox_with_local_search(
@@ -335,32 +563,66 @@ def _run_gpa_frame(
         [r["verifier_score"] for r in verifier_results],
         reverse=True,
     )
+
     final_score = float(max(verifier_scores_sorted)) if verifier_scores_sorted else 0.0
 
-    # infer_event 호환용 top-k
+    # ------------------------------------------------------------
+    # 8. infer_event 호환용 top-k
+    #    기존처럼 CC score 기준 top-k를 유지
+    # ------------------------------------------------------------
     cand_infos_sorted = sorted(cand_infos, key=lambda x: x["score"])
     topk_infos = cand_infos_sorted[:max(1, min(k, len(cand_infos_sorted)))]
+
     topk_score = torch.tensor(
         [float(x["score"]) for x in topk_infos],
         device=tensor_device,
         dtype=torch.float32,
     )
+
     topk_idx = torch.tensor(
         [int(x["ref_i"]) for x in topk_infos],
         device=tensor_device,
         dtype=torch.long,
     )
+
     best_img_idx = torch.tensor(
         int(best_info["ref_i"]),
         device=tensor_device,
         dtype=torch.long,
     )
 
+    # ------------------------------------------------------------
+    # 9. debug 정보 구성
+    # ------------------------------------------------------------
     debug = {
         "fallback": False,
+
+        # ref 선택 방식 확인용
+        "select_reason": select_reason,
         "cc_score": float(best_score),
+        "best_align_quality": best_info.get("align_q", {}),
+        "alignment_rank_top3": [
+            {
+                "ref_i": int(c["ref_i"]),
+                "r_path": str(c["r_path"]),
+                "cc_score": float(c["score"]),
+                "align_q": c.get("align_q", {}),
+            }
+            for c in shortlist
+        ],
+        "candidate_alignment_summary": [
+            {
+                "ref_i": int(c["ref_i"]),
+                "r_path": str(c["r_path"]),
+                "cc_score": float(c["score"]),
+                "align_q": c.get("align_q", {}),
+            }
+            for c in cand_infos
+        ],
+
         "verifier_scores": verifier_scores_sorted,
         "verifier_results_raw": verifier_results,
+
         "flagged_regions": [
             {
                 "score": float(r["score"]),
@@ -376,7 +638,9 @@ def _run_gpa_frame(
             }
             for r in verifier_results
         ],
+
         "global_topk": (None, None),
+
         "patch_topk": {
             "best_ref_img_path": str(best_info["r_path"]),
             "topk_score": topk_score,
@@ -387,11 +651,14 @@ def _run_gpa_frame(
             "top_patch_vals": torch.empty(0, device=tensor_device, dtype=torch.float32),
             "top_patch_match_idx": torch.empty(0, device=tensor_device, dtype=torch.long),
         },
+
         "align_debug": {
             "crop_bbox": best_debug.get("bbox"),
             "grid_hw": list(best_debug["valid_mask"].shape[:2]) if "valid_mask" in best_debug else None,
             "crop_shape": list(best_debug["q_crop"].shape[:2]) if "q_crop" in best_debug else None,
+            "best_align_quality": best_info.get("align_q", {}),
         },
+
         "best_debug": best_debug,
     }
 
@@ -520,9 +787,10 @@ def compute_knn_dist(
 
         if not out["ok"]:
             debug = {
-                "fallback": False,
+                "fallback": True,
+                "alignment_failed": True,
                 "reason": out.get("reason", "unknown"),
-                "cc_score": 0.0,
+                "cc_score": float("inf"),
                 "verifier_scores": [],
                 "flagged_regions": [],
                 "patch_topk": {
@@ -537,7 +805,7 @@ def compute_knn_dist(
                 },
                 "align_debug": None,
             }
-            return 0.0, debug, out["ref_paths"]
+            return 1e6, debug, out["ref_paths"]
 
         return float(out["score"]), out["debug"], out["ref_paths"]
 
@@ -1027,7 +1295,18 @@ def infer_event(
 
     rep_idx = int(np.argmax(frame_scores)) if len(frame_scores) > 0 else 0
 
-    if anomaly_flag == 1:
+
+    has_alignment_failed = any(
+    bool(d.get("alignment_failed", False))
+    for d in debug_all
+    if isinstance(d, dict)
+)
+
+    if has_alignment_failed:
+        anomaly_flag = 1
+        event_score = 100.0
+        rep, summary = None, "심각한 오류 발생, 관리자 수동 로봇 상태 확인 점검 필요"
+    elif anomaly_flag == 1:
         rep, summary = None, "anomaly detect"
     else:
         rep, summary = None, "it's fine, have relax"

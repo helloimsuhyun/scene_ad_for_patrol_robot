@@ -62,7 +62,8 @@ DEFAULT_CFG = {
         "global_patch_with_aligned": {
             "preselect": {
                 "mode": "vpr",
-                "top_m": 3
+                "top_m": 3,
+                "retry_top_m": 10
             },
             "cc": {
                 "radius": 1,

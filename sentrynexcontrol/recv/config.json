@@ -23,16 +23,16 @@
     },
 
   "superglue": {
-    "resize_long_side": 640,
+    "resize_long_side": 800,
     "weights": "indoor",
-    "max_keypoints": 1024,
-    "keypoint_threshold": 0.003,
-    "match_threshold": 0.2,
+    "max_keypoints": 2048,
+    "keypoint_threshold": 0.002,
+    "match_threshold": 0.18,
     "sinkhorn_iterations": 20,
-    "min_matches": 10,
-    "min_inliers": 15,
-    "min_inlier_ratio": 0.2,
-    "max_reproj_error": 5.0,
+    "min_matches": 20,
+    "min_inliers": 25,
+    "min_inlier_ratio": 0.25,
+    "max_reproj_error": 4.0,
     "valid_patch_thr": 1.0,
     "mask_erode_kernel": 3,
     "mask_erode_iter": 1
@@ -50,7 +50,7 @@
       },
       "calibration": {
         "threshold_param": 97,
-        "threshold_floor": 0.0,
+        "threshold_floor": 0.415,
         "max_calib_images": 100,
         "min_th_calib_images": 30
       }
@@ -59,7 +59,8 @@
     "global_patch_with_aligned": {
       "preselect": {
         "mode": "vpr",
-        "top_m": 3
+        "top_m": 5,
+        "retry_top_m": 10
       },
       "cc": {
         "radius": 1,
@@ -82,7 +83,7 @@
       },
       "calibration": {
         "threshold_param": 97,
-        "threshold_floor": 0.45,
+        "threshold_floor": 0.42,
         "max_calib_images": 100,
         "min_th_calib_images": 30
       }
