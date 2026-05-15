@@ -1258,6 +1258,12 @@ class _AudioMarkerState extends ConsumerState<_AudioMarker>
   @override
   Widget build(BuildContext context) {
     final audio = widget.audio;
+
+    // 확인/라벨 처리된 오디오 이벤트는 지도에서 숨김
+    if (audio.adminChecked == 1 ||
+        (audio.adminLabel != null && audio.adminLabel!.isNotEmpty)) {
+      return const SizedBox.shrink();
+    }
     if (audio.x == null || audio.y == null) return const SizedBox.shrink();
 
     final transformed = widget.transformer.transform(
@@ -1345,6 +1351,12 @@ class _YoloRegionMarker extends ConsumerWidget {
 
     final bool isEnabled =
         region['is_enabled'] == 1 || region['is_enabled'] == true;
+    
+    final bool isPending =
+        region['is_pending'] == true ||
+        (region['region_id'] is int && region['region_id'] < 0);
+
+    final String regionName = region['name']?.toString() ?? '구역';
 
     return Positioned(
       left: left,
@@ -1417,8 +1429,8 @@ class _YoloRegionMarker extends ConsumerWidget {
                 : const Color(0xFF6B7280).withOpacity(0.05),
           ),
           child: Center(
-            child: Text(
-              region['name'] ?? '구역',
+          child: Text(
+            isPending ? '저장 중...' : regionName,
               style: TextStyle(
                 color: isEnabled
                     ? const Color(0xFF4ADE80)
